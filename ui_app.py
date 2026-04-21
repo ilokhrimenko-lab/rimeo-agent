@@ -187,11 +187,15 @@ class RimeoUI:
                 _statusbar_created = True
 
                 ns_app = AppKit.NSApplication.sharedApplication()
-                # Accessory = status-bar only, no separate Dock entry for the
-                # Python process (the Flet subprocess owns the Dock icon).
+                # Launch as a regular macOS app so first-time users always get
+                # a visible Dock presence and a predictable way back to the window.
                 ns_app.setActivationPolicy_(
-                    AppKit.NSApplicationActivationPolicyAccessory
+                    AppKit.NSApplicationActivationPolicyRegular
                 )
+                try:
+                    ns_app.activateIgnoringOtherApps_(True)
+                except Exception:
+                    pass
 
                 delegate = _build_macos_delegate()
                 if delegate is None:
@@ -1253,9 +1257,8 @@ def start_gui():
 
 def _start_gui_macos():
     """
-    macOS: flet-desktop (the Flutter subprocess) terminates when its window
-    is closed — this is standard macOS app lifecycle and cannot be overridden
-    in a pre-built binary.  We handle this by:
+    macOS: run as a normal app with a Dock icon, while also keeping the
+    status bar item alive as a secondary re-open path if the window closes.
 
       1. Running ft.app() in a loop so the window can be re-opened.
       2. Between Flet runs, pumping NSRunLoop on the main thread so the
