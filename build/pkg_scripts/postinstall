@@ -1,0 +1,4 @@
+#!/bin/bash
+# Remove macOS quarantine attribute so Gatekeeper doesn't block the app
+xattr -dr com.apple.quarantine /Applications/RimeoAgent.app 2>/dev/null || true
+exit 0

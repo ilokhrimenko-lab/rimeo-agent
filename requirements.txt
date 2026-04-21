@@ -1,0 +1,17 @@
+flet>=0.21.0
+fastapi
+uvicorn
+websockets>=12
+httpx>=0.27
+qrcode
+pydantic-settings
+pillow
+keyring
+pystray
+librosa
+torch
+transformers
+huggingface_hub
+
+# macOS only – hides Dock icon (gracefully ignored on Windows)
+pyobjc-framework-Cocoa; sys_platform == "darwin"

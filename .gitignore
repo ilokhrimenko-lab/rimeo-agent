@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Runtime data
+rimo_data.json
+analysis_data.json
+agent.log
+cache/
+macos_arm64/
+
+# Build output
+build/RimeoAgent/
+dist/
+*.spec
