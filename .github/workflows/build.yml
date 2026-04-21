@@ -59,7 +59,7 @@ jobs:
             --hidden-import "uvicorn.lifespan.on" \
             --hidden-import "fastapi" \
             --hidden-import "pydantic_settings" \
-            --pyinstaller-build-args "--additional-hooks-dir=build/hooks"
+            --pyinstaller-build-args="--additional-hooks-dir=build/hooks"
 
       - name: Package
         run: |
@@ -127,7 +127,7 @@ jobs:
             --hidden-import "uvicorn.lifespan.on" \
             --hidden-import "fastapi" \
             --hidden-import "pydantic_settings" \
-            --pyinstaller-build-args "--additional-hooks-dir=build/hooks"
+            --pyinstaller-build-args="--additional-hooks-dir=build/hooks"
 
       - name: Package
         run: |
@@ -182,7 +182,7 @@ jobs:
             --hidden-import "uvicorn.lifespan.on" `
             --hidden-import "fastapi" `
             --hidden-import "pydantic_settings" `
-            --pyinstaller-build-args "--additional-hooks-dir=build/hooks"
+            --pyinstaller-build-args="--additional-hooks-dir=build/hooks"
 
       - name: Package
         run: Compress-Archive -Path dist\RimeoAgent.exe -DestinationPath dist\RimeoAgent_win.zip -Force
