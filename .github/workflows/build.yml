@@ -59,7 +59,12 @@ jobs:
             --hidden-import "uvicorn.lifespan.on" \
             --hidden-import "fastapi" \
             --hidden-import "pydantic_settings" \
-            --pyinstaller-build-args "--additional-hooks-dir=build/hooks"
+            --collect-all "librosa" \
+            --collect-all "transformers" \
+            --collect-all "huggingface_hub" \
+            --collect-all "tokenizers" \
+            --collect-all "onnxruntime" \
+            --noconfirm
 
       - name: Package
         run: |
@@ -127,7 +132,12 @@ jobs:
             --hidden-import "uvicorn.lifespan.on" \
             --hidden-import "fastapi" \
             --hidden-import "pydantic_settings" \
-            --pyinstaller-build-args "--additional-hooks-dir=build/hooks"
+            --collect-all "librosa" \
+            --collect-all "transformers" \
+            --collect-all "huggingface_hub" \
+            --collect-all "tokenizers" \
+            --collect-all "onnxruntime" \
+            --noconfirm
 
       - name: Package
         run: |
@@ -185,6 +195,7 @@ jobs:
             --collect-all "transformers" `
             --collect-all "huggingface_hub" `
             --collect-all "tokenizers" `
+            --collect-all "onnxruntime" `
             --noconfirm
 
       - name: Package
