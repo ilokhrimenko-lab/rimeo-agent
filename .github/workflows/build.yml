@@ -19,7 +19,7 @@ jobs:
 
       - name: Install deps
         run: |
-          pip install "flet==0.28.3" pillow
+          pip install "flet==0.28.3" "flet-cli==0.28.3" pillow
           pip install torch --index-url https://download.pytorch.org/whl/cpu --quiet
 
       - name: Create icon
@@ -59,12 +59,7 @@ jobs:
             --hidden-import "uvicorn.lifespan.on" \
             --hidden-import "fastapi" \
             --hidden-import "pydantic_settings" \
-            --collect-all "librosa" \
-            --collect-all "transformers" \
-            --collect-all "huggingface_hub" \
-            --collect-all "tokenizers" \
-            --collect-all "onnxruntime" \
-            --noconfirm
+            --pyinstaller-build-args "--additional-hooks-dir=build/hooks"
 
       - name: Package
         run: |
@@ -92,7 +87,7 @@ jobs:
 
       - name: Install deps
         run: |
-          pip install "flet==0.28.3" pillow
+          pip install "flet==0.28.3" "flet-cli==0.28.3" pillow
           pip install torch --index-url https://download.pytorch.org/whl/cpu --quiet
 
       - name: Create icon
@@ -132,12 +127,7 @@ jobs:
             --hidden-import "uvicorn.lifespan.on" \
             --hidden-import "fastapi" \
             --hidden-import "pydantic_settings" \
-            --collect-all "librosa" \
-            --collect-all "transformers" \
-            --collect-all "huggingface_hub" \
-            --collect-all "tokenizers" \
-            --collect-all "onnxruntime" \
-            --noconfirm
+            --pyinstaller-build-args "--additional-hooks-dir=build/hooks"
 
       - name: Package
         run: |
@@ -165,7 +155,7 @@ jobs:
 
       - name: Install deps
         run: |
-          pip install "flet==0.28.3" pillow
+          pip install "flet==0.28.3" "flet-cli==0.28.3" pillow
           pip install torch --index-url https://download.pytorch.org/whl/cpu --quiet
 
       - name: Create icon
@@ -175,6 +165,7 @@ jobs:
       - name: Build
         run: |
           flet pack run.py `
+            -y `
             --name RimeoAgent `
             --product-name "Rimeo Agent" `
             --icon build/RimeoAgent.ico `
@@ -191,12 +182,7 @@ jobs:
             --hidden-import "uvicorn.lifespan.on" `
             --hidden-import "fastapi" `
             --hidden-import "pydantic_settings" `
-            --collect-all "librosa" `
-            --collect-all "transformers" `
-            --collect-all "huggingface_hub" `
-            --collect-all "tokenizers" `
-            --collect-all "onnxruntime" `
-            --noconfirm
+            --pyinstaller-build-args "--additional-hooks-dir=build/hooks"
 
       - name: Package
         run: Compress-Archive -Path dist\RimeoAgent.exe -DestinationPath dist\RimeoAgent_win.zip -Force
