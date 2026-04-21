@@ -9,6 +9,7 @@ Flow:
 Checks once per 24 h (timestamp in ~/.rimeo/last_update_check).
 Skipped entirely when not frozen (dev mode).
 """
+import platform
 import sys
 import json
 import shutil
@@ -41,12 +42,15 @@ class UpdateInfo:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _asset_name() -> str:
+def _asset_names() -> list[str]:
     if sys.platform == "darwin":
-        return "RimeoAgent_mac.zip"
+        machine = platform.machine().lower()
+        if machine in {"arm64", "aarch64"}:
+            return ["RimeoAgent_mac_arm64.zip", "RimeoAgent_mac.zip"]
+        return ["RimeoAgent_mac_intel.zip", "RimeoAgent_mac.zip"]
     if sys.platform == "win32":
-        return "RimeoAgent_win.zip"
-    return ""
+        return ["RimeoAgent_win.zip"]
+    return []
 
 
 def _due_for_check() -> bool:
@@ -80,8 +84,8 @@ def check_update() -> Optional[UpdateInfo]:
     if not _due_for_check():
         return None
 
-    asset = _asset_name()
-    if not asset:
+    asset_names = _asset_names()
+    if not asset_names:
         logger.debug("Auto-update: unsupported platform")
         return None
 
@@ -103,8 +107,10 @@ def check_update() -> Optional[UpdateInfo]:
         logger.info("Up to date (%s)", settings.VERSION)
         return None
 
-    for a in data.get("assets", []):
-        if a.get("name") == asset:
+    for asset_name in asset_names:
+        for a in data.get("assets", []):
+            if a.get("name") != asset_name:
+                continue
             logger.info("Update available: %s → %s", settings.VERSION, tag)
             return UpdateInfo(
                 version=tag,
@@ -112,7 +118,7 @@ def check_update() -> Optional[UpdateInfo]:
                 notes=(data.get("body") or "")[:400],
             )
 
-    logger.warning("Release %s has no asset '%s'", tag, asset)
+    logger.warning("Release %s has no supported asset from %s", tag, asset_names)
     return None
 
 
