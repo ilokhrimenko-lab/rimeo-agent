@@ -19,7 +19,7 @@ jobs:
 
       - name: Install deps
         run: |
-          pip install "flet==0.28.3" "flet-cli==0.28.3" pillow
+          pip install "flet==0.28.3" "flet-cli==0.28.3" pyinstaller pillow
           pip install torch --index-url https://download.pytorch.org/whl/cpu --quiet
 
       - name: Create icon
@@ -87,7 +87,7 @@ jobs:
 
       - name: Install deps
         run: |
-          pip install "flet==0.28.3" "flet-cli==0.28.3" pillow
+          pip install "flet==0.28.3" "flet-cli==0.28.3" pyinstaller pillow
           pip install torch --index-url https://download.pytorch.org/whl/cpu --quiet
 
       - name: Create icon
@@ -155,7 +155,7 @@ jobs:
 
       - name: Install deps
         run: |
-          pip install "flet==0.28.3" "flet-cli==0.28.3" pillow
+          pip install "flet==0.28.3" "flet-cli==0.28.3" pyinstaller pillow
           pip install torch --index-url https://download.pytorch.org/whl/cpu --quiet
 
       - name: Create icon
