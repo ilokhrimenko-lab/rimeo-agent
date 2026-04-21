@@ -46,11 +46,19 @@ def _asset_names() -> list[str]:
     if sys.platform == "darwin":
         machine = platform.machine().lower()
         if machine in {"arm64", "aarch64"}:
-            return ["RimeoAgent_mac_arm64.zip", "RimeoAgent_mac.zip"]
-        return ["RimeoAgent_mac_intel.zip", "RimeoAgent_mac.zip"]
+            return ["RimeoAgent_mac_arm64.zip"]
+        return []
     if sys.platform == "win32":
         return ["RimeoAgent_win.zip"]
     return []
+
+
+def _format_release_label(tag: str) -> str:
+    tag = (tag or "").strip()
+    if tag.startswith("v1.0-build"):
+        build_number = tag.split("build", 1)[-1]
+        return f"1.0 (build {build_number})"
+    return tag
 
 
 def _due_for_check() -> bool:
@@ -92,7 +100,7 @@ def check_update() -> Optional[UpdateInfo]:
     try:
         req = urllib.request.Request(
             _API_URL,
-            headers={"User-Agent": f"RimeoAgent/{settings.VERSION}"},
+            headers={"User-Agent": f"RimeoAgent/{settings.DISPLAY_VERSION}"},
         )
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read())
@@ -103,17 +111,17 @@ def check_update() -> Optional[UpdateInfo]:
 
     _stamp()
     tag = data.get("tag_name", "")
-    if not tag or tag == settings.VERSION:
-        logger.info("Up to date (%s)", settings.VERSION)
+    if not tag or tag == settings.RELEASE_TAG:
+        logger.info("Up to date (%s)", settings.DISPLAY_VERSION)
         return None
 
     for asset_name in asset_names:
         for a in data.get("assets", []):
             if a.get("name") != asset_name:
                 continue
-            logger.info("Update available: %s → %s", settings.VERSION, tag)
+            logger.info("Update available: %s → %s", settings.DISPLAY_VERSION, tag)
             return UpdateInfo(
-                version=tag,
+                version=_format_release_label(tag),
                 download_url=a["browser_download_url"],
                 notes=(data.get("body") or "")[:400],
             )
@@ -150,7 +158,7 @@ def download_and_apply(
     try:
         req = urllib.request.Request(
             info.download_url,
-            headers={"User-Agent": f"RimeoAgent/{settings.VERSION}"},
+            headers={"User-Agent": f"RimeoAgent/{settings.DISPLAY_VERSION}"},
         )
         with urllib.request.urlopen(req, timeout=300) as resp:
             total = int(resp.headers.get("Content-Length") or 0)

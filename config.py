@@ -8,6 +8,14 @@ warnings.filterwarnings("ignore", category=Warning, module="urllib3")
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
+from .build_info import VERSION as BUILD_VERSION, BUILD_NUMBER, RELEASE_TAG
+
+
+def _display_version(version: str, build_number: str) -> str:
+    build_number = (build_number or "").strip()
+    if not build_number or build_number.lower() == "dev":
+        return version
+    return f"{version} (build {build_number})"
 
 
 def _get_app_data_dir() -> Path:
@@ -54,7 +62,10 @@ def _load_persistent_agent_id() -> str:
 
 class RimeoSettings(BaseSettings):
     # --- Project Info ---
-    VERSION: str = "v1.0.1"
+    VERSION: str = BUILD_VERSION
+    BUILD_NUMBER: str = BUILD_NUMBER
+    RELEASE_TAG: str = RELEASE_TAG
+    DISPLAY_VERSION: str = _display_version(BUILD_VERSION, BUILD_NUMBER)
     APP_NAME: str = "Rimeo Desktop Agent"
 
     # --- Server Config ---

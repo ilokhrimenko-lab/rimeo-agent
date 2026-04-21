@@ -1,0 +1,4 @@
+VERSION = "1.0"
+BUILD_NUMBER = "100"
+RELEASE_TAG = "v1.0-build100"
+

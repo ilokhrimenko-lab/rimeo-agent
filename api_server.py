@@ -27,7 +27,7 @@ _CLOUD_HEADERS = {
 from .config import settings, logger
 from .parser import parse_library
 
-app = FastAPI(title=settings.APP_NAME, version=settings.VERSION)
+app = FastAPI(title=settings.APP_NAME, version=settings.DISPLAY_VERSION)
 
 app.add_middleware(
     CORSMiddleware,
@@ -569,7 +569,7 @@ async def get_status():
     db_exists = bool(db_path) and os.path.exists(db_path)
     return {
         "agent_id":   settings.AGENT_ID,
-        "version":    settings.VERSION,
+        "version":    settings.DISPLAY_VERSION,
         "xml_path":   xml_path,
         "xml_exists": os.path.exists(xml_path) if xml_path else False,
         "db_path":    db_path,
