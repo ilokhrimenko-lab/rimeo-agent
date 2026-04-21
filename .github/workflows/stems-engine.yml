@@ -1,0 +1,109 @@
+name: Stems engine (Windows)
+
+# Движок Stems (#177) для Windows: PyInstaller onedir → stems-engine-windows-x86_64-<версия>.zip.
+# Отдельный от Build workflow и ТОЛЬКО ручной: агентские теги (v*, mac-v*, win-v*) его не трогают,
+# а рабочая матрица агента не меняется. Мак-движки собираются локально (build_engine.sh на маке
+# с Apple Silicon / Intel), этот — здесь, потому что Windows-машины для релизных сборок у нас нет.
+#
+# Раннер x64: PyInstaller кросс-сборку не умеет. Windows 11 на ARM64 запускает x64 под эмуляцией —
+# так же, как rbdb-sync-helper в build.yml.
+#
+# Готовый zip кладётся артефактом. В релиз (stems-v1 и т.п.) — только если задан release_tag:
+# zip загружается с --clobber, SHA256SUMS релиза дописывается строкой этого файла.
+
+on:
+  workflow_dispatch:
+    inputs:
+      src_ref:
+        description: 'Ветка или тег закрытого rimeo-agent-src'
+        required: true
+        default: 'main'
+      release_tag:
+        description: 'Релиз, куда положить zip (пусто — только артефакт)'
+        required: false
+        default: ''
+
+jobs:
+  build-engine-windows:
+    name: stems-engine windows x86_64
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ilokhrimenko-lab/rimeo-agent-src
+          ref: ${{ inputs.src_ref }}
+          ssh-key: ${{ secrets.SRC_DEPLOY_KEY }}
+
+      # 3.11 — как у мак-движков (uv, python-build-standalone 3.11): один интерпретатор,
+      # один резолв numpy/onnxruntime на всех платформах.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: ffmpeg for tests
+        shell: pwsh
+        run: |
+          choco install ffmpeg --no-progress -y | Out-Null
+          ffmpeg -version | Select-Object -First 1
+
+      - name: venv
+        shell: pwsh
+        working-directory: stems_engine
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -m venv .venv
+          .venv\Scripts\python.exe -m pip install --quiet --upgrade pip
+          .venv\Scripts\python.exe -m pip install --quiet -r requirements-windows-amd64.txt
+
+      - name: Tests (source)
+        shell: pwsh
+        working-directory: stems_engine
+        run: .venv\Scripts\python.exe tests\run_tests.py
+
+      - name: Build
+        shell: pwsh
+        run: pwsh stems_engine\build_engine.ps1
+
+      - name: Tests (frozen binary)
+        shell: pwsh
+        working-directory: stems_engine
+        run: .venv\Scripts\python.exe tests\run_tests.py --bin dist\stems-engine\stems-engine.exe
+
+      - name: sha256
+        id: zip
+        shell: pwsh
+        working-directory: stems_engine\dist
+        run: |
+          $z = Get-ChildItem stems-engine-windows-*.zip | Select-Object -First 1
+          $h = (Get-FileHash $z.FullName -Algorithm SHA256).Hash.ToLower()
+          "$h  $($z.Name)" | Tee-Object -FilePath "$($z.Name).sha256"
+          "name=$($z.Name)" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stems-engine-windows
+          path: |
+            stems_engine/dist/stems-engine-windows-*.zip
+            stems_engine/dist/*.sha256
+          retention-days: 30
+
+      - name: Upload to release
+        if: inputs.release_tag != ''
+        shell: pwsh
+        working-directory: stems_engine\dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ inputs.release_tag }}
+          NAME: ${{ steps.zip.outputs.name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          gh release upload $env:TAG $env:NAME -R $env:REPO --clobber
+          gh release download $env:TAG -R $env:REPO -p SHA256SUMS -D sums --clobber
+          $line = Get-Content "$env:NAME.sha256"
+          $keep = Get-Content sums\SHA256SUMS | Where-Object { $_ -notmatch [regex]::Escape($env:NAME) }
+          [IO.File]::WriteAllText("$PWD\SHA256SUMS", ((@($keep) + $line) -join "`n") + "`n")
+          gh release upload $env:TAG SHA256SUMS -R $env:REPO --clobber
+          Get-Content SHA256SUMS

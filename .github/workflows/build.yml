@@ -1,0 +1,700 @@
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      src_ref:
+        description: 'Ветка или тег закрытого rimeo-agent-src (пробная сборка без релиза)'
+        required: false
+        default: 'main'
+  push:
+    tags:
+      - 'v*'
+      - 'mac-v*'
+      - 'win-v*'
+
+jobs:
+  build-mac:
+    name: macOS Apple Silicon (arm64)
+    runs-on: macos-latest
+    if: "!startsWith(github.ref_name, 'win-')"
+    steps:
+      # Исходники агента живут в закрытом ilokhrimenko-lab/rimeo-agent-src (с 22.09.2026).
+      # Этот публичный репозиторий держит только сборку и релизы: автообновление агентов,
+      # кнопки Download на rimeo.app и письма берут файлы из ЕГО релизов, поэтому он остаётся
+      # публичным. Код читаем read-only deploy-ключом; на тег берём ТОТ ЖЕ тег из закрытого.
+      - uses: actions/checkout@v4
+        with:
+          repository: ilokhrimenko-lab/rimeo-agent-src
+          ref: ${{ github.ref_type == 'tag' && github.ref_name || inputs.src_ref || 'main' }}
+          ssh-key: ${{ secrets.SRC_DEPLOY_KEY }}
+
+      - name: Prepare build metadata
+        run: |
+          TAG_NAME="${GITHUB_REF_NAME}"
+          BUILD_NUMBER=$(printf '%s' "$TAG_NAME" | sed -n 's/^\(mac-\)\{0,1\}v1\.0-build\([0-9][0-9]*\)$/\2/p')
+          if [ -z "$BUILD_NUMBER" ]; then
+            BUILD_NUMBER="${GITHUB_RUN_NUMBER}"
+          fi
+          printf 'VERSION = "1.0"\nBUILD_NUMBER = "%s"\nRELEASE_TAG = "%s"\n' "$BUILD_NUMBER" "$TAG_NAME" > build_info.py
+
+      - name: Create icon
+        run: |
+          ICON_ICNS="$RUNNER_TEMP/RimeoAgent.icns"
+          cp rimeo1024-bigsur.icns "$ICON_ICNS"
+          echo "ICON_ICNS=$ICON_ICNS" >> "$GITHUB_ENV"
+
+      - name: Build Rekordbox sync helper (frozen)
+        run: |
+          set -euo pipefail
+          # Запись в master.db делает не Swift, а frozen-бинарь с pyrekordbox внутри:
+          # у пользователя на машине нет ни pyrekordbox, ни sqlcipher3, и поставить их
+          # мы не можем. Без этого шага в релиз уезжает агент, у которого кнопка Sync
+          # молча не работает («rbdb-sync-helper not bundled»).
+          #
+          # --onedir, НЕ --onefile (задача #94). onefile на КАЖДЫЙ Sync распаковывал ~143 МБ во
+          # временную папку, и система заново проверяла свежие .so: юзер ждал 30+ секунд при
+          # ~1 с реальной записи. onedir распакован один раз — здесь, на CI.
+          # frida исключена: pyrekordbox тянет её только ради KeyExtractor (нам не нужен,
+          # ключ кладём в кеш сами), а это 96 МБ. В rbdb_sync_helper.py стоит заглушка.
+          cd rbdb_sync_helper
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet --upgrade pip
+          .venv/bin/pip install --quiet pyrekordbox==0.4.3 sqlcipher3-wheels pyinstaller
+          .venv/bin/pyinstaller \
+            --onedir --name rbdb-sync-helper --clean --noconfirm --strip --console \
+            --collect-all pyrekordbox --collect-all sqlcipher3 \
+            --hidden-import sqlalchemy --hidden-import construct \
+            --exclude-module frida --exclude-module frida_tools \
+            --exclude-module matplotlib --exclude-module pandas --exclude-module PIL \
+            --exclude-module tkinter --exclude-module pytest \
+            rbdb_sync_helper.py
+          HELPER_BIN=dist/rbdb-sync-helper/rbdb-sync-helper
+          if [ ! -x "$HELPER_BIN" ] || [ ! -d dist/rbdb-sync-helper/_internal ]; then
+            echo "::error::rbdb-sync-helper не собрался — Sync в Rekordbox не будет работать"
+            exit 1
+          fi
+          echo "sync helper: $(du -sh dist/rbdb-sync-helper | cut -f1 | tr -d ' '), archs: $(lipo -archs "$HELPER_BIN")"
+          if [ -e dist/rbdb-sync-helper/_internal/frida ]; then
+            echo "::error::frida попала в сборку — исключение не сработало, хелпер снова распух"
+            exit 1
+          fi
+          # Дымовой прогон (как на Windows): несуществующая база. preflight() ИМПОРТИРУЕТ
+          # pyrekordbox/sqlalchemy/sqlcipher3 до открытия базы, поэтому:
+          #   db_not_found       → импорты живы (и заглушка frida тоже);
+          #   helper_unavailable → импорт сорвался, бинарь мёртвый.
+          echo '{"ops":[]}' > "$RUNNER_TEMP/smoke_plan.json"
+          SMOKE_ERR=$("$HELPER_BIN" "$RUNNER_TEMP/nonexistent.db" "$RUNNER_TEMP/smoke_plan.json" "$RUNNER_TEMP/smoke_out.json" 2>&1 >/dev/null || true)
+          echo "smoke stderr: $SMOKE_ERR"
+          if ! grep -q '"db_not_found"' <<< "$SMOKE_ERR"; then
+            echo "::error::rbdb-sync-helper не дошёл до открытия базы (ожидали db_not_found) — Sync упал бы у пользователя"
+            exit 1
+          fi
+
+      - name: Build macOS app (Universal — arm64 + x86_64)
+        run: |
+          cd macos_arm64
+          swift build -c release --arch arm64 --arch x86_64
+
+          UNIVERSAL="$PWD/.build/apple/Products/Release/RimeoAgent"
+          HELPER="$PWD/.build/apple/Products/Release/RekordboxDBHelper"
+          SQLCIPHER_FRAMEWORK="$PWD/.build/artifacts/sqlcipher.swift/SQLCipher/SQLCipher.xcframework/macos-arm64_x86_64/SQLCipher.framework"
+          if [ ! -f "$UNIVERSAL" ]; then
+            echo "ERROR: universal binary not found at $UNIVERSAL"
+            exit 1
+          fi
+          if [ ! -f "$HELPER" ]; then
+            echo "ERROR: helper binary not found at $HELPER"
+            exit 1
+          fi
+          if [ ! -d "$SQLCIPHER_FRAMEWORK" ]; then
+            echo "ERROR: SQLCipher.framework not found at $SQLCIPHER_FRAMEWORK"
+            exit 1
+          fi
+          echo "Universal archs: $(lipo -archs "$UNIVERSAL")"
+          echo "Helper archs: $(lipo -archs "$HELPER")"
+
+          APP="$GITHUB_WORKSPACE/dist/RimeoAgent.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
+          cp "$UNIVERSAL" "$APP/Contents/MacOS/RimeoAgent"
+          chmod +x "$APP/Contents/MacOS/RimeoAgent"
+          cp "$HELPER" "$APP/Contents/MacOS/rbdb-helper"
+          chmod +x "$APP/Contents/MacOS/rbdb-helper"
+          # Frozen-хелпер ЗАПИСИ (не путать с rbdb-helper выше — тот только читает базу).
+          # onedir → Contents/Resources/rbdb-sync-helper/ (exe + _internal/). Почему Resources,
+          # а не MacOS/Frameworks — см. rbdb_sync_helper/sign_helper_dir.sh.
+          SYNC_HELPER="$GITHUB_WORKSPACE/rbdb_sync_helper/dist/rbdb-sync-helper"
+          if [ ! -x "$SYNC_HELPER/rbdb-sync-helper" ]; then
+            echo "::error::rbdb-sync-helper не найден — Sync в Rekordbox не будет работать"
+            exit 1
+          fi
+          ditto "$SYNC_HELPER" "$APP/Contents/Resources/rbdb-sync-helper"
+          cp -R "$SQLCIPHER_FRAMEWORK" "$APP/Contents/Frameworks/SQLCipher.framework"
+          install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/rbdb-helper"
+          cp build/Info.plist "$APP/Contents/Info.plist"
+          cp "$ICON_ICNS" "$APP/Contents/Resources/RimeoAgent.icns"
+          cp "$GITHUB_WORKSPACE/build_info.py" "$APP/Contents/Resources/build_info.py"
+          cp "$GITHUB_WORKSPACE/similarity_config.json" "$APP/Contents/Resources/similarity_config.json"
+          cp "$GITHUB_WORKSPACE/rimeo1024.png" "$APP/Contents/Resources/rimeo1024.png"
+          # Built-in royalty-free review library (15 tracks + audio). The agent
+          # switches to it at runtime when signed in as demo@rimeo.app — see
+          # AppConfig.activateReviewMode(). Lets App Review see a working library
+          # straight from the downloaded agent, with no real Rekordbox install.
+          cp -R "$GITHUB_WORKSPACE/review_library" "$APP/Contents/Resources/review_library"
+          # LaunchAgent автозапуска (регистрируется через SMAppService.agent(plistName:)).
+          # Кладём ДО подписи: Contents/Library входит в опечатанный бандл, дописать плист
+          # после codesign нельзя — это сломает `codesign --verify --deep --strict`, который
+          # агент прогоняет на КАЖДОМ автообновлении (UpdateSignatureVerifier).
+          mkdir -p "$APP/Contents/Library/LaunchAgents"
+          cp build/app.rimeo.agent.autostart.plist "$APP/Contents/Library/LaunchAgents/app.rimeo.agent.autostart.plist"
+
+      - name: Sign macOS app (Developer ID + hardened runtime)
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          set -e
+          if [ -z "$MACOS_CERT_P12" ]; then
+            echo "::error::MACOS_CERT_P12 secret not set — refusing to ship an adhoc-signed build (Gatekeeper would block it)"
+            exit 1
+          fi
+          if [ -z "$SIGN_IDENTITY" ]; then
+            echo "::error::MACOS_SIGN_IDENTITY secret not set (expected: 'Developer ID Application: ... (TEAMID)')"
+            exit 1
+          fi
+          ID="$SIGN_IDENTITY"
+          APP="$GITHUB_WORKSPACE/dist/RimeoAgent.app"
+          CERT_P12="$RUNNER_TEMP/cert.p12"
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$CERT_P12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$CERT_P12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed s/\"//g)
+          FW="$APP/Contents/Frameworks/SQLCipher.framework"
+          if [ -d "$FW" ] && [ ! -L "$FW/SQLCipher" ]; then
+            ( cd "$FW"
+              rm -rf Headers Modules Resources SQLCipher Versions/Current
+              ln -s A Versions/Current
+              [ -e Versions/Current/Headers ]   && ln -s Versions/Current/Headers Headers   || true
+              [ -e Versions/Current/Modules ]   && ln -s Versions/Current/Modules Modules   || true
+              [ -e Versions/Current/Resources ] && ln -s Versions/Current/Resources Resources || true
+              ln -s Versions/Current/SQLCipher SQLCipher )
+          fi
+          # Подпись изнутри наружу с hardened runtime (--options runtime) и
+          # доверенным timestamp — обязательные условия нотаризации Apple.
+          # SQLCipher.framework подписан той же командой -> library validation
+          # пропускает его без disable-library-validation.
+          # NB: "$ID" обязательно в кавычках — identity содержит пробелы.
+          [ -d "$FW" ] && codesign --force --timestamp --options runtime --sign "$ID" "$FW/Versions/A"
+          codesign --force --timestamp --options runtime --sign "$ID" "$APP/Contents/MacOS/rbdb-helper"
+          # rbdb-sync-helper (onedir в Contents/Resources): каждый .so/.dylib подписываем сами —
+          # codesign --deep в Resources код не ищет, а нотаризация требует подписи у ВСЕХ Mach-O.
+          # Подробности — в rbdb_sync_helper/sign_helper_dir.sh и sync-helper.entitlements.
+          bash "$GITHUB_WORKSPACE/rbdb_sync_helper/sign_helper_dir.sh" \
+               "$APP/Contents/Resources/rbdb-sync-helper" "$ID" \
+               "$GITHUB_WORKSPACE/macos_arm64/build/sync-helper.entitlements" \
+               --timestamp --options runtime
+          codesign --force --timestamp --options runtime --sign "$ID" "$APP/Contents/MacOS/RimeoAgent"
+          codesign --force --timestamp --options runtime --sign "$ID" --identifier app.rimeo.agent "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign -dvv "$APP" 2>&1 | grep -E "Identifier|Authority|TeamIdentifier|Sealed"
+          # Дымовой прогон ПОДПИСАННОГО хелпера: hardened runtime + library validation
+          # проверяются только при запуске. Неподписанный .so здесь убил бы процесс — лучше
+          # узнать на CI, чем по кнопке Sync у пользователя.
+          echo '{"ops":[]}' > "$RUNNER_TEMP/smoke_plan.json"
+          SMOKE_ERR=$("$APP/Contents/Resources/rbdb-sync-helper/rbdb-sync-helper" "$RUNNER_TEMP/nonexistent.db" "$RUNNER_TEMP/smoke_plan.json" "$RUNNER_TEMP/smoke_out.json" 2>&1 >/dev/null || true)
+          echo "signed smoke stderr: $SMOKE_ERR"
+          if ! grep -q '"db_not_found"' <<< "$SMOKE_ERR"; then
+            echo "::error::подписанный rbdb-sync-helper не запускается (hardened runtime / library validation)"
+            exit 1
+          fi
+          # Хелпер не должен ничего дописывать в бандл при запуске (__pycache__ и т.п.) —
+          # иначе печать подписи сломается у пользователя после первого же Sync.
+          codesign --verify --deep --strict "$APP"
+
+      - name: Notarize & staple macOS app
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_BASE64: ${{ secrets.ASC_API_KEY_BASE64 }}
+        run: |
+          set -e
+          if [ -z "$ASC_API_KEY_BASE64" ]; then
+            echo "::error::ASC_API_KEY_BASE64 secret not set — cannot notarize (Gatekeeper would still warn)"
+            exit 1
+          fi
+          APP="$GITHUB_WORKSPACE/dist/RimeoAgent.app"
+          API_KEY="$RUNNER_TEMP/asc_api_key.p8"
+          echo "$ASC_API_KEY_BASE64" | base64 --decode > "$API_KEY"
+          ZIP="$RUNNER_TEMP/RimeoAgent_notarize.zip"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+          xcrun notarytool submit "$ZIP" \
+            --key "$API_KEY" \
+            --key-id "$ASC_API_KEY_ID" \
+            --issuer "$ASC_API_ISSUER_ID" \
+            --wait
+          # Прикрепляем билет к .app — дальше Package зипует уже нотаризованный бандл.
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+          spctl --assess --type execute --verbose=4 "$APP" || true
+
+      - name: Package
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent RimeoAgent.app RimeoAgent_mac.zip
+
+      # DMG собирается из уже подписанного/нотаризованного/застейпленного .app —
+      # билет лежит внутри бандла и переезжает в образ вместе с ним.
+      # RimeoAgent_mac.zip при этом НЕ уходит: на его имя завязан UpdateChecker
+      # всех установленных агентов, релиз обязан содержать оба ассета.
+      - name: Build DMG
+        run: |
+          set -e
+          # dmgbuild ставим в venv: python3 на раннере Homebrew-managed (PEP 668),
+          # прямой "pip3 install" падает с externally-managed-environment.
+          VENV="$RUNNER_TEMP/dmgvenv"
+          python3 -m venv "$VENV"
+          "$VENV/bin/pip" install --quiet --upgrade pip
+          "$VENV/bin/pip" install --quiet dmgbuild
+          DMGBUILD="$VENV/bin/dmgbuild" bash "$GITHUB_WORKSPACE/packaging/dmg/make_dmg.sh" \
+            "$GITHUB_WORKSPACE/dist/RimeoAgent.app" \
+            "$GITHUB_WORKSPACE/dist/RimeoAgent.dmg"
+          if [ ! -f "$GITHUB_WORKSPACE/dist/RimeoAgent.dmg" ]; then
+            echo "::error::RimeoAgent.dmg was not produced by make_dmg.sh"
+            exit 1
+          fi
+
+      - name: Sign DMG (Developer ID)
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          set -e
+          ID="$SIGN_IDENTITY"
+          DMG="$GITHUB_WORKSPACE/dist/RimeoAgent.dmg"
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          # Кейчейн из шага подписи .app остаётся в списке поиска, но мог
+          # залочиться по таймауту — разблокируем повторно.
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # К образу hardened runtime неприменим (--options runtime только для кода),
+          # но доверенный timestamp обязателен, иначе нотаризация отклонит.
+          codesign --force --timestamp --sign "$ID" "$DMG"
+          codesign --verify --strict --verbose=2 "$DMG"
+
+      - name: Notarize & staple DMG
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_BASE64: ${{ secrets.ASC_API_KEY_BASE64 }}
+        run: |
+          set -e
+          DMG="$GITHUB_WORKSPACE/dist/RimeoAgent.dmg"
+          API_KEY="$RUNNER_TEMP/asc_api_key.p8"
+          echo "$ASC_API_KEY_BASE64" | base64 --decode > "$API_KEY"
+          # Отдельный submit: билет .app на образ НЕ распространяется — скачанный
+          # .dmg приходит с карантином и должен нести собственный билет.
+          xcrun notarytool submit "$DMG" \
+            --key "$API_KEY" \
+            --key-id "$ASC_API_KEY_ID" \
+            --issuer "$ASC_API_ISSUER_ID" \
+            --wait
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG" || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: |
+            dist/RimeoAgent_mac.zip
+            dist/RimeoAgent.dmg
+
+  build-windows:
+    name: Windows (${{ matrix.arch }})
+    runs-on: windows-2022
+    if: "!startsWith(github.ref_name, 'mac-')"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: win-x64
+            arch: x64
+            zip: RimeoAgent_win.zip
+            setup: RimeoAgentSetup_win.exe
+          - rid: win-arm64
+            arch: arm64
+            zip: RimeoAgent_win-arm64.zip
+            setup: RimeoAgentSetup_win-arm64.exe
+    steps:
+      # Исходники агента живут в закрытом ilokhrimenko-lab/rimeo-agent-src (с 22.09.2026).
+      # Этот публичный репозиторий держит только сборку и релизы: автообновление агентов,
+      # кнопки Download на rimeo.app и письма берут файлы из ЕГО релизов, поэтому он остаётся
+      # публичным. Код читаем read-only deploy-ключом; на тег берём ТОТ ЖЕ тег из закрытого.
+      - uses: actions/checkout@v4
+        with:
+          repository: ilokhrimenko-lab/rimeo-agent-src
+          ref: ${{ github.ref_type == 'tag' && github.ref_name || inputs.src_ref || 'main' }}
+          ssh-key: ${{ secrets.SRC_DEPLOY_KEY }}
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Prepare build metadata
+        shell: pwsh
+        run: |
+          $tagName = $env:GITHUB_REF_NAME
+          $buildNumber = [regex]::Match($tagName, '^(win-)?v1\.0-build(\d+)$').Groups[2].Value
+          if ([string]::IsNullOrWhiteSpace($buildNumber)) {
+            $buildNumber = $env:GITHUB_RUN_NUMBER
+          }
+          "VERSION = `"1.0`"`nBUILD_NUMBER = `"$buildNumber`"`nRELEASE_TAG = `"$tagName`"" | Set-Content -Path build_info.py -Encoding utf8
+
+      - name: Create icon
+        shell: pwsh
+        run: |
+          python -m pip install pillow "qrcode[pil]" --quiet
+          python -c "from PIL import Image; img=Image.open('rimeo1024-bigsur.icns').convert('RGBA'); img.save(r'windows_csharp\RimeoAgent\Assets\rimeo.ico', format='ICO', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+          # Sidebar brand logo (real asset, not a drawn "R") — copied into Assets so the build packages it.
+          Copy-Item rimeo1024.png windows_csharp\RimeoAgent\Assets\rimeo1024.png -Force
+          # QR for the "Get the app" flyout — encodes rimeo.app/open (static URL).
+          python -c "import qrcode; qrcode.make('https://rimeo.app/open').save(r'windows_csharp\RimeoAgent\Assets\qr_open.png')"
+
+      - name: Show .NET environment
+        shell: pwsh
+        working-directory: windows_csharp
+        run: |
+          dotnet --info
+          dotnet --list-sdks
+
+      - name: Restore
+        shell: pwsh
+        working-directory: windows_csharp
+        run: |
+          dotnet restore RimeoAgent/RimeoAgent.csproj `
+            -r ${{ matrix.rid }}
+
+      # Запись в master.db делает не C#, а frozen-бинарь с pyrekordbox внутри:
+      # у пользователя на машине нет ни pyrekordbox, ни sqlcipher3, и поставить их
+      # мы не можем. Без этого шага в релиз уехал бы агент, у которого кнопка Sync
+      # молча не работает («rbdb-sync-helper not bundled»).
+      #
+      # ХЕЛПЕР ВСЕГДА x64 — И КЛАДЁТСЯ В ОБЕ СБОРКИ. Раннер один (windows-2022, x64), а
+      # PyInstaller не умеет кросс-компиляцию: он «замораживает» тот интерпретатор, под
+      # которым запущен. Значит на любой леге матрицы из него выйдет x64-бинарь.
+      #
+      # Класть его ТОЛЬКО в x64-zip — ошибка, которую мы сначала и сделали: Windows 11 на
+      # ARM64 УМЕЕТ запускать x64 под эмуляцией, и RekordboxWriter это учитывает
+      # (CanRunOnThisMachine проверяет сборку ОС: Win11 22000+ → x64-хелпер годен, Win10
+      # ARM64 → нет, там эмулируется только x86). Не положив бинарь в arm64-пакет, мы бы
+      # сами превратили эту ветку в мёртвый код и молча лишили ARM-пользователей синка.
+      #
+      # Поэтому: собираем и бандлим на ОБЕИХ легах, а «запустится ли» решает рантайм-
+      # проверка внутри агента — она же и отвечает за честность capability playlist_sync.
+      # runs-on НЕ меняем и arm64-раннер НЕ добавляем: рабочую матрицу не ломаем.
+      # Питон пиним ЯВНО: дефолтный python на образе windows-2022 — не тот, что берёт
+      # маковая лега (python3 = 3.12), а PyInstaller замораживает ИМЕННО тот интерпретатор,
+      # под которым запущен. Разные питоны → разный резолв зависимостей → «на маке синк
+      # работает, на винде нет» с неотлаживаемой причиной.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build Rekordbox sync helper (frozen, x64 binary for both RIDs)
+        shell: pwsh
+        working-directory: rbdb_sync_helper
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -m venv .venv
+          .venv\Scripts\python.exe -m pip install --quiet --upgrade pip
+          # sqlcipher3-wheels публикует колёса под win32/win_amd64/win_arm64 — стек
+          # ставится из бинарников, компилятор SQLCipher на раннере не нужен.
+          .venv\Scripts\python.exe -m pip install --quiet pyrekordbox==0.4.3 sqlcipher3-wheels pyinstaller
+          # Флаги те же, что на маке, кроме --strip: на Windows PyInstaller его игнорирует
+          # (нужен objcopy из binutils), только шумит предупреждением.
+          # --onedir, НЕ --onefile, и без frida — задача #94, подробности в мак-леге выше:
+          # onefile на КАЖДЫЙ Sync распаковывал весь питон во %TEMP%, а Defender заново
+          # сканировал каждый свежий .pyd/.dll — десятки секунд при ~1 с реальной записи.
+          .venv\Scripts\pyinstaller.exe `
+            --onedir --name rbdb-sync-helper --clean --noconfirm --console `
+            --collect-all pyrekordbox --collect-all sqlcipher3 `
+            --hidden-import sqlalchemy --hidden-import construct `
+            --exclude-module frida --exclude-module frida_tools `
+            --exclude-module matplotlib --exclude-module pandas --exclude-module PIL `
+            --exclude-module tkinter --exclude-module pytest `
+            rbdb_sync_helper.py
+          # Fail-fast: молча выкатить агента с нерабочей кнопкой Sync нельзя —
+          # пользователь нажмёт, плейлисты «уйдут», а в Rekordbox их не будет.
+          $helperExe = "dist\rbdb-sync-helper\rbdb-sync-helper.exe"
+          if (-not (Test-Path $helperExe) -or -not (Test-Path "dist\rbdb-sync-helper\_internal")) {
+            Write-Host "::error::rbdb-sync-helper не собрался — Sync в Rekordbox не будет работать"
+            exit 1
+          }
+          if (Test-Path "dist\rbdb-sync-helper\_internal\frida") {
+            Write-Host "::error::frida попала в сборку — исключение не сработало, хелпер снова распух"
+            exit 1
+          }
+          $size = [math]::Round(((Get-ChildItem "dist\rbdb-sync-helper" -Recurse -File | Measure-Object Length -Sum).Sum) / 1MB, 1)
+          Write-Host "sync helper: dist\rbdb-sync-helper\ ($size MB)"
+
+          # ⚠️ ПРОВЕРКИ «ФАЙЛ СУЩЕСТВУЕТ» НЕДОСТАТОЧНО. PyInstaller регулярно теряет
+          # скрытые импорты: exe собирается, весит свои 50 МБ — и падает на первом же
+          # `import pyrekordbox`. Пользователь при этом видит АКТИВНУЮ кнопку Sync
+          # (capability смотрит на наличие бинаря), жмёт — и получает 500.
+          #
+          # Дымовой прогон: скармливаем несуществующую базу. Хелпер сначала делает
+          # preflight() (ИМПОРТИРУЕТ pyrekordbox / sqlalchemy / sqlcipher3), и только потом
+          # доходит до открытия базы. Значит:
+          #   stderr содержит "db_not_found"      → импорты живы, бинарь рабочий;
+          #   stderr содержит "helper_unavailable" → импорт сорвался, бинарь мёртвый.
+          '{"ops":[]}' | Set-Content -Path "$env:RUNNER_TEMP\smoke_plan.json" -Encoding utf8
+          $stderrFile = "$env:RUNNER_TEMP\smoke_err.txt"
+          $p = Start-Process -FilePath $helperExe `
+                 -ArgumentList "$env:RUNNER_TEMP\nonexistent.db","$env:RUNNER_TEMP\smoke_plan.json","$env:RUNNER_TEMP\smoke_out.json" `
+                 -NoNewWindow -Wait -PassThru -RedirectStandardError $stderrFile
+          $err = (Get-Content $stderrFile -Raw) ?? ""
+          Write-Host "smoke stderr: $err"
+          if ($err -match "helper_unavailable") {
+            Write-Host "::error::rbdb-sync-helper.exe собрался, но не может импортировать pyrekordbox/sqlcipher3 — Sync упал бы у пользователя"
+            exit 1
+          }
+          if ($err -notmatch "db_not_found") {
+            Write-Host "::error::rbdb-sync-helper.exe повёл себя неожиданно на дымовом прогоне (ожидали db_not_found): $err"
+            exit 1
+          }
+          Write-Host "smoke OK: pyrekordbox + sqlcipher3 импортируются, хелпер дошёл до открытия базы"
+
+      - name: Publish
+        shell: pwsh
+        working-directory: windows_csharp
+        run: |
+          dotnet publish RimeoAgent/RimeoAgent.csproj `
+            -c Release `
+            -r ${{ matrix.rid }} `
+            --no-restore `
+            --self-contained true `
+            -o ..\dist\RimeoAgent
+
+      - name: Ensure resources.pri in publish output
+        shell: pwsh
+        working-directory: windows_csharp
+        run: |
+          # WinUI 3 unpackaged WITHOUT <EnableMsixTooling>: the app's merged PRI is
+          # emitted as "RimeoAgent.pri" (= ProjectName.pri), but the WinUI runtime
+          # looks for "resources.pri". Missing/misnamed -> ms-appx:///Views/*.xaml
+          # cannot resolve and every XAML page load throws FileNotFoundException
+          # (~10s crash). Fix: copy the app PRI to resources.pri.
+          $dist   = "..\dist\RimeoAgent"
+          $target = Join-Path $dist "resources.pri"
+          if (-not (Test-Path $target)) {
+            Write-Host "resources.pri missing — searching for the app PRI (ProjectName.pri)..."
+            $candidates = Get-ChildItem -Path $dist, RimeoAgent\bin, RimeoAgent\obj -Recurse -Filter *.pri -ErrorAction SilentlyContinue |
+                          Where-Object { $_.Name -notmatch '^Microsoft\.' } |
+                          Sort-Object LastWriteTime -Descending
+            $src = $candidates | Where-Object { $_.Name -ieq 'RimeoAgent.pri' } | Select-Object -First 1
+            if (-not $src) { $src = $candidates | Select-Object -First 1 }
+            if ($src) {
+              Copy-Item $src.FullName $target -Force
+              Write-Host "Copied $($src.FullName) -> resources.pri"
+            }
+          }
+          if (-not (Test-Path $target)) {
+            Write-Host "No app PRI found. All .pri files present:"
+            Get-ChildItem -Path $dist, RimeoAgent\bin, RimeoAgent\obj -Recurse -Filter *.pri -ErrorAction SilentlyContinue |
+              ForEach-Object { Write-Host "  $($_.FullName)" }
+            Write-Error "App resources.pri / RimeoAgent.pri not found — XAML pages would fail to load. Failing the build."
+            exit 1
+          }
+          Write-Host "resources.pri present ($((Get-Item $target).Length) bytes)"
+
+      - name: Dump XAML compiler diagnostics
+        if: failure()
+        shell: pwsh
+        working-directory: windows_csharp
+        run: |
+          Get-ChildItem -Path RimeoAgent\obj -Recurse -Include input.json,output.json,*.xr.xml,*.log -ErrorAction SilentlyContinue |
+            ForEach-Object {
+              Write-Host "===== $($_.FullName) ====="
+              Get-Content $_.FullName -ErrorAction SilentlyContinue
+            }
+
+      - name: Verify self-contained WinUI native DLLs
+        shell: pwsh
+        run: |
+          $dist = "dist\RimeoAgent"
+          $required = @(
+            "Microsoft.ui.xaml.dll",
+            "Microsoft.WindowsAppRuntime.Bootstrap.dll",
+            "Microsoft.WindowsAppRuntime.dll"
+          )
+          $missing = $required | Where-Object { -not (Test-Path (Join-Path $dist $_)) }
+          if ($missing) {
+            Write-Error "Self-contained WinUI runtime DLLs missing (WindowsAppSDKSelfContained did not take effect): $($missing -join ', ')"
+            exit 1
+          }
+          Write-Host "Self-contained WinUI runtime present for ${{ matrix.rid }}"
+
+      # NOTE: cloudflared / ffmpeg / ffprobe are intentionally NOT bundled here.
+      # Bundling them next to the exe made the NSIS installer try to overwrite a
+      # write-locked cloudflared.exe when reinstalling over a running agent
+      # ("Error opening file for writing"), and bloated the installer ~80 MB.
+      # The agent now downloads them on first launch via ComponentManager
+      # (/api/agent/runtime now serves a win-x64/win-arm64 manifest), saving them
+      # into its components/ dir where TunnelManager/AudioService look next.
+
+      - name: Copy build_info
+        shell: pwsh
+        run: Copy-Item build_info.py dist\RimeoAgent\build_info.py
+
+      # Кладём хелпер РЯДОМ с RimeoAgent.exe (AppContext.BaseDirectory) — оттуда его ищет
+      # RekordboxWriter. Делать это надо строго ПОСЛЕ Publish (dotnet publish перезаписывает -o) и
+      # ДО Package: тогда бинарь автоматически попадает и в zip (Compress-Archive берёт
+      # dist\RimeoAgent\*), и в NSIS-инсталлятор (он ставит папку целиком: File /r SOURCE_DIR).
+      - name: Bundle Rekordbox sync helper (both RIDs)
+        shell: pwsh
+        run: |
+          # onedir: папка rbdb-sync-helper\ (exe + _internal\) рядом с RimeoAgent.exe.
+          # RekordboxWriter ищет сначала её, потом старый onefile-exe. Автообновление
+          # (xcopy /E) и NSIS (File /r) переносят подпапки как есть.
+          $src = "rbdb_sync_helper\dist\rbdb-sync-helper"
+          if (-not (Test-Path "$src\rbdb-sync-helper.exe")) {
+            Write-Host "::error::rbdb-sync-helper не найден — Sync в Rekordbox не будет работать"
+            exit 1
+          }
+          Copy-Item $src "dist\RimeoAgent\rbdb-sync-helper" -Recurse -Force
+          if (-not (Test-Path "dist\RimeoAgent\rbdb-sync-helper\rbdb-sync-helper.exe")) {
+            Write-Host "::error::rbdb-sync-helper не лёг в dist\RimeoAgent\rbdb-sync-helper\"
+            exit 1
+          }
+          Write-Host "bundled: dist\RimeoAgent\rbdb-sync-helper\"
+
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\RimeoAgent\* -DestinationPath "dist\${{ matrix.zip }}" -Force
+
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis --no-progress -y
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          makensis `
+            "/DSOURCE_DIR=$PWD\dist\RimeoAgent" `
+            "/DOUT_FILE=$PWD\dist\${{ matrix.setup }}" `
+            windows_csharp\build\RimeoAgentInstaller.nsi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}
+          path: |
+            dist\${{ matrix.setup }}
+            dist\${{ matrix.zip }}
+
+  release:
+    name: Attach to Release
+    needs: [build-mac, build-windows]
+    runs-on: ubuntu-latest
+    if: "always() && startsWith(github.ref, 'refs/tags/') && (needs.build-mac.result == 'success' || needs.build-windows.result == 'success')"
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # 6005: sign each update archive with the release private key. Agents verify
+      # this detached signature (DER ECDSA-P256/SHA-256) against the baked
+      # update_pub.pem BEFORE applying an update — fail-closed. A compromised
+      # release cannot produce a valid .sig without this private key.
+      - name: Sign update archives (detached ES256)
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${UPDATE_SIGNING_KEY:-}" ]; then
+            echo "::error::UPDATE_SIGNING_KEY secret is empty — agents reject unsigned updates (fail-closed)."
+            exit 1
+          fi
+          KEY="$RUNNER_TEMP/update_priv.pem"
+          PUB="$RUNNER_TEMP/update_pub.pem"
+          printf '%s\n' "$UPDATE_SIGNING_KEY" > "$KEY"
+          openssl pkey -in "$KEY" -pubout -out "$PUB"
+          # Guard: the signing key MUST match the public key baked into the agents,
+          # otherwise every agent would reject these updates.
+          FPR=$(openssl pkey -in "$KEY" -pubout -outform DER | openssl dgst -sha256 | sed 's/^.*= //')
+          EXPECTED=88fcdfc8ce77178eb7f8b5e0c1c7474c1246fd183d042427fbc80083c25dca9b
+          if [ "$FPR" != "$EXPECTED" ]; then
+            echo "::error::UPDATE_SIGNING_KEY does not match the baked update_pub.pem ($FPR != $EXPECTED)."
+            exit 1
+          fi
+          sign() {
+            [ -f "$1" ] || return 0
+            openssl dgst -sha256 -sign "$KEY" -out "$1.sig" "$1"
+            openssl dgst -sha256 -verify "$PUB" -signature "$1.sig" "$1" >/dev/null \
+              || { echo "::error::self-verify failed for $1"; exit 1; }
+            echo "signed + verified: $1 -> $1.sig"
+          }
+          sign artifacts/mac/RimeoAgent_mac.zip
+          sign artifacts/windows-x64/RimeoAgent_win.zip
+          sign artifacts/windows-arm64/RimeoAgent_win-arm64.zip
+          rm -f "$KEY"
+
+      - name: Prepare release title
+        run: |
+          TAG_NAME="${GITHUB_REF_NAME}"
+          BUILD_NUMBER=$(printf '%s' "$TAG_NAME" | sed -n 's/^\(mac-\|win-\)\{0,1\}v1\.0-build\([0-9][0-9]*\)$/\2/p')
+          if [ -z "$BUILD_NUMBER" ]; then
+            BUILD_NUMBER="${GITHUB_RUN_NUMBER}"
+          fi
+          echo "RELEASE_NAME=Release v1.0 (${BUILD_NUMBER})" >> "$GITHUB_ENV"
+          # L7: reference the shell var (set from GITHUB_REF_NAME above) instead of a
+          # GitHub Actions template expression interpolated straight into the script —
+          # a crafted tag name could otherwise break out of the quotes and inject shell.
+          echo "MAC_ONLY=$( [[ "$TAG_NAME" == mac-* ]] && echo true || echo false )" >> "$GITHUB_ENV"
+          echo "WIN_ONLY=$( [[ "$TAG_NAME" == win-* ]] && echo true || echo false )" >> "$GITHUB_ENV"
+
+      - name: Upload to release (macOS + Windows)
+        if: env.MAC_ONLY == 'false' && env.WIN_ONLY == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ env.RELEASE_NAME }}
+          files: |
+            artifacts/mac/RimeoAgent.dmg
+            artifacts/mac/RimeoAgent_mac.zip
+            artifacts/mac/RimeoAgent_mac.zip.sig
+            artifacts/windows-x64/RimeoAgentSetup_win.exe
+            artifacts/windows-x64/RimeoAgent_win.zip
+            artifacts/windows-x64/RimeoAgent_win.zip.sig
+            artifacts/windows-arm64/RimeoAgentSetup_win-arm64.exe
+            artifacts/windows-arm64/RimeoAgent_win-arm64.zip
+            artifacts/windows-arm64/RimeoAgent_win-arm64.zip.sig
+
+      - name: Upload to release (macOS only)
+        if: env.MAC_ONLY == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ env.RELEASE_NAME }}
+          files: |
+            artifacts/mac/RimeoAgent.dmg
+            artifacts/mac/RimeoAgent_mac.zip
+            artifacts/mac/RimeoAgent_mac.zip.sig
+
+      - name: Upload to release (Windows only)
+        if: env.WIN_ONLY == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ env.RELEASE_NAME }}
+          files: |
+            artifacts/windows-x64/RimeoAgentSetup_win.exe
+            artifacts/windows-x64/RimeoAgent_win.zip
+            artifacts/windows-x64/RimeoAgent_win.zip.sig
+            artifacts/windows-arm64/RimeoAgentSetup_win-arm64.exe
+            artifacts/windows-arm64/RimeoAgent_win-arm64.zip
+            artifacts/windows-arm64/RimeoAgent_win-arm64.zip.sig
