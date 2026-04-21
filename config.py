@@ -25,6 +25,21 @@ _APP_DATA_DIR = _get_app_data_dir()
 _APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _detect_db_path() -> str:
+    if sys.platform == "darwin":
+        return str(Path.home() / "Library" / "Pioneer" / "rekordbox" / "master.db")
+    elif sys.platform == "win32":
+        appdata = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+        # Rekordbox 7 stores data under "rekordbox", RB6 under "rekordbox6"
+        for folder in ("rekordbox", "rekordbox6"):
+            candidate = Path(appdata) / "Pioneer" / folder / "master.db"
+            if candidate.exists():
+                return str(candidate)
+        return str(Path(appdata) / "Pioneer" / "rekordbox6" / "master.db")
+    else:
+        return str(Path.home() / ".local" / "share" / "Pioneer" / "rekordbox" / "master.db")
+
+
 def _load_persistent_agent_id() -> str:
     """Read AGENT_ID from app data dir — create once if missing."""
     id_file = _APP_DATA_DIR / "agent_id"
@@ -39,7 +54,7 @@ def _load_persistent_agent_id() -> str:
 
 class RimeoSettings(BaseSettings):
     # --- Project Info ---
-    VERSION: str = "v2.0.0-beta"
+    VERSION: str = "v1.0.1"
     APP_NAME: str = "Rimeo Desktop Agent"
 
     # --- Server Config ---
@@ -50,7 +65,7 @@ class RimeoSettings(BaseSettings):
     # XML_PATH is empty by default — user sets it on first run via onboarding
     XML_PATH: str = ""
     # DB_PATH: auto-detected from default Pioneer location; can be overridden
-    DB_PATH: str = str(Path.home() / "Library" / "Pioneer" / "rekordbox" / "master.db")
+    DB_PATH: str = Field(default_factory=_detect_db_path)
 
     # All user data lives in Application Support / AppData
     BASE_DIR:  Path = _APP_DATA_DIR

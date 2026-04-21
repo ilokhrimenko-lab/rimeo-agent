@@ -14,3 +14,4 @@ macos_arm64/
 build/RimeoAgent/
 dist/
 *.spec
+.DS_Store
