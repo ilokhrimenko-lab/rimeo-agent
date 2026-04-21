@@ -7,6 +7,74 @@ on:
       - 'v*'
 
 jobs:
+  build-mac-arm64:
+    name: macOS Apple Silicon (arm64)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          pip install "flet==0.28.3" pillow
+          pip install torch --index-url https://download.pytorch.org/whl/cpu --quiet
+
+      - name: Create icon
+        run: |
+          ICONSET=$(mktemp -d)/RimeoAgent.iconset
+          mkdir -p "$ICONSET"
+          sips -z 16   16   rimeo1024.png --out "$ICONSET/icon_16x16.png"       >/dev/null
+          sips -z 32   32   rimeo1024.png --out "$ICONSET/icon_16x16@2x.png"    >/dev/null
+          sips -z 32   32   rimeo1024.png --out "$ICONSET/icon_32x32.png"       >/dev/null
+          sips -z 64   64   rimeo1024.png --out "$ICONSET/icon_32x32@2x.png"    >/dev/null
+          sips -z 128  128  rimeo1024.png --out "$ICONSET/icon_128x128.png"     >/dev/null
+          sips -z 256  256  rimeo1024.png --out "$ICONSET/icon_128x128@2x.png"  >/dev/null
+          sips -z 256  256  rimeo1024.png --out "$ICONSET/icon_256x256.png"     >/dev/null
+          sips -z 512  512  rimeo1024.png --out "$ICONSET/icon_256x256@2x.png"  >/dev/null
+          sips -z 512  512  rimeo1024.png --out "$ICONSET/icon_512x512.png"     >/dev/null
+          sips -z 1024 1024 rimeo1024.png --out "$ICONSET/icon_512x512@2x.png"  >/dev/null
+          iconutil -c icns "$ICONSET" -o build/RimeoAgent.icns
+
+      - name: Build
+        run: |
+          flet pack run.py \
+            -y \
+            --name RimeoAgent \
+            --product-name "Rimeo Agent" \
+            --bundle-id app.rimeo.agent \
+            --icon build/RimeoAgent.icns \
+            --add-data "rimeo1024.png:." \
+            --hidden-import "uvicorn.logging" \
+            --hidden-import "uvicorn.loops" \
+            --hidden-import "uvicorn.loops.auto" \
+            --hidden-import "uvicorn.protocols" \
+            --hidden-import "uvicorn.protocols.http" \
+            --hidden-import "uvicorn.protocols.http.auto" \
+            --hidden-import "uvicorn.protocols.websockets" \
+            --hidden-import "uvicorn.protocols.websockets.auto" \
+            --hidden-import "uvicorn.lifespan" \
+            --hidden-import "uvicorn.lifespan.on" \
+            --hidden-import "fastapi" \
+            --hidden-import "pydantic_settings" \
+            --pyinstaller-build-args "--additional-hooks-dir=build/hooks"
+
+      - name: Package
+        run: |
+          cd dist
+          if [ -d "RimeoAgent.app" ]; then
+            zip -r RimeoAgent_mac_arm64.zip RimeoAgent.app --quiet
+          else
+            zip RimeoAgent_mac_arm64.zip RimeoAgent --quiet
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-arm64
+          path: dist/RimeoAgent_mac_arm64.zip
+
   build-mac-intel:
     name: macOS Intel (x86_64)
     runs-on: macos-13
@@ -36,8 +104,7 @@ jobs:
           sips -z 512  512  rimeo1024.png --out "$ICONSET/icon_256x256@2x.png"  >/dev/null
           sips -z 512  512  rimeo1024.png --out "$ICONSET/icon_512x512.png"     >/dev/null
           sips -z 1024 1024 rimeo1024.png --out "$ICONSET/icon_512x512@2x.png"  >/dev/null
-          iconutil -c icns "$ICONSET" -o RimeoAgent.icns
-        working-directory: build
+          iconutil -c icns "$ICONSET" -o build/RimeoAgent.icns
 
       - name: Build
         run: |
@@ -131,7 +198,7 @@ jobs:
 
   release:
     name: Attach to Release
-    needs: [build-mac-intel, build-windows]
+    needs: [build-mac-arm64, build-mac-intel, build-windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
@@ -145,5 +212,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            artifacts/mac-arm64/RimeoAgent_mac_arm64.zip
             artifacts/mac-intel/RimeoAgent_mac_intel.zip
             artifacts/windows/RimeoAgent_win.zip
