@@ -49,6 +49,8 @@ class RimeoSettings(BaseSettings):
     # --- Paths ---
     # XML_PATH is empty by default — user sets it on first run via onboarding
     XML_PATH: str = ""
+    # DB_PATH: auto-detected from default Pioneer location; can be overridden
+    DB_PATH: str = str(Path.home() / "Library" / "Pioneer" / "rekordbox" / "master.db")
 
     # All user data lives in Application Support / AppData
     BASE_DIR:  Path = _APP_DATA_DIR

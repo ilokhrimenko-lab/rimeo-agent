@@ -7,7 +7,7 @@ import time
 from typing import Optional
 
 from .config import settings, logger, get_local_ip
-from .parser import parse_rekordbox_xml
+from .parser import parse_library
 
 
 def _agent_icon_path() -> str:
@@ -133,7 +133,7 @@ class RimeoUI:
         self.page = page
         self._setup_window()
         self._setup_system_tray()
-        if not settings.XML_PATH or not os.path.exists(settings.XML_PATH):
+        if not os.path.exists(settings.DB_PATH):
             self._show_onboarding()
         else:
             self.show_main_layout()
@@ -272,108 +272,176 @@ class RimeoUI:
 
     # ── Onboarding ────────────────────────────────────────────────────────────
     def _show_onboarding(self):
-        """First-run screen shown when no Rekordbox XML is configured."""
+        """Shown when Rekordbox master.db is not found — offers manual selection."""
         self.page.controls.clear()
 
-        if sys.platform != "darwin":
-            self._onboarding_picker = ft.FilePicker(on_result=self._onboarding_xml_selected)
-            self.page.overlay.append(self._onboarding_picker)
+        if sys.platform == "darwin":
+            db_hint = "~/Library/Pioneer/rekordbox/master.db"
+        else:
+            db_hint = r"%APPDATA%\Pioneer\rekordbox6\master.db"
 
-        step = lambda n, text: ft.Row([
-            ft.Container(
-                ft.Text(str(n), size=12, weight=ft.FontWeight.BOLD, color="white"),
-                bgcolor=C["acc"], border_radius=99,
-                width=24, height=24,
-                alignment=ft.alignment.center,
-            ),
-            ft.Text(text, color=C["text"], size=13, expand=True),
-        ], spacing=12, vertical_alignment=ft.CrossAxisAlignment.START)
+        if sys.platform != "darwin":
+            self._ob_db_picker  = ft.FilePicker(on_result=self._ob_db_selected)
+            self._ob_xml_picker = ft.FilePicker(on_result=self._ob_xml_selected)
+            self.page.overlay += [self._ob_db_picker, self._ob_xml_picker]
+
+        self._onboarding_status = ft.Text("", color="#f87171", size=13)
+
+        def _retry(_):
+            if os.path.exists(settings.DB_PATH):
+                self.page.controls.clear()
+                self.show_main_layout()
+            else:
+                self._onboarding_status.value = f"Not found: {settings.DB_PATH}"
+                self.page.update()
 
         self.page.add(
             ft.Container(
-                expand=True,
-                bgcolor=C["bg"],
+                expand=True, bgcolor=C["bg"],
                 padding=ft.padding.symmetric(horizontal=80, vertical=60),
                 content=ft.Column([
                     ft.Text("Welcome to Rimeo Agent",
                             size=30, weight=ft.FontWeight.BOLD, color=C["text"]),
-                    ft.Text("To get started, connect your Rekordbox library.",
+                    ft.Text("Rekordbox library not found at the default location.",
                             size=14, color=C["dim"]),
                     ft.Container(height=24),
 
-                    ft.Text("How to export your library from Rekordbox",
-                            size=16, weight=ft.FontWeight.W_600, color=C["text"]),
-                    ft.Container(height=8),
-
                     ft.Container(
-                        bgcolor=C["surf"],
-                        border=ft.border.all(1, C["brd"]),
+                        bgcolor=C["surf"], border=ft.border.all(1, C["brd"]),
                         border_radius=16, padding=24,
                         content=ft.Column([
-                            step(1, "Open Rekordbox on your computer."),
-                            step(2, "In the top menu bar click  File  →  Export Collection in xml format."),
-                            step(3, "Choose any folder and save the file (it will be named rekordbox.xml)."),
-                            step(4, "Come back here and click the button below to select that file."),
+                            ft.Row([
+                                ft.Icon("warning_amber_outlined", color="#f59e0b", size=20),
+                                ft.Text("master.db not found", color="#f59e0b",
+                                        size=14, weight=ft.FontWeight.W_600),
+                            ], spacing=10),
+                            ft.Text(f"Expected: {db_hint}", color=C["dim"], size=12),
                             ft.Container(
-                                bgcolor="#0d2137", border_radius=16,
+                                bgcolor="#0d2137", border_radius=12,
                                 padding=ft.padding.symmetric(horizontal=14, vertical=10),
-                                margin=ft.margin.only(top=8),
                                 content=ft.Row([
                                     ft.Icon("info_outline", color=C["acc"], size=16),
                                     ft.Text(
-                                        "Rekordbox 5: File → Library → Export Collection as xml\n"
-                                        "Rekordbox 6+: File → Export Collection in xml format",
-                                        color=C["dim"], size=12,
+                                        "Make sure Rekordbox 6 or 7 is installed and launched at least once.",
+                                        color=C["dim"], size=12, expand=True,
                                     ),
                                 ], spacing=10),
                             ),
-                        ], spacing=14),
+                            _btn("Retry auto-detect", _retry,
+                                 icon="refresh", bgcolor=C["surf"], color=C["text"],
+                                 height=40, border=ft.border.all(1, C["brd"])),
+                        ], spacing=12),
                     ),
 
-                    ft.Container(height=24),
-                    _btn("Select rekordbox.xml", self._onboarding_browse,
-                         icon="folder_open_outlined", bgcolor=C["acc"], height=46,
-                    ),
-                    ft.Container(height=0),
-                    ft.Text("", key="onboarding_status", color="#f87171", size=13),
+                    ft.Container(height=16),
+                    ft.Text("Or select the file manually:",
+                            size=14, weight=ft.FontWeight.W_600, color=C["text"]),
+                    ft.Container(height=4),
+
+                    ft.Row([
+                        ft.Container(
+                            expand=True,
+                            bgcolor=C["surf"], border=ft.border.all(1, C["brd"]),
+                            border_radius=16, padding=20,
+                            content=ft.Column([
+                                ft.Row([
+                                    ft.Icon("storage", color=C["acc"], size=20),
+                                    ft.Text("Rekordbox 6/7", color=C["text"],
+                                            size=13, weight=ft.FontWeight.W_600),
+                                ], spacing=8),
+                                ft.Text("master.db  (recommended)", color=C["dim"], size=12),
+                                ft.Container(height=4),
+                                _btn("Select master.db", self._ob_browse_db,
+                                     icon="folder_open_outlined", bgcolor=C["acc"], height=40),
+                            ], spacing=8),
+                        ),
+                        ft.Container(
+                            expand=True,
+                            bgcolor=C["surf"], border=ft.border.all(1, C["brd"]),
+                            border_radius=16, padding=20,
+                            content=ft.Column([
+                                ft.Row([
+                                    ft.Icon("insert_drive_file_outlined",
+                                            color=C["dim"], size=20),
+                                    ft.Text("Rekordbox XML", color=C["text"],
+                                            size=13, weight=ft.FontWeight.W_600),
+                                ], spacing=8),
+                                ft.Text("rekordbox.xml  (fallback)", color=C["dim"], size=12),
+                                ft.Container(height=4),
+                                _btn("Select .xml", self._ob_browse_xml,
+                                     icon="folder_open_outlined",
+                                     bgcolor=C["surf"], color=C["text"], height=40,
+                                     border=ft.border.all(1, C["brd"])),
+                            ], spacing=8),
+                        ),
+                    ], spacing=16),
+
+                    self._onboarding_status,
                 ], spacing=8, scroll=ft.ScrollMode.AUTO),
             )
         )
         self.page.update()
 
-    def _onboarding_browse(self, _):
+    # -- Onboarding file pickers -----------------------------------------------
+    def _ob_browse_db(self, _):
         if sys.platform == "darwin":
-            threading.Thread(target=self._onboarding_browse_macos, daemon=True).start()
+            threading.Thread(target=self._ob_browse_db_macos, daemon=True).start()
         else:
-            self._onboarding_picker.pick_files(
-                allowed_extensions=["xml"],
-                dialog_title="Select rekordbox.xml",
-            )
+            self._ob_db_picker.pick_files(
+                allowed_extensions=["db"], dialog_title="Select master.db")
 
-    def _onboarding_browse_macos(self):
+    def _ob_browse_xml(self, _):
+        if sys.platform == "darwin":
+            threading.Thread(target=self._ob_browse_xml_macos, daemon=True).start()
+        else:
+            self._ob_xml_picker.pick_files(
+                allowed_extensions=["xml"], dialog_title="Select rekordbox.xml")
+
+    def _ob_browse_db_macos(self):
         import subprocess
-        script = (
-            'POSIX path of (choose file with prompt '
-            '"Select your rekordbox.xml file" of type {"xml"})'
+        r = subprocess.run(
+            ["osascript", "-e",
+             'POSIX path of (choose file with prompt "Select master.db")'],
+            capture_output=True, text=True, timeout=120,
         )
-        try:
-            r = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=120,
-            )
-            if r.returncode == 0:
-                path = r.stdout.strip()
-                if path:
-                    self._finish_onboarding(path)
-        except Exception as exc:
-            logger.warning("osascript onboarding picker failed: %s", exc)
+        if r.returncode == 0 and r.stdout.strip():
+            self._ob_finish_db(r.stdout.strip())
 
-    def _onboarding_xml_selected(self, e: ft.FilePickerResultEvent):
+    def _ob_browse_xml_macos(self):
+        import subprocess
+        r = subprocess.run(
+            ["osascript", "-e",
+             'POSIX path of (choose file with prompt "Select rekordbox.xml" of type {"xml"})'],
+            capture_output=True, text=True, timeout=120,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            self._ob_finish_xml(r.stdout.strip())
+
+    def _ob_db_selected(self, e: ft.FilePickerResultEvent):
         if e.files:
-            self._finish_onboarding(e.files[0].path)
+            self._ob_finish_db(e.files[0].path)
 
-    def _finish_onboarding(self, path: str):
-        self._save_xml_path(path)
+    def _ob_xml_selected(self, e: ft.FilePickerResultEvent):
+        if e.files:
+            self._ob_finish_xml(e.files[0].path)
+
+    def _ob_finish_db(self, path: str):
+        settings.DB_PATH = path
+        env_path = settings.BASE_DIR / ".env"
+        lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+        lines = [l for l in lines if not l.startswith("RIMEO_DB_PATH=")]
+        lines.append(f"RIMEO_DB_PATH={path}")
+        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.page.controls.clear()
+        self.show_main_layout()
+
+    def _ob_finish_xml(self, path: str):
+        settings.XML_PATH = path
+        env_path = settings.BASE_DIR / ".env"
+        lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+        lines = [l for l in lines if not l.startswith("RIMEO_XML_PATH=")]
+        lines.append(f"RIMEO_XML_PATH={path}")
+        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.page.controls.clear()
         self.show_main_layout()
 
@@ -485,11 +553,6 @@ class RimeoUI:
             alignment=ft.alignment.top_left,
         )
 
-        # FilePicker for non-macOS platforms
-        if sys.platform != "darwin":
-            self._file_picker = ft.FilePicker(on_result=self._on_xml_selected)
-            self.page.overlay.append(self._file_picker)
-
         self.page.add(ft.Row([
             self.rail,
             ft.VerticalDivider(width=1, color=C["brd"]),
@@ -507,113 +570,74 @@ class RimeoUI:
 
     # ── Tab: Library ──────────────────────────────────────────────────────────
     def _show_library_tab(self):
-        xml_path_text = ft.Text(
-            settings.XML_PATH or "Not configured",
-            expand=True, color=C["text"],
-            no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS,
-        )
-        self._lib_status = ft.Text("", color=C["dim"], size=13)
+        db_path = settings.DB_PATH
+        db_exists = os.path.exists(db_path)
 
-        # Rekordbox XML age
-        xml_age_text = ""
-        xml_age_color = C["dim"]
-        if settings.XML_PATH and os.path.exists(settings.XML_PATH):
+        db_age_text = ""
+        db_age_color = C["dim"]
+        if db_exists:
             try:
                 import time as _time
-                mtime = os.path.getmtime(settings.XML_PATH)
-                age_sec = _time.time() - mtime
                 from datetime import datetime as _dt
+                mtime = os.path.getmtime(db_path)
+                age_sec = _time.time() - mtime
                 updated_str = _dt.fromtimestamp(mtime).strftime("%d %b %Y, %H:%M")
                 if age_sec < 3600:
                     age_label = f"{int(age_sec // 60)} min ago"
                 elif age_sec < 86400:
                     age_label = f"{int(age_sec // 3600)} h ago"
-                elif age_sec < 86400 * 7:
-                    age_label = f"{int(age_sec // 86400)} days ago"
-                    xml_age_color = "#f59e0b"
                 else:
                     age_label = f"{int(age_sec // 86400)} days ago"
-                    xml_age_color = "#f87171"
-                xml_age_text = f"Last updated: {updated_str}  ·  {age_label}"
+                db_age_text = f"Last modified: {updated_str}  ·  {age_label}"
             except Exception:
-                xml_age_text = ""
+                pass
+
+        status_icon = "check_circle_outline" if db_exists else "error_outline"
+        status_color = "#4ade80" if db_exists else "#f87171"
+        status_text = "Connected" if db_exists else "Not found"
+
+        self._lib_status = ft.Text("", color=C["dim"], size=13)
 
         self.content.content = ft.Column([
             ft.Text("Library", size=24, weight=ft.FontWeight.BOLD, color=C["text"]),
-            ft.Text("Reads your Rekordbox XML export and serves tracks to rimeo.app.",
+            ft.Text("Reads your Rekordbox library automatically and serves tracks to rimeo.app.",
                     color=C["dim"], size=13),
             ft.Container(height=4),
-            _section_label("REKORDBOX XML SOURCE"),
+            _section_label("REKORDBOX DATABASE"),
             ft.Container(
                 bgcolor=C["surf"], border=ft.border.all(1, C["brd"]),
                 border_radius=16, padding=20,
                 content=ft.Column([
                     ft.Row([
-                        ft.Icon("insert_drive_file_outlined", color=C["acc"], size=18),
-                        xml_path_text,
-                        ft.IconButton(
-                            "folder_open_outlined",
-                            on_click=self._browse_xml,
-                            icon_color=C["dim"], tooltip="Browse…",
-                        ),
-                    ]),
-                    ft.Text(xml_age_text, color=xml_age_color, size=12) if xml_age_text else ft.Container(height=0),
+                        ft.Icon(status_icon, color=status_color, size=18),
+                        ft.Text(status_text, color=status_color,
+                                size=13, weight=ft.FontWeight.W_600),
+                    ], spacing=8),
+                    ft.Text(
+                        db_path,
+                        color=C["dim"], size=11,
+                        no_wrap=True, overflow=ft.TextOverflow.ELLIPSIS,
+                    ),
+                    ft.Text(db_age_text, color=db_age_color, size=12) if db_age_text else ft.Container(height=0),
                     self._lib_status,
                     ft.Row([
                         _btn("Reload Library", self._reload_library,
                              icon="refresh", bgcolor=C["acc"]),
                     ], spacing=16),
-                ], spacing=14),
+                ], spacing=10),
             ),
         ], spacing=12, scroll=ft.ScrollMode.AUTO, expand=True)
         self.page.update()
-
-    def _browse_xml(self, _):
-        """Open file picker. Uses osascript on macOS (reliable); FilePicker elsewhere."""
-        if sys.platform == "darwin":
-            threading.Thread(target=self._browse_xml_macos, daemon=True).start()
-        else:
-            self._file_picker.pick_files(
-                allowed_extensions=["xml"],
-                dialog_title="Select rekordbox.xml",
-            )
-
-    def _browse_xml_macos(self):
-        import subprocess
-        script = (
-            'POSIX path of (choose file with prompt '
-            '"Select rekordbox.xml" of type {"xml"})'
-        )
-        try:
-            r = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True, text=True, timeout=120,
-            )
-            if r.returncode == 0:
-                path = r.stdout.strip()
-                if path:
-                    self._save_xml_path(path)
-                    self._show_library_tab()
-        except Exception as exc:
-            logger.warning("osascript file picker failed: %s", exc)
-
-    def _on_xml_selected(self, e: ft.FilePickerResultEvent):
-        if e.files:
-            self._save_xml_path(e.files[0].path)
-            self._show_library_tab()
-
-    def _save_xml_path(self, path: str):
-        settings.XML_PATH = path
-        env_path = settings.BASE_DIR / ".env"
-        env_path.write_text(f"RIMEO_XML_PATH={path}\n", encoding="utf-8")
 
     def _reload_library(self, _):
         self._lib_status.value = "Loading…"
         self.page.update()
         def task():
-            result = parse_rekordbox_xml()
-            count = len(result.get("tracks", []))
-            self._lib_status.value = f"✓ {count} tracks loaded"
+            result = parse_library()
+            tracks = len(result.get("tracks", []))
+            playlists = len(result.get("playlists", []))
+            source = result.get("source", "db")
+            self._lib_status.value = f"✓ {tracks} tracks, {playlists} playlists  ({source})"
             self.page.update()
         threading.Thread(target=task, daemon=True).start()
 
@@ -671,7 +695,7 @@ class RimeoUI:
             from .analyzer import analyze_track
             from .api_server import _load_analysis, _save_analysis
 
-            data = parse_rekordbox_xml()
+            data = parse_library()
             tracks = data.get("tracks", [])
             # Deduplicate by id
             seen = {}

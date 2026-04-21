@@ -18,8 +18,14 @@ from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
+_CLOUD_HEADERS = {
+    "Content-Type": "application/json",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+}
+
 from .config import settings, logger
-from .parser import parse_rekordbox_xml
+from .parser import parse_library
 
 app = FastAPI(title=settings.APP_NAME, version=settings.VERSION)
 
@@ -245,13 +251,13 @@ async def stream_audio(request: Request, path: str, id: str, preload: bool = Fal
 async def get_library_data():
     app_data = _load_data()
     loop     = asyncio.get_event_loop()
-    data     = await loop.run_in_executor(None, parse_rekordbox_xml)
+    data     = await loop.run_in_executor(None, parse_library)
     return {
         "tracks":           data["tracks"],
         "playlists":        data["playlists"],
         "notes":            app_data.get("notes", {}),
         "global_exclusions": app_data.get("global_exclusions", []),
-        "xml_date":         data.get("xml_date", 0),
+        "library_date":     data.get("xml_date", 0),
     }
 
 
@@ -453,7 +459,7 @@ async def recheck_analysis(background_tasks: BackgroundTasks):
 def _run_analysis_job():
     from .analyzer import analyze_track, _load_analysis, _save_analysis
 
-    data   = parse_rekordbox_xml()
+    data   = parse_library()
     tracks = data.get("tracks", [])
 
     # Deduplicate by track ID (same file can appear in multiple playlists)
@@ -515,7 +521,7 @@ async def get_similar(id: str, limit: int = 10, use_key: int = 1):
 
     def _compute():
         from .similarity import find_similar
-        data       = parse_rekordbox_xml()
+        data       = parse_library()
         all_tracks = data.get("tracks", [])
         results    = find_similar(id, all_tracks, store,
                                   top_n=min(limit, 50), use_key=_use_key)
@@ -558,12 +564,17 @@ async def get_status():
     """Return agent info: id, version, xml status, cloud link state."""
     app_data  = _load_data()
     xml_path  = settings.XML_PATH
+    db_path   = settings.DB_PATH
     cloud_url = app_data.get("cloud_url", "")
+    db_exists = bool(db_path) and os.path.exists(db_path)
     return {
         "agent_id":   settings.AGENT_ID,
         "version":    settings.VERSION,
         "xml_path":   xml_path,
-        "xml_exists": os.path.exists(xml_path),
+        "xml_exists": os.path.exists(xml_path) if xml_path else False,
+        "db_path":    db_path,
+        "db_exists":  db_exists,
+        "library_source": "db" if db_exists else "xml",
         "cloud_url":  cloud_url,
         "is_linked":  bool(cloud_url),
     }
@@ -618,7 +629,7 @@ async def link_account(request: Request):
     req = urllib.request.Request(
         link_endpoint,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers=_CLOUD_HEADERS,
         method="POST",
     )
     try:
@@ -659,7 +670,7 @@ async def unlink_account():
             req = urllib.request.Request(
                 f"{cloud_url}/api/agents/unlink_by_agent",
                 data=payload,
-                headers={"Content-Type": "application/json"},
+                headers=_CLOUD_HEADERS,
                 method="POST",
             )
             urllib.request.urlopen(req, timeout=5)
@@ -753,7 +764,7 @@ async def _handle_relay_cmd(cloud_url: str, data: dict):
         }
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(headers=_CLOUD_HEADERS) as client:
             await client.post(
                 f"{cloud_url}/api/relay/result",
                 json=result,
@@ -790,7 +801,7 @@ async def _cloud_relay_worker():
 
         try:
             logger.info("Cloud relay connecting: %s", cloud_url)
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=30.0, headers=_CLOUD_HEADERS) as client:
                 resp = await client.get(poll_url)
 
             if resp.status_code == 403:
@@ -878,7 +889,7 @@ async def report_bug(request: Request):
     req = urllib.request.Request(
         f"{cloud_url}/api/report_bug",
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers=_CLOUD_HEADERS,
         method="POST",
     )
     try:

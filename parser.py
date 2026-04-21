@@ -10,6 +10,9 @@ from .config import settings, logger
 _xml_cache: Dict[str, Any] = {}
 _xml_cache_mtime: float = 0.0
 
+_db_cache: Dict[str, Any] = {}
+_db_cache_mtime: float = 0.0
+
 def normalize_path(loc: str) -> str:
     path = urllib.parse.unquote(loc)
     if path.startswith("file://localhost/"):
@@ -120,3 +123,140 @@ def parse_rekordbox_xml() -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Error parsing Rekordbox XML: {e}")
         return {"tracks": [], "playlists": [], "xml_date": 0}
+
+
+def parse_master_db() -> Dict[str, Any]:
+    """Read library directly from Rekordbox master.db (SQLCipher). Cached by mtime."""
+    global _db_cache, _db_cache_mtime
+
+    db_path = settings.DB_PATH
+    if not db_path or not os.path.exists(db_path):
+        logger.warning(f"master.db not found at {db_path}")
+        return {"tracks": [], "playlists": [], "xml_date": 0, "source": "db"}
+
+    try:
+        mtime = os.path.getmtime(db_path)
+    except OSError:
+        mtime = 0.0
+
+    if _db_cache and mtime == _db_cache_mtime:
+        return _db_cache
+
+    logger.info("Parsing rekordbox master.db (cache miss)...")
+
+    try:
+        from pyrekordbox.db6 import Rekordbox6Database
+        db = Rekordbox6Database(db_path)
+
+        # Build playlist ID → object map (skip deleted)
+        playlist_map = {
+            p.ID: p for p in db.get_playlist()
+            if not p.rb_local_deleted
+        }
+
+        def build_playlist_path(p) -> str:
+            parts = []
+            current = p
+            while current is not None and current.ParentID != "root":
+                parts.append(current.Name)
+                current = playlist_map.get(current.ParentID)
+            parts.append(p.Name if not parts else parts[-1])
+            # parts built bottom-up, but we already collected correctly — reverse
+            # Actually re-do: walk up collecting names
+            parts = []
+            current = p
+            while current is not None:
+                if current.ParentID == "root":
+                    parts.append(current.Name)
+                    break
+                parts.append(current.Name)
+                current = playlist_map.get(current.ParentID)
+            parts.reverse()
+            return " / ".join(parts)
+
+        # Map track ID → {playlists, playlist_indices, latest_timestamp}
+        track_playlists: Dict[str, Dict] = {}
+        all_playlists: Dict[str, float] = {}
+
+        for p in playlist_map.values():
+            if not p.Songs:
+                continue
+            p_path = build_playlist_path(p)
+            if p_path not in all_playlists:
+                all_playlists[p_path] = 0.0
+
+            for song in p.Songs:
+                if song.rb_local_deleted:
+                    continue
+                tid = song.ContentID
+                if tid not in track_playlists:
+                    track_playlists[tid] = {"playlists": [], "playlist_indices": {}}
+                track_playlists[tid]["playlist_indices"][p_path] = song.TrackNo
+                if p_path not in track_playlists[tid]["playlists"]:
+                    track_playlists[tid]["playlists"].append(p_path)
+
+        tracks_db = []
+        for t in db.get_content():
+            if t.rb_local_deleted:
+                continue
+
+            ts = 0.0
+            try:
+                ts = t.created_at.timestamp()
+            except Exception:
+                pass
+
+            date_str = t.DateCreated or "0000-00-00"
+            bpm = round(t.BPM / 100.0, 2) if t.BPM else 0.0
+            pl_info = track_playlists.get(t.ID, {"playlists": [], "playlist_indices": {}})
+
+            # Update playlist latest timestamp
+            for p_path in pl_info["playlists"]:
+                if ts > all_playlists.get(p_path, 0.0):
+                    all_playlists[p_path] = ts
+
+            tracks_db.append({
+                "id":               t.ID,
+                "artist":           t.ArtistName or "Unknown Artist",
+                "title":            t.Title or "Unknown Title",
+                "genre":            t.GenreName or "",
+                "label":            t.LabelName or "",
+                "rel_date":         str(t.ReleaseYear) if t.ReleaseYear else "",
+                "key":              t.KeyName or "—",
+                "bpm":              bpm,
+                "bitrate":          t.BitRate or 0,
+                "play_count":       t.DJPlayCount or 0,
+                "location":         t.FolderPath or "",
+                "timestamp":        ts,
+                "date_str":         date_str,
+                "playlists":        pl_info["playlists"],
+                "playlist_indices": pl_info["playlist_indices"],
+            })
+
+        tracks_db.sort(key=lambda x: x["timestamp"], reverse=True)
+        playlists_list = [{"path": p, "date": all_playlists[p]} for p in all_playlists]
+
+        result = {
+            "tracks":   tracks_db,
+            "playlists": playlists_list,
+            "xml_date": mtime,
+            "source":   "db",
+        }
+        _db_cache = result
+        _db_cache_mtime = mtime
+        logger.info(f"master.db parsed and cached: {len(tracks_db)} tracks, {len(playlists_list)} playlists")
+        return result
+
+    except Exception as e:
+        logger.error(f"Error parsing master.db: {e}")
+        return {"tracks": [], "playlists": [], "xml_date": 0, "source": "db"}
+
+
+def parse_library() -> Dict[str, Any]:
+    """Try master.db first; fall back to XML if DB unavailable."""
+    db_path = settings.DB_PATH
+    if db_path and os.path.exists(db_path):
+        result = parse_master_db()
+        if result["tracks"]:
+            return result
+    return parse_rekordbox_xml()
