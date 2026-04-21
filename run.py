@@ -2,8 +2,23 @@ import sys
 import os
 import threading
 import time
+import types
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PACKAGE_NAME = "RimeoAgent"
+PACKAGE_DIR = os.path.abspath(os.path.dirname(__file__))
+PARENT_DIR = os.path.dirname(PACKAGE_DIR)
+
+# In development this repo is imported as the RimeoAgent package from its parent
+# directory. Inside the frozen bundle, files are flattened into one directory, so
+# we synthesize the package namespace before importing package modules.
+if PARENT_DIR not in sys.path:
+    sys.path.append(PARENT_DIR)
+
+if PACKAGE_NAME not in sys.modules:
+    pkg = types.ModuleType(PACKAGE_NAME)
+    pkg.__path__ = [PACKAGE_DIR]
+    pkg.__file__ = os.path.join(PACKAGE_DIR, "__init__.py")
+    sys.modules[PACKAGE_NAME] = pkg
 
 from RimeoAgent.config import settings, logger
 
