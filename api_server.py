@@ -24,8 +24,8 @@ _CLOUD_HEADERS = {
     "Accept": "application/json",
 }
 
-from .config import settings, logger
-from .parser import parse_library
+from config import settings, logger
+from parser import parse_library
 
 app = FastAPI(title=settings.APP_NAME, version=settings.DISPLAY_VERSION)
 
@@ -272,7 +272,7 @@ async def get_pairing_info():
     app_data["pairing_code"] = code
     _save_data(app_data)
 
-    from .config import get_local_ip
+    from config import get_local_ip
     local_url = f"http://{get_local_ip()}:{settings.PORT}"
     # Use tunnel URL if active — allows pairing from outside the local network
     url = _tunnel_url or app_data.get("tunnel_url", "") or local_url
@@ -457,7 +457,7 @@ async def recheck_analysis(background_tasks: BackgroundTasks):
 
 
 def _run_analysis_job():
-    from .analyzer import analyze_track, _load_analysis, _save_analysis
+    from analyzer import analyze_track, _load_analysis, _save_analysis
 
     data   = parse_library()
     tracks = data.get("tracks", [])
@@ -520,7 +520,7 @@ async def get_similar(id: str, limit: int = 10, use_key: int = 1):
     _use_key = bool(use_key)
 
     def _compute():
-        from .similarity import find_similar
+        from similarity import find_similar
         data       = parse_library()
         all_tracks = data.get("tracks", [])
         results    = find_similar(id, all_tracks, store,

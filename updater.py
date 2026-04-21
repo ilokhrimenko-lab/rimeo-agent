@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
-from .config import settings, logger
+from config import settings, logger
 
 # ── Change this before first release ─────────────────────────────────────────
 GITHUB_REPO = "ilokhrimenko-lab/rimeo-agent"

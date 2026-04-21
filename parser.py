@@ -4,7 +4,7 @@ from datetime import datetime
 import logging
 import urllib.parse
 from typing import Dict, List, Any
-from .config import settings, logger
+from config import settings, logger
 
 # In-memory cache: avoids re-parsing XML on every /api/data request
 _xml_cache: Dict[str, Any] = {}

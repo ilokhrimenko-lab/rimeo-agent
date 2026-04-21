@@ -6,8 +6,8 @@ import threading
 import time
 from typing import Optional
 
-from .config import settings, logger, get_local_ip
-from .parser import parse_library
+from config import settings, logger, get_local_ip
+from parser import parse_library
 
 
 def _agent_icon_path() -> str:
@@ -253,7 +253,7 @@ class RimeoUI:
         """Windows: pystray in a background thread (Win32 has no main-thread req)."""
         try:
             import pystray
-            from RimeoAgent.tray import _make_icon
+            from tray import _make_icon
 
             def on_open(_icon=None, _item=None):
                 if _instance and _instance.page:
@@ -453,7 +453,7 @@ class RimeoUI:
     async def _check_updates_after_delay(self):
         import asyncio
         await asyncio.sleep(4)
-        from .updater import check_update_async
+        from updater import check_update_async
         check_update_async(self._on_update_found)
 
     def _on_update_found(self, info):
@@ -494,7 +494,7 @@ class RimeoUI:
         self.page.update()
 
     def _start_update_download(self, info):
-        from .updater import download_and_apply
+        from updater import download_and_apply
 
         self._upd_progress = ft.ProgressBar(
             value=0, color=C["acc"], bgcolor="white10", width=360,
@@ -696,8 +696,8 @@ class RimeoUI:
         self.page.update()
 
         def task():
-            from .analyzer import analyze_track
-            from .api_server import _load_analysis, _save_analysis
+            from analyzer import analyze_track
+            from api_server import _load_analysis, _save_analysis
 
             data = parse_library()
             tracks = data.get("tracks", [])
@@ -773,7 +773,7 @@ class RimeoUI:
 
     # ── Tab: Pairing ──────────────────────────────────────────────────────────
     def _show_pairing_tab(self):
-        from .api_server import _load_data
+        from api_server import _load_data
         data = _load_data()
         is_linked   = bool(data.get("cloud_url"))
         cloud_email = data.get("cloud_user_id", "") or data.get("cloud_url", "")
@@ -841,7 +841,7 @@ class RimeoUI:
             threading.Thread(target=_task, daemon=True).start()
 
         def _save_max_cache(_):
-            from .api_server import _load_data, _save_data as _sd
+            from api_server import _load_data, _save_data as _sd
             try:
                 val = max(1, int(self._cache_max_field.value or "3"))
                 d = _load_data(); d["max_cache_gb"] = val; _sd(d)
@@ -962,7 +962,7 @@ class RimeoUI:
 
     # ── Tab: Cloud Account ────────────────────────────────────────────────────
     def _show_cloud_tab(self):
-        from .api_server import _load_data
+        from api_server import _load_data
         data = _load_data()
         is_linked   = bool(data.get("cloud_url"))
         cloud_url   = data.get("cloud_url", "")
