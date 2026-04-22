@@ -60,6 +60,15 @@ jobs:
             --bundle-id app.rimeo.agent \
             --icon "$ICON_ICNS" \
             --add-data "rimeo1024.png:." \
+            --hidden-import "config" \
+            --hidden-import "api_server" \
+            --hidden-import "ui_app" \
+            --hidden-import "tray" \
+            --hidden-import "analyzer" \
+            --hidden-import "similarity" \
+            --hidden-import "updater" \
+            --hidden-import "parser" \
+            --hidden-import "build_info" \
             --hidden-import "uvicorn.logging" \
             --hidden-import "uvicorn.loops" \
             --hidden-import "uvicorn.loops.auto" \
@@ -72,7 +81,7 @@ jobs:
             --hidden-import "uvicorn.lifespan.on" \
             --hidden-import "fastapi" \
             --hidden-import "pydantic_settings" \
-            --pyinstaller-build-args="--additional-hooks-dir=build/hooks"
+            --pyinstaller-build-args="--paths=. --additional-hooks-dir=build/hooks"
 
       - name: Package
         run: |
@@ -136,6 +145,15 @@ jobs:
             --product-name "Rimeo Agent" `
             --icon "$env:ICON_ICO" `
             --add-data "rimeo1024.png;." `
+            --hidden-import "config" `
+            --hidden-import "api_server" `
+            --hidden-import "ui_app" `
+            --hidden-import "tray" `
+            --hidden-import "analyzer" `
+            --hidden-import "similarity" `
+            --hidden-import "updater" `
+            --hidden-import "parser" `
+            --hidden-import "build_info" `
             --hidden-import "uvicorn.logging" `
             --hidden-import "uvicorn.loops" `
             --hidden-import "uvicorn.loops.auto" `
@@ -148,7 +166,7 @@ jobs:
             --hidden-import "uvicorn.lifespan.on" `
             --hidden-import "fastapi" `
             --hidden-import "pydantic_settings" `
-            --pyinstaller-build-args="--additional-hooks-dir=build/hooks"
+            --pyinstaller-build-args="--paths=. --additional-hooks-dir=build/hooks"
 
       - name: Package
         run: Compress-Archive -Path dist\RimeoAgent.exe -DestinationPath dist\RimeoAgent_win.zip -Force
