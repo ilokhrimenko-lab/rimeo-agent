@@ -1,4 +1,4 @@
-# Fix: No module named 'config' — Build 105+
+# Fix: No module named 'config'
 
 ## Проблема
 
@@ -9,46 +9,81 @@ ModuleNotFoundError: No module named 'config'
 [PYI-...:ERROR] Failed to execute script 'run' due to unhandled exception: No module named 'config'
 ```
 
-## Причина
+---
 
-`flet pack` запускает PyInstaller **из другой рабочей директории** (внутреннего temp-каталога), поэтому:
+## Корень проблемы
 
-- `--paths=.` указывал на temp-каталог flet, а не на проект → `config.py` не находился при анализе
-- `--hidden-import "config"` без найденного исходника работает как no-op (PyInstaller предупреждает но не включает модуль)
-- `--additional-hooks-dir=build/hooks` указывал на каталог без хуков (только `.DS_Store`)
-
-В `run.py` при `__package__` == `''` (falsy, что всегда так в frozen bundle) код идёт по ветке:
+В `run.py` при `__package__` == `''` (всегда falsy в frozen bundle) код идёт по ветке:
 ```python
-from config import settings, logger  # config не найден в sys.path frozen bundle
+from config import settings, logger
 ```
 
-## История попыток
+Чтобы этот импорт сработал в frozen bundle, PyInstaller должен:
+1. Найти `config.py` **во время анализа** (phase: analysis)
+2. Включить его в `_MEIPASS` (куда PyInstaller распаковывает модули)
 
-### Build 105 — НЕ ПОМОГЛО
+`sys._MEIPASS` уже добавлен в `sys.path` PyInstaller'ом автоматически. Значит если `config.py` попал в бандл — импорт работает. Если нет — ошибка.
 
-Файл: `.github/workflows/build.yml`
+---
 
-Добавлено для macOS и Windows:
-- **`--paths=.`** в `--pyinstaller-build-args` — не помогло т.к. `.` — это temp-каталог flet, не проект
-- **`--additional-hooks-dir=build/hooks`** — каталог пустой (хуки удалены)
-- **`--hidden-import`** для всех локальных модулей — правильно, но без валидного `--paths` не работало
+## Build 105 — НЕ ПОМОГЛО
 
-Коммит: `011a9ba` — "Fix missing local module imports in frozen bundle"
+**Коммит:** `011a9ba` — "Fix missing local module imports in frozen bundle"  
+**Тег:** `v1.0-build105`
 
-### Build 106 — текущая попытка
+### Что сделали
 
-**Причина почему Build 105 не помог**: shell раскрывает `$(pwd)` ДО запуска flet pack. Значит `$(pwd)` = реальная директория проекта. Но `--paths=.` не раскрывается shell'ом — PyInstaller видит буквальную точку относительно своего CWD (temp-каталог flet).
+В `.github/workflows/build.yml` добавили в `flet pack`:
 
-**Что изменено**:
-- macOS: `--pyinstaller-build-args="--paths=."` → `--pyinstaller-build-args="--paths=$(pwd)"`
-- Windows: `--pyinstaller-build-args="--paths=."` → `"--pyinstaller-build-args=--paths=$($PWD.Path)"`
-- Убран `--additional-hooks-dir=build/hooks` (каталог хуков пустой)
+- `--hidden-import config` (и остальные локальные модули)
+- `--pyinstaller-build-args="--paths=. --additional-hooks-dir=build/hooks"`
 
-Файл: `.github/workflows/build.yml`
+### Почему не помогло
+
+`flet pack` **меняет рабочую директорию внутри** перед тем как вызывает PyInstaller. В итоге:
+
+- `--paths=.` указывает на temp-каталог flet, а не на папку проекта → `config.py` не найден при анализе
+- `--hidden-import "config"` без найденного исходника — no-op (PyInstaller предупреждает но модуль не включает)
+- `--additional-hooks-dir=build/hooks` — каталог хуков был пустым (все `.py`-хуки удалены, только `.DS_Store`)
+
+---
+
+## Build 106 — текущая попытка
+
+**Коммит:** `3078244` — "Use absolute path for PyInstaller --paths to fix config module bundling"  
+**Тег:** `v1.0-build106`
+
+### Что сделали
+
+В `.github/workflows/build.yml`:
+
+- macOS: `--paths=.` → `--paths=$(pwd)`
+- Windows: `--paths=.` → `--paths=$($PWD.Path)`
+- Убрали `--additional-hooks-dir=build/hooks`
+
+### Почему должно помочь
+
+Shell раскрывает `$(pwd)` **до** запуска `flet pack` — в момент раскрытия CWD ещё правильный (корень проекта). PyInstaller получает абсолютный путь, находит `config.py`, включает его в бандл.
+
+### Статус
+
+Тег запушен, GitHub Actions запущен:  
+https://github.com/ilokhrimenko-lab/rimeo-agent/actions
+
+---
 
 ## Если build 106 тоже не поможет
 
-Следующие варианты:
-1. Отказаться от `flet pack`, использовать прямой `pyinstaller` с `.spec`-файлом (полный контроль над `pathex`)
-2. Добавить в `run.py` явную манипуляцию `sys.path` перед импортами (`sys.path.insert(0, sys._MEIPASS)`)
-3. Использовать `--collect-all config` вместо `--hidden-import config`
+Следующие варианты по возрастанию радикальности:
+
+1. **`sys.path` в `run.py`** — добавить в начало файла перед импортами:
+   ```python
+   import sys
+   if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+       sys.path.insert(0, sys._MEIPASS)
+   ```
+   Работает только если config.py всё-таки попал в бандл.
+
+2. **`--collect-all config`** вместо `--hidden-import config` — явно собирает все файлы модуля.
+
+3. **Отказаться от `flet pack`**, перейти на прямой `pyinstaller` с `.spec`-файлом — полный контроль над `pathex`, `hiddenimports`, `datas`.
