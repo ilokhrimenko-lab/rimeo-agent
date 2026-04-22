@@ -8,7 +8,11 @@ warnings.filterwarnings("ignore", category=Warning, module="urllib3")
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
-from build_info import VERSION as BUILD_VERSION, BUILD_NUMBER, RELEASE_TAG
+
+if __package__:
+    from .build_info import VERSION as BUILD_VERSION, BUILD_NUMBER, RELEASE_TAG
+else:
+    from build_info import VERSION as BUILD_VERSION, BUILD_NUMBER, RELEASE_TAG
 
 
 def _display_version(version: str, build_number: str) -> str:

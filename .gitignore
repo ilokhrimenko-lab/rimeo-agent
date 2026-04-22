@@ -15,3 +15,4 @@ build/RimeoAgent/
 dist/
 *.spec
 .DS_Store
+.omx/

@@ -17,7 +17,10 @@ from typing import Optional, Dict, Any, Tuple, List
 
 import numpy as np
 
-from config import settings, logger
+if __package__:
+    from .config import settings, logger
+else:
+    from config import settings, logger
 
 SEGMENT_DURATION = 60.0   # seconds to analyse per track
 MFCC_COEFFS      = 13

@@ -4,7 +4,10 @@ from datetime import datetime
 import logging
 import urllib.parse
 from typing import Dict, List, Any
-from config import settings, logger
+if __package__:
+    from .config import settings, logger
+else:
+    from config import settings, logger
 
 # In-memory cache: avoids re-parsing XML on every /api/data request
 _xml_cache: Dict[str, Any] = {}

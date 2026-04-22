@@ -24,8 +24,12 @@ _CLOUD_HEADERS = {
     "Accept": "application/json",
 }
 
-from config import settings, logger
-from parser import parse_library
+if __package__:
+    from .config import settings, logger
+    from .parser import parse_library
+else:
+    from config import settings, logger
+    from parser import parse_library
 
 app = FastAPI(title=settings.APP_NAME, version=settings.DISPLAY_VERSION)
 
@@ -272,7 +276,10 @@ async def get_pairing_info():
     app_data["pairing_code"] = code
     _save_data(app_data)
 
-    from config import get_local_ip
+    if __package__:
+        from .config import get_local_ip
+    else:
+        from config import get_local_ip
     local_url = f"http://{get_local_ip()}:{settings.PORT}"
     # Use tunnel URL if active — allows pairing from outside the local network
     url = _tunnel_url or app_data.get("tunnel_url", "") or local_url

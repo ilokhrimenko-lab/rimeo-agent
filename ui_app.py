@@ -6,8 +6,12 @@ import threading
 import time
 from typing import Optional
 
-from config import settings, logger, get_local_ip
-from parser import parse_library
+if __package__:
+    from .config import settings, logger, get_local_ip
+    from .parser import parse_library
+else:
+    from config import settings, logger, get_local_ip
+    from parser import parse_library
 
 
 def _agent_icon_path() -> str:
@@ -47,25 +51,35 @@ def _build_macos_delegate():
 
         class _RimeoDelegate(AppKit.NSObject):
             def openWindow_(self, sender):
-                if _flet_running and _instance and _instance.page:
-                    # Flet is running — just show/focus the window
-                    try:
-                        _instance.page.window.visible = True
-                        _instance.page.update()
-                        AppKit.NSApp.activateIgnoringOtherApps_(True)
-                        return
-                    except Exception:
-                        pass
-                # Flet window is gone — signal the outer loop to restart it
-                _reopen_event.set()
+                _show_or_restart_window()
 
             def quitApp_(self, sender):
                 sys.exit(0)
+
+            # Fires when the user clicks the dock icon while the app is running
+            # (macOS activates the app → NSApplicationDidBecomeActiveNotification).
+            def appDidBecomeActive_(self, notification):
+                _show_or_restart_window()
 
         _macos_delegate = _RimeoDelegate.new()
     except Exception as e:
         logger.warning("Could not build macOS delegate: %s", e)
     return _macos_delegate
+
+
+def _show_or_restart_window():
+    """Show the Flet window if running, or signal the outer loop to restart it."""
+    import AppKit
+    if _flet_running and _instance and _instance.page:
+        try:
+            _instance.page.window.visible = True
+            _instance.page.update()
+            AppKit.NSApp.activateIgnoringOtherApps_(True)
+            return
+        except Exception:
+            pass
+    # Flet window is gone — signal the outer loop to restart it
+    _reopen_event.set()
 
 
 # ── UI helpers ────────────────────────────────────────────────────────────────
@@ -186,21 +200,21 @@ class RimeoUI:
             if not _statusbar_created:
                 _statusbar_created = True
 
-                ns_app = AppKit.NSApplication.sharedApplication()
-                # Launch as a regular macOS app so first-time users always get
-                # a visible Dock presence and a predictable way back to the window.
-                ns_app.setActivationPolicy_(
-                    AppKit.NSApplicationActivationPolicyRegular
-                )
-                try:
-                    ns_app.activateIgnoringOtherApps_(True)
-                except Exception:
-                    pass
-
                 delegate = _build_macos_delegate()
                 if delegate is None:
                     logger.error("macOS delegate is None — status bar not created")
                     return
+
+                # Dock-icon click fires NSApplicationDidBecomeActiveNotification;
+                # we use that to reopen the window instead of relying on
+                # applicationShouldHandleReopen (which Flet's delegate doesn't forward).
+                AppKit.NSNotificationCenter.defaultCenter() \
+                    .addObserver_selector_name_object_(
+                        delegate,
+                        "appDidBecomeActive:",
+                        AppKit.NSApplicationDidBecomeActiveNotification,
+                        None,
+                    )
 
                 sb = AppKit.NSStatusBar.systemStatusBar()
                 # Keep reference at class level so it survives Flet restarts
@@ -1267,6 +1281,15 @@ def _start_gui_macos():
     """
     import AppKit
     global _flet_running
+
+    # Set activation policy BEFORE Flet starts so macOS doesn't bounce the
+    # dock icon mid-launch when we change it later inside the async setup.
+    ns_app = AppKit.NSApplication.sharedApplication()
+    ns_app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyRegular)
+    try:
+        ns_app.activateIgnoringOtherApps_(True)
+    except Exception:
+        pass
 
     while True:
         logger.info("Launching Flet window")
