@@ -76,6 +76,19 @@ Windows — неизвестно (не проверялось)
 
 ---
 
+## Ссылки на скачивание (всегда актуальны)
+
+GitHub Releases поддерживает постоянный URL на последний релиз — менять в онбординге не нужно:
+
+```
+https://github.com/ilokhrimenko-lab/rimeo-agent/releases/latest/download/RimeoAgent_mac_arm64.zip
+https://github.com/ilokhrimenko-lab/rimeo-agent/releases/latest/download/RimeoAgent_win.zip
+```
+
+**Важно:** имена файлов в `build.yml` должны оставаться стабильными — `RimeoAgent_mac_arm64.zip` и `RimeoAgent_win.zip`. Если переименовать артефакт в workflow — ссылка сломается.
+
+---
+
 ## Если build 106 тоже не поможет
 
 Следующие варианты по возрастанию радикальности:
