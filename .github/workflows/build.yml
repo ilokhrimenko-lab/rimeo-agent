@@ -85,6 +85,17 @@ jobs:
 
       - name: Package
         run: |
+          # .pkg installer
+          PKG_SCRIPTS=$(mktemp -d)
+          printf '#!/bin/bash\nxattr -dr com.apple.quarantine /Applications/RimeoAgent.app 2>/dev/null || true\nexit 0\n' \
+              > "$PKG_SCRIPTS/postinstall"
+          chmod +x "$PKG_SCRIPTS/postinstall"
+          pkgbuild \
+              --install-location "/Applications" \
+              --component "dist/RimeoAgent.app" \
+              --scripts "$PKG_SCRIPTS" \
+              "dist/RimeoAgent_mac_arm64.pkg"
+          # .zip (app bundle)
           cd dist
           if [ -d "RimeoAgent.app" ]; then
             zip -r RimeoAgent_mac_arm64.zip RimeoAgent.app --quiet
@@ -95,7 +106,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: mac-arm64
-          path: dist/RimeoAgent_mac_arm64.zip
+          path: |
+            dist/RimeoAgent_mac_arm64.pkg
+            dist/RimeoAgent_mac_arm64.zip
 
   # build-mac-intel:
   #   Disabled intentionally.
@@ -203,5 +216,6 @@ jobs:
         with:
           name: ${{ env.RELEASE_NAME }}
           files: |
+            artifacts/mac-arm64/RimeoAgent_mac_arm64.pkg
             artifacts/mac-arm64/RimeoAgent_mac_arm64.zip
             artifacts/windows/RimeoAgent_win.zip

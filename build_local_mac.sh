@@ -73,8 +73,24 @@ flet pack run.py \
     --hidden-import "pydantic_settings" \
     --pyinstaller-build-args="--paths=$(pwd)"
 
-# 5. Package (same as CI)
-echo "==> Packaging..."
+# 5. Build .pkg installer
+echo "==> Creating .pkg installer..."
+PKG_SCRIPTS=$(mktemp -d)
+cat > "$PKG_SCRIPTS/postinstall" <<'POSTINSTALL'
+#!/bin/bash
+xattr -dr com.apple.quarantine /Applications/RimeoAgent.app 2>/dev/null || true
+exit 0
+POSTINSTALL
+chmod +x "$PKG_SCRIPTS/postinstall"
+
+pkgbuild \
+    --install-location "/Applications" \
+    --component "dist/RimeoAgent.app" \
+    --scripts "$PKG_SCRIPTS" \
+    "dist/RimeoAgent_mac_arm64.pkg"
+
+# 6. Also zip the .app (same as CI artifact)
+echo "==> Packaging .zip..."
 cd dist
 if [ -d "RimeoAgent.app" ]; then
     zip -r RimeoAgent_mac_arm64.zip RimeoAgent.app --quiet
@@ -84,5 +100,7 @@ fi
 cd ..
 
 echo ""
-echo "✓ Done: dist/RimeoAgent_mac_arm64.zip"
+echo "✓ Done:"
+echo "  dist/RimeoAgent_mac_arm64.pkg  (installer — для пользователей)"
+echo "  dist/RimeoAgent_mac_arm64.zip  (то же что GitHub Actions artifact)"
 echo "  Test: open dist/RimeoAgent.app"
