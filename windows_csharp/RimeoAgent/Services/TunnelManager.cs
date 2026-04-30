@@ -66,9 +66,9 @@ public sealed class TunnelManager
         var bundledNoExt = Path.Combine(AppContext.BaseDirectory, "cloudflared");
         if (File.Exists(bundledNoExt)) return bundledNoExt;
 
-        // Data directory download
-        var dataPath = Path.Combine(AppConfig.Shared.BaseDir, "cloudflared.exe");
-        if (File.Exists(dataPath)) return dataPath;
+        // Downloaded via ComponentManager
+        var component = ComponentManager.Shared.FindComponent("tunnel-runtime");
+        if (component != null) return component;
 
         // PATH search
         var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? "";

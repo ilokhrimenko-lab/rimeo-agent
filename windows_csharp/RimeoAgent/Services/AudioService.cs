@@ -159,6 +159,10 @@ public sealed class AudioService
         var plain = Path.Combine(bundleDir, name);
         if (File.Exists(plain)) return plain;
 
+        // Downloaded via ComponentManager
+        var component = ComponentManager.Shared.FindComponent(name);
+        if (component != null) return component;
+
         // Search PATH
         var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? "";
         foreach (var dir in pathEnv.Split(Path.PathSeparator))

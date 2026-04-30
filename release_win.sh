@@ -1,9 +1,9 @@
 #!/bin/bash
-# Push a new macOS-only release to GitHub.
+# Push a new Windows-only release to GitHub.
 # Reads the latest build number from GitHub, increments it, updates build_info.py,
-# commits, tags (mac-v1.0-buildNNN), and pushes — triggering only the macOS CI job.
+# commits, tags (win-v1.0-buildNNN), and pushes — triggering only the Windows CI job.
 #
-# Usage: ./release_mac.sh [message]
+# Usage: ./release_win.sh [message]
 
 set -euo pipefail
 
@@ -15,8 +15,8 @@ MESSAGE="${1:-}"
 # 1. Get latest build number from GitHub tags (not releases — failed builds don't create releases)
 echo "==> Fetching latest build number from GitHub..."
 LATEST_TAG=$(git ls-remote --tags origin \
-  | grep -oE '(mac-)?v1\.0-build[0-9]+$' \
-  | sed 's/^mac-//' \
+  | grep -oE '(mac-|win-)?v1\.0-build[0-9]+$' \
+  | sed 's/^\(mac-\|win-\)//' \
   | sed -n 's/^v1\.0-build\([0-9][0-9]*\)$/\1/p' \
   | sort -n | tail -1)
 
@@ -26,7 +26,7 @@ if [ -z "$LATEST_TAG" ]; then
 fi
 
 NEXT=$((LATEST_TAG + 1))
-TAG_NAME="mac-v1.0-build${NEXT}"
+TAG_NAME="win-v1.0-build${NEXT}"
 echo "    latest: build${LATEST_TAG}  →  new: build${NEXT} (${TAG_NAME})"
 
 # 2. Update build_info.py
@@ -46,6 +46,6 @@ git push origin main
 git push origin "$TAG_NAME"
 
 echo ""
-echo "✓ Pushed $TAG_NAME — macOS CI is building."
+echo "✓ Pushed $TAG_NAME — Windows CI is building."
 echo ""
 gh run watch

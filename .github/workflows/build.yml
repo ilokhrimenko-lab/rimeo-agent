@@ -6,11 +6,13 @@ on:
     tags:
       - 'v*'
       - 'mac-v*'
+      - 'win-v*'
 
 jobs:
   build-mac:
     name: macOS Apple Silicon (arm64)
     runs-on: macos-latest
+    if: "!startsWith(github.ref_name, 'win-')"
     steps:
       - uses: actions/checkout@v4
 
@@ -81,69 +83,43 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-dotnet@v4
         with:
-          python-version: "3.11"
+          dotnet-version: '8.0.x'
 
       - name: Prepare build metadata
         shell: pwsh
         run: |
           $tagName = $env:GITHUB_REF_NAME
-          $buildNumber = [regex]::Match($tagName, '^v1\.0-build(\d+)$').Groups[1].Value
+          $buildNumber = [regex]::Match($tagName, '^(win-)?v1\.0-build(\d+)$').Groups[2].Value
           if ([string]::IsNullOrWhiteSpace($buildNumber)) {
             $buildNumber = $env:GITHUB_RUN_NUMBER
           }
           "VERSION = `"1.0`"`nBUILD_NUMBER = `"$buildNumber`"`nRELEASE_TAG = `"$tagName`"" | Set-Content -Path build_info.py -Encoding utf8
 
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          python -m pip install "flet==0.28.3" "flet-cli==0.28.3" pyinstaller pillow
-          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu --quiet
-
       - name: Create icon
         shell: pwsh
         run: |
-          $iconPath = Join-Path $env:RUNNER_TEMP "RimeoAgent.ico"
-          python -c "from PIL import Image; img=Image.open('rimeo1024-windows.png').convert('RGBA'); img.save(r'$iconPath', format='ICO', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"
-          "ICON_ICO=$iconPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          python -m pip install pillow --quiet
+          python -c "from PIL import Image; img=Image.open('rimeo1024-bigsur.icns').convert('RGBA'); img.save(r'windows_csharp\RimeoAgent\Assets\rimeo.ico', format='ICO', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"
 
       - name: Build
         shell: pwsh
+        working-directory: windows_csharp
         run: |
-          flet pack run.py `
-            -y `
-            --name RimeoAgent `
-            --product-name "Rimeo Agent" `
-            --icon "$env:ICON_ICO" `
-            --add-data "rimeo1024.png;." `
-            --hidden-import "config" `
-            --hidden-import "api_server" `
-            --hidden-import "ui_app" `
-            --hidden-import "tray" `
-            --hidden-import "analyzer" `
-            --hidden-import "similarity" `
-            --hidden-import "updater" `
-            --hidden-import "parser" `
-            --hidden-import "build_info" `
-            --hidden-import "uvicorn.logging" `
-            --hidden-import "uvicorn.loops" `
-            --hidden-import "uvicorn.loops.auto" `
-            --hidden-import "uvicorn.protocols" `
-            --hidden-import "uvicorn.protocols.http" `
-            --hidden-import "uvicorn.protocols.http.auto" `
-            --hidden-import "uvicorn.protocols.websockets" `
-            --hidden-import "uvicorn.protocols.websockets.auto" `
-            --hidden-import "uvicorn.lifespan" `
-            --hidden-import "uvicorn.lifespan.on" `
-            --hidden-import "fastapi" `
-            --hidden-import "pydantic_settings" `
-            "--pyinstaller-build-args=--paths=$($PWD.Path)"
+          dotnet publish RimeoAgent/RimeoAgent.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -o ..\dist\RimeoAgent
+
+      - name: Copy build_info
+        shell: pwsh
+        run: Copy-Item build_info.py dist\RimeoAgent\build_info.py
 
       - name: Package
-        run: Compress-Archive -Path dist\RimeoAgent.exe -DestinationPath dist\RimeoAgent_win.zip -Force
         shell: pwsh
+        run: Compress-Archive -Path dist\RimeoAgent\* -DestinationPath dist\RimeoAgent_win.zip -Force
 
       - uses: actions/upload-artifact@v4
         with:
@@ -154,7 +130,7 @@ jobs:
     name: Attach to Release
     needs: [build-mac, build-windows]
     runs-on: ubuntu-latest
-    if: "always() && startsWith(github.ref, 'refs/tags/') && needs.build-mac.result == 'success'"
+    if: "always() && startsWith(github.ref, 'refs/tags/') && (needs.build-mac.result == 'success' || needs.build-windows.result == 'success')"
     permissions:
       contents: write
     steps:
@@ -165,15 +141,16 @@ jobs:
       - name: Prepare release title
         run: |
           TAG_NAME="${GITHUB_REF_NAME}"
-          BUILD_NUMBER=$(printf '%s' "$TAG_NAME" | sed -n 's/^\(mac-\)\{0,1\}v1\.0-build\([0-9][0-9]*\)$/\2/p')
+          BUILD_NUMBER=$(printf '%s' "$TAG_NAME" | sed -n 's/^\(mac-\|win-\)\{0,1\}v1\.0-build\([0-9][0-9]*\)$/\2/p')
           if [ -z "$BUILD_NUMBER" ]; then
             BUILD_NUMBER="${GITHUB_RUN_NUMBER}"
           fi
           echo "RELEASE_NAME=Release v1.0 (${BUILD_NUMBER})" >> "$GITHUB_ENV"
           echo "MAC_ONLY=$( [[ '${{ github.ref_name }}' == mac-* ]] && echo true || echo false )" >> "$GITHUB_ENV"
+          echo "WIN_ONLY=$( [[ '${{ github.ref_name }}' == win-* ]] && echo true || echo false )" >> "$GITHUB_ENV"
 
       - name: Upload to release (macOS + Windows)
-        if: env.MAC_ONLY == 'false'
+        if: env.MAC_ONLY == 'false' && env.WIN_ONLY == 'false'
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ env.RELEASE_NAME }}
@@ -188,3 +165,11 @@ jobs:
           name: ${{ env.RELEASE_NAME }}
           files: |
             artifacts/mac/RimeoAgent_mac.zip
+
+      - name: Upload to release (Windows only)
+        if: env.WIN_ONLY == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ env.RELEASE_NAME }}
+          files: |
+            artifacts/windows/RimeoAgent_win.zip

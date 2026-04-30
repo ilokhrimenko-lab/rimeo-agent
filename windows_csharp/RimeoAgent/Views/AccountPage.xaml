@@ -48,5 +48,15 @@
                 <TextBlock x:Name="VersionLabel"   FontSize="11" Foreground="Gray"/>
             </StackPanel>
         </Border>
+
+        <!-- System settings -->
+        <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" CornerRadius="8" Padding="16">
+            <StackPanel Spacing="8">
+                <TextBlock Text="System" FontWeight="SemiBold"/>
+                <ToggleSwitch x:Name="LaunchToggle"
+                              Header="Launch at Login"
+                              Toggled="LaunchToggle_Toggled"/>
+            </StackPanel>
+        </Border>
     </StackPanel>
 </Page>

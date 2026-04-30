@@ -18,6 +18,8 @@ public sealed partial class AccountPage : Page
         AgentIdLabel.Text  = AppConfig.Shared.AgentId;
         AgentUrlLabel.Text = AppConfig.Shared.LocalAgentUrl();
         VersionLabel.Text  = AppConfig.Shared.DisplayVersion;
+
+        LaunchToggle.IsOn = AgentSettings.LaunchAtLogin;
     }
 
     private async Task Refresh()
@@ -83,5 +85,10 @@ public sealed partial class AccountPage : Page
         await http.PostAsync($"http://127.0.0.1:{AppConfig.Port}/api/tunnel/stop",
             new StringContent(""));
         await Refresh();
+    }
+
+    private void LaunchToggle_Toggled(object sender, RoutedEventArgs e)
+    {
+        AgentSettings.LaunchAtLogin = LaunchToggle.IsOn;
     }
 }

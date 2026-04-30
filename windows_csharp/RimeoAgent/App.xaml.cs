@@ -25,6 +25,9 @@ public partial class App : Application
         _server = new AgentHttpServer();
         _server.Start();
 
+        // Ensure ffmpeg, ffprobe, cloudflared are downloaded
+        _ = ComponentManager.Shared.EnsureAllAsync(msg => Log.Info($"[components] {msg}"));
+
         // Start cloud relay if linked
         CloudRelay.Shared.StartIfLinked();
 
