@@ -103,13 +103,28 @@ jobs:
           python -m pip install pillow --quiet
           python -c "from PIL import Image; img=Image.open('rimeo1024-bigsur.icns').convert('RGBA'); img.save(r'windows_csharp\RimeoAgent\Assets\rimeo.ico', format='ICO', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"
 
-      - name: Build
+      - name: Show .NET environment
+        shell: pwsh
+        working-directory: windows_csharp
+        run: |
+          dotnet --info
+          dotnet --list-sdks
+
+      - name: Restore
+        shell: pwsh
+        working-directory: windows_csharp
+        run: |
+          dotnet restore RimeoAgent/RimeoAgent.csproj `
+            -r win-x64
+
+      - name: Publish
         shell: pwsh
         working-directory: windows_csharp
         run: |
           dotnet publish RimeoAgent/RimeoAgent.csproj `
             -c Release `
             -r win-x64 `
+            --no-restore `
             --self-contained true `
             -o ..\dist\RimeoAgent
 
