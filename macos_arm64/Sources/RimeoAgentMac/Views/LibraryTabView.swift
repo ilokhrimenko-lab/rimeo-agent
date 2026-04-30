@@ -1,9 +1,13 @@
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 
 struct LibraryTabView: View {
     @State private var statusMsg = ""
     @State private var dbAgeText = ""
     @State private var dbAgeColor = C.dim
+    @State private var xmlPath = AppConfig.shared.xmlPath
+    @State private var masterDBErr: String? = nil
 
     var body: some View {
         ScrollView {
@@ -58,6 +62,67 @@ struct LibraryTabView: View {
                     }
                     .padding(20)
                 }
+
+                // Warning when master.db can't be read
+                if let err = masterDBErr {
+                    SurfaceCard {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "exclamationmark.triangle")
+                                    .foregroundColor(C.amber)
+                                    .font(.system(size: 16))
+                                Text("master.db could not be read")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundColor(C.amber)
+                            }
+                            if err.contains("SQLCipher Python module missing") || err.contains("sqlcipher3") || err.contains("pysqlcipher3") {
+                                Text("This Mac build could not open Rekordbox master.db because the SQLCipher helper is missing. As a temporary workaround, export XML from Rekordbox and select it below.")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(C.dim)
+                            } else {
+                                Text(String(err.prefix(200)))
+                                    .font(.system(size: 11))
+                                    .foregroundColor(C.dim)
+                                    .lineLimit(3)
+                            }
+                        }
+                        .padding(16)
+                    }
+                }
+
+                Spacer().frame(height: 4)
+
+                SectionLabel(text: "REKORDBOX XML (ALTERNATIVE)")
+
+                SurfaceCard {
+                    VStack(alignment: .leading, spacing: 10) {
+                        let xmlExists = !xmlPath.isEmpty && FileManager.default.fileExists(atPath: xmlPath)
+                        HStack(spacing: 8) {
+                            Image(systemName: xmlExists ? "checkmark.circle" : (xmlPath.isEmpty ? "minus.circle" : "xmark.circle"))
+                                .foregroundColor(xmlExists ? C.green : C.dim)
+                                .font(.system(size: 18))
+                            Text(xmlExists ? "XML configured" : (xmlPath.isEmpty ? "Not configured" : "File not found"))
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(xmlExists ? C.green : C.dim)
+                        }
+
+                        if !xmlPath.isEmpty {
+                            Text(xmlPath)
+                                .font(.system(size: 11))
+                                .foregroundColor(C.dim)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+
+                        RimeoButton(
+                            title: xmlPath.isEmpty ? "Select rekordbox.xml" : "Change XML Path",
+                            icon: "folder",
+                            color: C.acc,
+                            action: pickXML
+                        )
+                    }
+                    .padding(20)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -98,11 +163,35 @@ struct LibraryTabView: View {
         DispatchQueue.global(qos: .userInitiated).async {
             RekordboxParser.shared.invalidateCache()
             let result = RekordboxParser.shared.parse()
+            let err = RekordboxParser.shared.masterDBError
             let source = result.source ?? (AppConfig.shared.dbExists ? "db" : "xml")
             DispatchQueue.main.async {
-                statusMsg = "✓ \(result.tracks.count) tracks, \(result.playlists.count) playlists  (\(source))"
+                masterDBErr = err
+                if result.tracks.count > 0 {
+                    statusMsg = "✓ \(result.tracks.count) tracks, \(result.playlists.count) playlists  (\(source))"
+                } else if err != nil {
+                    statusMsg = "0 tracks — library source could not be read"
+                } else {
+                    statusMsg = "0 tracks loaded"
+                }
                 refreshDatabaseAge()
             }
+        }
+    }
+
+    private func pickXML() {
+        let panel = NSOpenPanel()
+        panel.title = "Select rekordbox.xml"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.xml]
+        panel.allowsMultipleSelection = false
+
+        if panel.runModal() == .OK, let url = panel.url {
+            AppConfig.shared.setXMLPath(url.path)
+            RekordboxParser.shared.invalidateCache()
+            xmlPath = url.path
+            reloadLibrary()
         }
     }
 }

@@ -17,6 +17,7 @@ struct TrackFeatures: Codable {
     var timbre:     [Double]   // 13 MFCC coefficients
     var groove:     Double
     var happiness:  Double
+    var clap:       [Double]?  // 512-dim unit-normalised CLAP embedding (Python-generated, optional)
 }
 
 final class AnalysisEngine {
@@ -93,8 +94,12 @@ final class AnalysisEngine {
 
     // Analyse one track. Returns nil on failure.
     func analyzeTrack(_ track: Track) -> TrackFeatures? {
-        guard !track.id.isEmpty,
-              FileManager.default.fileExists(atPath: track.location) else {
+        TCCDiagnostics.logPathAccess("analysis", path: track.location)
+        let exists = FileManager.default.fileExists(atPath: track.location)
+        let readable = FileManager.default.isReadableFile(atPath: track.location)
+        TCCDiagnostics.logPathResult("analysis", path: track.location, exists: exists, readable: readable)
+
+        guard !track.id.isEmpty, exists else {
             logger.warning("Analysis skipped missing file: \(track.id) \(track.location)")
             return nil
         }

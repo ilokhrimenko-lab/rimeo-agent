@@ -1,0 +1,27 @@
+<Page
+    x:Class="RimeoAgent.Views.LogsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"   />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="Logs" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,8"/>
+
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8" Margin="0,0,0,8">
+            <Button Content="Refresh" Click="Refresh_Click"/>
+            <Button Content="Open Log File" Click="OpenFile_Click"/>
+            <ToggleButton x:Name="AutoScrollToggle" Content="Auto-scroll" IsChecked="True"/>
+        </StackPanel>
+
+        <ScrollViewer Grid.Row="2" x:Name="LogScroll">
+            <TextBlock x:Name="LogText"
+                       FontFamily="Consolas" FontSize="11"
+                       TextWrapping="Wrap"
+                       IsTextSelectionEnabled="True"/>
+        </ScrollViewer>
+    </Grid>
+</Page>

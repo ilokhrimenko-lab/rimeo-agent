@@ -7,15 +7,11 @@ on:
       - 'v*'
 
 jobs:
-  build-mac-arm64:
+  build-mac:
     name: macOS Apple Silicon (arm64)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
 
       - name: Prepare build metadata
         run: |
@@ -26,94 +22,71 @@ jobs:
           fi
           printf 'VERSION = "1.0"\nBUILD_NUMBER = "%s"\nRELEASE_TAG = "%s"\n' "$BUILD_NUMBER" "$TAG_NAME" > build_info.py
 
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          python -m pip install "flet==0.28.3" "flet-cli==0.28.3" pyinstaller pillow
-          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu --quiet
-
       - name: Create icon
         run: |
           ICON_ICNS="$RUNNER_TEMP/RimeoAgent.icns"
-          ICONSET=$(mktemp -d)/RimeoAgent.iconset
-          mkdir -p "$ICONSET"
-          sips -z 16   16   rimeo1024.png --out "$ICONSET/icon_16x16.png"       >/dev/null
-          sips -z 32   32   rimeo1024.png --out "$ICONSET/icon_16x16@2x.png"    >/dev/null
-          sips -z 32   32   rimeo1024.png --out "$ICONSET/icon_32x32.png"       >/dev/null
-          sips -z 64   64   rimeo1024.png --out "$ICONSET/icon_32x32@2x.png"    >/dev/null
-          sips -z 128  128  rimeo1024.png --out "$ICONSET/icon_128x128.png"     >/dev/null
-          sips -z 256  256  rimeo1024.png --out "$ICONSET/icon_128x128@2x.png"  >/dev/null
-          sips -z 256  256  rimeo1024.png --out "$ICONSET/icon_256x256.png"     >/dev/null
-          sips -z 512  512  rimeo1024.png --out "$ICONSET/icon_256x256@2x.png"  >/dev/null
-          sips -z 512  512  rimeo1024.png --out "$ICONSET/icon_512x512.png"     >/dev/null
-          sips -z 1024 1024 rimeo1024.png --out "$ICONSET/icon_512x512@2x.png"  >/dev/null
-          iconutil -c icns "$ICONSET" -o "$ICON_ICNS"
+          cp rimeo1024-bigsur.icns "$ICON_ICNS"
           echo "ICON_ICNS=$ICON_ICNS" >> "$GITHUB_ENV"
 
-      - name: Build
+      - name: Build macOS app (Universal — arm64 + x86_64)
         run: |
-          flet pack run.py \
-            -y \
-            --name RimeoAgent \
-            --product-name "Rimeo Agent" \
-            --bundle-id app.rimeo.agent \
-            --icon "$ICON_ICNS" \
-            --add-data "rimeo1024.png:." \
-            --hidden-import "config" \
-            --hidden-import "api_server" \
-            --hidden-import "ui_app" \
-            --hidden-import "tray" \
-            --hidden-import "analyzer" \
-            --hidden-import "similarity" \
-            --hidden-import "updater" \
-            --hidden-import "parser" \
-            --hidden-import "build_info" \
-            --hidden-import "uvicorn.logging" \
-            --hidden-import "uvicorn.loops" \
-            --hidden-import "uvicorn.loops.auto" \
-            --hidden-import "uvicorn.protocols" \
-            --hidden-import "uvicorn.protocols.http" \
-            --hidden-import "uvicorn.protocols.http.auto" \
-            --hidden-import "uvicorn.protocols.websockets" \
-            --hidden-import "uvicorn.protocols.websockets.auto" \
-            --hidden-import "uvicorn.lifespan" \
-            --hidden-import "uvicorn.lifespan.on" \
-            --hidden-import "fastapi" \
-            --hidden-import "pydantic_settings" \
-            --pyinstaller-build-args="--paths=$(pwd)"
+          cd macos_arm64
+          swift build -c release --arch arm64 --arch x86_64
+
+          UNIVERSAL="$PWD/.build/apple/Products/Release/RimeoAgent"
+          HELPER="$PWD/.build/apple/Products/Release/RekordboxDBHelper"
+          SQLCIPHER_FRAMEWORK="$PWD/.build/artifacts/sqlcipher.swift/SQLCipher/SQLCipher.xcframework/macos-arm64_x86_64/SQLCipher.framework"
+          if [ ! -f "$UNIVERSAL" ]; then
+            echo "ERROR: universal binary not found at $UNIVERSAL"
+            exit 1
+          fi
+          if [ ! -f "$HELPER" ]; then
+            echo "ERROR: helper binary not found at $HELPER"
+            exit 1
+          fi
+          if [ ! -d "$SQLCIPHER_FRAMEWORK" ]; then
+            echo "ERROR: SQLCipher.framework not found at $SQLCIPHER_FRAMEWORK"
+            exit 1
+          fi
+          echo "Universal archs: $(lipo -archs "$UNIVERSAL")"
+          echo "Helper archs: $(lipo -archs "$HELPER")"
+
+          APP="$GITHUB_WORKSPACE/dist/RimeoAgent.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
+          cp "$UNIVERSAL" "$APP/Contents/MacOS/RimeoAgent"
+          chmod +x "$APP/Contents/MacOS/RimeoAgent"
+          cp "$HELPER" "$APP/Contents/MacOS/rbdb-helper"
+          chmod +x "$APP/Contents/MacOS/rbdb-helper"
+          cp -R "$SQLCIPHER_FRAMEWORK" "$APP/Contents/Frameworks/SQLCipher.framework"
+          install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/rbdb-helper"
+          cp build/Info.plist "$APP/Contents/Info.plist"
+          cp "$ICON_ICNS" "$APP/Contents/Resources/RimeoAgent.icns"
+          cp "$GITHUB_WORKSPACE/build_info.py" "$APP/Contents/Resources/build_info.py"
+
+          # Bundle cloudflared (out-of-box tunnel, no user install needed)
+          CF_VERSION=$(curl -sf https://api.github.com/repos/cloudflare/cloudflared/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+          if [ -n "$CF_VERSION" ]; then
+            echo "Bundling cloudflared $CF_VERSION (universal)..."
+            curl -fL "https://github.com/cloudflare/cloudflared/releases/download/${CF_VERSION}/cloudflared-darwin-amd64" \
+                -o /tmp/cloudflared-amd64
+            curl -fL "https://github.com/cloudflare/cloudflared/releases/download/${CF_VERSION}/cloudflared-darwin-arm64" \
+                -o /tmp/cloudflared-arm64
+            lipo -create -output "$APP/Contents/MacOS/cloudflared" /tmp/cloudflared-amd64 /tmp/cloudflared-arm64
+            chmod +x "$APP/Contents/MacOS/cloudflared"
+            echo "cloudflared bundled: $CF_VERSION (universal)"
+          else
+            echo "WARNING: could not fetch cloudflared version, skipping bundle"
+          fi
 
       - name: Package
         run: |
-          # .pkg installer
-          PKG_SCRIPTS=$(mktemp -d)
-          printf '#!/bin/bash\nxattr -dr com.apple.quarantine /Applications/RimeoAgent.app 2>/dev/null || true\nexit 0\n' \
-              > "$PKG_SCRIPTS/postinstall"
-          chmod +x "$PKG_SCRIPTS/postinstall"
-          pkgbuild \
-              --install-location "/Applications" \
-              --component "dist/RimeoAgent.app" \
-              --scripts "$PKG_SCRIPTS" \
-              "dist/RimeoAgent_mac_arm64.pkg"
-          # .zip (app bundle)
           cd dist
-          if [ -d "RimeoAgent.app" ]; then
-            zip -r RimeoAgent_mac_arm64.zip RimeoAgent.app --quiet
-          else
-            zip RimeoAgent_mac_arm64.zip RimeoAgent --quiet
-          fi
+          zip -r RimeoAgent_mac.zip RimeoAgent.app --quiet
 
       - uses: actions/upload-artifact@v4
         with:
-          name: mac-arm64
-          path: |
-            dist/RimeoAgent_mac_arm64.pkg
-            dist/RimeoAgent_mac_arm64.zip
-
-  # build-mac-intel:
-  #   Disabled intentionally.
-  #   Intel macOS builds are paused to reduce runner queue time and ship only
-  #   the Apple Silicon desktop package for the current release line.
+          name: mac
+          path: dist/RimeoAgent_mac.zip
 
   build-windows:
     name: Windows (x86_64)
@@ -146,7 +119,7 @@ jobs:
         shell: pwsh
         run: |
           $iconPath = Join-Path $env:RUNNER_TEMP "RimeoAgent.ico"
-          python -c "from PIL import Image; img=Image.open('rimeo1024.png').convert('RGBA'); img.save(r'$iconPath', format='ICO', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+          python -c "from PIL import Image; img=Image.open('rimeo1024-windows.png').convert('RGBA'); img.save(r'$iconPath', format='ICO', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"
           "ICON_ICO=$iconPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build
@@ -192,7 +165,7 @@ jobs:
 
   release:
     name: Attach to Release
-    needs: [build-mac-arm64, build-windows]
+    needs: [build-mac, build-windows]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
@@ -216,6 +189,5 @@ jobs:
         with:
           name: ${{ env.RELEASE_NAME }}
           files: |
-            artifacts/mac-arm64/RimeoAgent_mac_arm64.pkg
-            artifacts/mac-arm64/RimeoAgent_mac_arm64.zip
+            artifacts/mac/RimeoAgent_mac.zip
             artifacts/windows/RimeoAgent_win.zip

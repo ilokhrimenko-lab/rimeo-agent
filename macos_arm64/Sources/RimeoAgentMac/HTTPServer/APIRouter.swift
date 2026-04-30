@@ -68,25 +68,41 @@ final class APIRouter {
         guard let filePath = req.queryParams["path"], !filePath.isEmpty else {
             return .error("path required", status: 400)
         }
+        let resolvedPath = resolveTrackPath(filePath)
         let trackID = req.queryParams["id"] ?? ""
         let preload = req.queryParams["preload"] == "1" || req.queryParams["preload"] == "true"
-        let ext     = (filePath as NSString).pathExtension.lowercased()
+        let ext     = (resolvedPath as NSString).pathExtension.lowercased()
+        let rangeHeader = req.headers["range"] ?? "(none)"
 
-        guard FileManager.default.fileExists(atPath: filePath) else {
+        logger.info("Stream request: track=\(trackID), preload=\(preload), range=\(rangeHeader), raw_path=\(filePath), resolved_path=\(resolvedPath)")
+        if filePath != resolvedPath {
+            logger.info("Stream path resolved: raw=\(filePath), resolved=\(resolvedPath)")
+        }
+
+        TCCDiagnostics.logPathAccess("stream", path: resolvedPath)
+        let exists = FileManager.default.fileExists(atPath: resolvedPath)
+        let readable = FileManager.default.isReadableFile(atPath: resolvedPath)
+        TCCDiagnostics.logPathResult("stream", path: resolvedPath, exists: exists, readable: readable)
+
+        guard exists else {
+            logger.warning("Stream request failed: file not found, track=\(trackID), path=\(resolvedPath)")
             return .error("File not found", status: 404)
         }
 
-        var finalPath = filePath
+        var finalPath = resolvedPath
         if ext == "aif" || ext == "aiff" {
             if preload {
                 DispatchQueue.global(qos: .utility).async {
-                    _ = try? AudioService.shared.ensureWAV(path: filePath, trackID: trackID)
+                    _ = try? AudioService.shared.ensureWAV(path: resolvedPath, trackID: trackID)
                 }
                 return .json(["status": "preloading"])
             }
+            logger.info("Stream request: converting AIFF if needed, track=\(trackID), path=\(resolvedPath)")
             do {
-                finalPath = try AudioService.shared.ensureWAV(path: filePath, trackID: trackID)
+                finalPath = try AudioService.shared.ensureWAV(path: resolvedPath, trackID: trackID)
+                logger.info("Stream request: AIFF ready, track=\(trackID), wav=\(finalPath)")
             } catch {
+                logger.warning("Stream request failed during AIFF conversion: track=\(trackID), error=\(error)")
                 return .error("Audio conversion failed — retry in a moment", status: 503)
             }
         } else if preload {
@@ -95,7 +111,10 @@ final class APIRouter {
 
         let mime    = mimeType(for: finalPath)
         let size    = (try? FileManager.default.attributesOfItem(atPath: finalPath))?[.size] as? Int ?? 0
-        guard size > 0 else { return .error("File empty", status: 404) }
+        guard size > 0 else {
+            logger.warning("Stream request failed: file empty, track=\(trackID), final_path=\(finalPath)")
+            return .error("File empty", status: 404)
+        }
 
         var start = 0
         var end   = size - 1
@@ -110,6 +129,7 @@ final class APIRouter {
         }
 
         guard start <= end, start < size else {
+            logger.warning("Stream request failed: invalid range=\(rangeHeader), track=\(trackID), size=\(size)")
             return HTTPResponse(
                 status:  416,
                 headers: ["Content-Range": "bytes */\(size)"],
@@ -120,6 +140,7 @@ final class APIRouter {
 
         let length    = end - start + 1
         let server    = HTTPServer(port: 0)   // reuse writeAll helper
+        logger.info("Stream response: track=\(trackID), status=206, mime=\(mime), bytes=\(start)-\(end)/\(size), length=\(length), final_path=\(finalPath)")
 
         return HTTPResponse(
             status: 206,
@@ -152,14 +173,17 @@ final class APIRouter {
               let id   = req.queryParams["id"],   !id.isEmpty else {
             return .error("path and id required", status: 400)
         }
+        let resolvedPath = resolveTrackPath(path)
+        TCCDiagnostics.logPathAccess("waveform", path: resolvedPath)
+        warmAiffConversionIfNeeded(path: resolvedPath, trackID: id)
         let preload = req.queryParams["preload"] == "1" || req.queryParams["preload"] == "true"
         if preload {
             DispatchQueue.global(qos: .utility).async {
-                _ = AudioService.shared.waveform(path: path, trackID: id)
+                _ = AudioService.shared.waveform(path: resolvedPath, trackID: id)
             }
             return .json(["status": "preloading"])
         }
-        let result = AudioService.shared.waveform(path: path, trackID: id)
+        let result = AudioService.shared.waveform(path: resolvedPath, trackID: id)
         return .json(result)
     }
 
@@ -170,16 +194,21 @@ final class APIRouter {
               let id   = req.queryParams["id"],   !id.isEmpty else {
             return .error("path and id required", status: 400)
         }
+        let resolvedPath = resolveTrackPath(path)
+        TCCDiagnostics.logPathAccess("artwork", path: resolvedPath)
+        warmAiffConversionIfNeeded(path: resolvedPath, trackID: id)
         let preload = req.queryParams["preload"] == "1" || req.queryParams["preload"] == "true"
         if preload {
             DispatchQueue.global(qos: .utility).async {
-                _ = AudioService.shared.artwork(path: path, trackID: id)
+                _ = AudioService.shared.artwork(path: resolvedPath, trackID: id)
             }
             return .json(["status": "preloading"])
         }
-        guard let artPath = AudioService.shared.artwork(path: path, trackID: id),
+        guard let artPath = AudioService.shared.artwork(path: resolvedPath, trackID: id),
               let data = try? Data(contentsOf: URL(fileURLWithPath: artPath)) else {
-            return .error("Artwork not found", status: 404)
+            // Missing artwork is a valid state for many audio files.
+            // Return 204 instead of 404 to avoid "track not found" handling on clients.
+            return HTTPResponse(status: 204, headers: [:], body: .empty)
         }
         return HTTPResponse(status: 200,
                             headers: ["Content-Type": "image/jpeg",
@@ -190,12 +219,59 @@ final class APIRouter {
     // MARK: - /reveal
 
     private func revealInFinder(_ req: HTTPRequest) -> HTTPResponse {
-        guard let path = req.queryParams["path"], FileManager.default.fileExists(atPath: path) else {
+        guard let path = req.queryParams["path"] else {
+            return .error("File not found", status: 404)
+        }
+        let resolvedPath = resolveTrackPath(path)
+        TCCDiagnostics.logPathAccess("reveal", path: resolvedPath)
+        let exists = FileManager.default.fileExists(atPath: resolvedPath)
+        let readable = FileManager.default.isReadableFile(atPath: resolvedPath)
+        TCCDiagnostics.logPathResult("reveal", path: resolvedPath, exists: exists, readable: readable)
+        guard exists else {
             return .error("File not found", status: 404)
         }
         Process.launchedProcess(launchPath: "/usr/bin/open",
-                                arguments: ["-R", path])
+                                arguments: ["-R", resolvedPath])
         return .json(["status": "ok"])
+    }
+
+    private func resolveTrackPath(_ rawPath: String) -> String {
+        if FileManager.default.fileExists(atPath: rawPath) {
+            return rawPath
+        }
+
+        let standardized = URL(fileURLWithPath: rawPath).standardizedFileURL.path
+        if FileManager.default.fileExists(atPath: standardized) {
+            logger.info("Path normalized via standardized URL: \(rawPath) -> \(standardized)")
+            return standardized
+        }
+
+        // Fallback for username drift between exported library paths and current macOS account.
+        let home = NSHomeDirectory()
+        let marker = "/Users/"
+        if rawPath.hasPrefix(marker) {
+            let parts = rawPath.split(separator: "/", omittingEmptySubsequences: false)
+            // "", "Users", "<username>", ...
+            if parts.count >= 4 {
+                let suffix = parts.dropFirst(3).joined(separator: "/")
+                let candidate = "\(home)/\(suffix)"
+                if FileManager.default.fileExists(atPath: candidate) {
+                    logger.warning("Path remapped to current home: \(rawPath) -> \(candidate)")
+                    return candidate
+                }
+            }
+        }
+
+        return rawPath
+    }
+
+    private func warmAiffConversionIfNeeded(path: String, trackID: String) {
+        let ext = (path as NSString).pathExtension.lowercased()
+        guard ext == "aif" || ext == "aiff" else { return }
+
+        DispatchQueue.global(qos: .utility).async {
+            _ = try? AudioService.shared.ensureWAV(path: path, trackID: trackID)
+        }
     }
 
     // MARK: - /api/data
@@ -511,6 +587,7 @@ final class APIRouter {
         let cfg  = AppConfig.shared
         let data = DataStore.shared.data
         let dbExists = !cfg.dbPath.isEmpty && FileManager.default.fileExists(atPath: cfg.dbPath)
+        let tunnel = currentTunnelInfo()
         return .json([
             "agent_id":   cfg.agentID,
             "version":    cfg.displayVersion,
@@ -521,6 +598,11 @@ final class APIRouter {
             "library_source": dbExists ? "db" : "xml",
             "cloud_url":  data.cloud_url,
             "is_linked":  !data.cloud_url.isEmpty,
+            "agent_url":  cfg.localAgentURL(),
+            "tunnel_url": tunnel.url,
+            "tunnel_active": tunnel.active,
+            "cloudflared_found": tunnel.cloudflaredFound,
+            "stream_transport": tunnel.url.isEmpty ? "relay_only" : "tunnel",
         ])
     }
 
@@ -529,12 +611,17 @@ final class APIRouter {
     private func getAccount(_ req: HTTPRequest) -> HTTPResponse {
         let cfg  = AppConfig.shared
         let data = DataStore.shared.data
+        let tunnel = currentTunnelInfo()
         return .json([
             "cloud_url":     data.cloud_url,
             "cloud_user_id": data.cloud_user_id as Any,
             "is_linked":     !data.cloud_url.isEmpty,
             "agent_id":      cfg.agentID,
             "agent_url":     cfg.localAgentURL(),
+            "tunnel_url":    tunnel.url,
+            "tunnel_active": tunnel.active,
+            "cloudflared_found": tunnel.cloudflaredFound,
+            "stream_transport": tunnel.url.isEmpty ? "relay_only" : "tunnel",
         ])
     }
 
@@ -631,13 +718,12 @@ final class APIRouter {
     // MARK: - Tunnel
 
     private func tunnelStatus(_ req: HTTPRequest) -> HTTPResponse {
-        let d      = DataStore.shared.data
-        let active = TunnelManager.shared.isRunning
-        let url    = active ? TunnelManager.shared.activeURL : ""
+        let tunnel = currentTunnelInfo()
         return .json([
-            "active":            active,
-            "url":               url,
-            "cloudflared_found": TunnelManager.shared.findCloudflared() != nil,
+            "active":            tunnel.active,
+            "url":               tunnel.url,
+            "stored_url":        tunnel.storedURL,
+            "cloudflared_found": tunnel.cloudflaredFound,
         ])
     }
 
@@ -720,6 +806,18 @@ final class APIRouter {
         return (url, t)
     }
 
+    private func currentTunnelInfo() -> (active: Bool, url: String, storedURL: String, cloudflaredFound: Bool) {
+        let active = TunnelManager.shared.isRunning
+        let activeURL = TunnelManager.shared.activeURL
+        let storedURL = DataStore.shared.data.tunnel_url
+        return (
+            active: active && !activeURL.isEmpty,
+            url: !activeURL.isEmpty ? activeURL : storedURL,
+            storedURL: storedURL,
+            cloudflaredFound: TunnelManager.shared.findCloudflared() != nil
+        )
+    }
+
     private func mimeType(for path: String) -> String {
         let ext = (path as NSString).pathExtension.lowercased()
         switch ext {
@@ -737,7 +835,7 @@ final class APIRouter {
 // Helper so TrackFeatures can expose its keys
 extension TrackFeatures {
     func asDictKeys() -> [String] {
-        var keys = ["energy", "timbre", "groove", "happiness"]
+        let keys = ["energy", "timbre", "groove", "happiness"]
         return keys
     }
 }

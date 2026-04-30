@@ -1,6 +1,78 @@
 import Foundation
 import Darwin
 
+func decodeFormQueryComponent(_ value: String) -> String {
+    value
+        .replacingOccurrences(of: "+", with: " ")
+        .removingPercentEncoding ?? value
+}
+
+func decodeQueryComponentPreservingPlus(_ value: String) -> String {
+    value.removingPercentEncoding ?? value
+}
+
+func parseFormQuery(_ queryString: String) -> [String: String] {
+    // Tolerant path extraction:
+    // Some clients may send `path` without escaping `&`, e.g.
+    // `path=/Users/.../Adam Ten & Rafael...&id=...`
+    // In that case naive split-by-& truncates the path.
+    if let pathStart = queryString.range(of: "path=")?.upperBound {
+        let tail = String(queryString[pathStart...])
+        let terminators = ["&id=", "&preload=", "&code=", "&limit=", "&use_key="]
+        var endIndex = tail.endIndex
+        for term in terminators {
+            if let r = tail.range(of: term), r.lowerBound < endIndex {
+                endIndex = r.lowerBound
+            }
+        }
+        let rawPathValue = String(tail[..<endIndex])
+        if rawPathValue.contains("&") && !rawPathValue.contains("%26") {
+            var safe = [String: String]()
+            safe["path"] = decodeQueryComponentPreservingPlus(rawPathValue)
+
+            // Parse the rest (non-path pairs) via regular parser.
+            var rest = queryString
+            if let pathRange = queryString.range(of: "path=\(rawPathValue)") {
+                rest.removeSubrange(pathRange)
+                rest = rest.replacingOccurrences(of: "&&", with: "&")
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "&"))
+            }
+            if !rest.isEmpty {
+                for pair in rest.split(separator: "&", omittingEmptySubsequences: true) {
+                    let parts = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                    guard !parts.isEmpty else { continue }
+                    let rawKey = String(parts[0])
+                    let rawValue = parts.count > 1 ? String(parts[1]) : ""
+                    let key = decodeFormQueryComponent(rawKey)
+                    let value = key == "path"
+                        ? decodeQueryComponentPreservingPlus(rawValue)
+                        : decodeFormQueryComponent(rawValue)
+                    safe[key] = value
+                }
+            }
+            return safe
+        }
+    }
+
+    var query = [String: String]()
+
+    for pair in queryString.split(separator: "&", omittingEmptySubsequences: true) {
+        let parts = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+        let rawKey = String(parts[0])
+        let rawValue = parts.count > 1 ? String(parts[1]) : ""
+        let key = decodeFormQueryComponent(rawKey)
+        // For file paths in query string, keep literal '+' characters.
+        // Some clients send '+' unescaped in URLs, and converting it to space
+        // breaks file resolution (e.g. "A+B.wav" -> "A B.wav").
+        let value = key == "path"
+            ? decodeQueryComponentPreservingPlus(rawValue)
+            : decodeFormQueryComponent(rawValue)
+        query[key] = value
+    }
+
+    return query
+}
+
 // Lightweight HTTP/1.1 server using POSIX sockets + GCD
 // Supports: Range requests, chunked streaming, binary responses
 
@@ -186,19 +258,7 @@ final class HTTPServer {
     private func parseTarget(_ target: String) -> (String, [String: String]) {
         let comps = target.components(separatedBy: "?")
         let path  = comps[0]
-        var query = [String: String]()
-        if comps.count > 1 {
-            for pair in comps[1].components(separatedBy: "&") {
-                let kv = pair.components(separatedBy: "=")
-                if kv.count == 2 {
-                    let k = kv[0].removingPercentEncoding ?? kv[0]
-                    let v = kv[1].removingPercentEncoding ?? kv[1]
-                    query[k] = v
-                } else if kv.count == 1 {
-                    query[kv[0]] = ""
-                }
-            }
-        }
+        let query = comps.count > 1 ? parseFormQuery(comps[1]) : [:]
         return (path, query)
     }
 

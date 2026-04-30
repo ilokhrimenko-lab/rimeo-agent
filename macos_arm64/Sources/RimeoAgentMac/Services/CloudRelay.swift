@@ -11,6 +11,7 @@ final class CloudRelay {
 
     private let pollQueue = DispatchQueue(label: "rimeo.relay.poll", qos: .utility)
     private let commandQueue = DispatchQueue(label: "rimeo.relay.command", qos: .utility, attributes: .concurrent)
+    private var lastAdvertisedTunnel: String?
 
     func startIfLinked() {
         let data = DataStore.shared.data
@@ -63,6 +64,7 @@ final class CloudRelay {
                let encodedTunnel = tunnel.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
                 pollURL += "&tunnel=\(encodedTunnel)"
             }
+            logTunnelAdvertisementIfChanged(tunnel)
 
             guard let url = URL(string: pollURL) else {
                 Thread.sleep(forTimeInterval: 10)
@@ -133,6 +135,39 @@ final class CloudRelay {
         }
     }
 
+    func noteTunnelChanged(_ tunnelURL: String) {
+        logger.info("Cloud relay tunnel state changed: tunnel_url=\(tunnelURL.isEmpty ? "(none)" : tunnelURL)")
+    }
+
+    func pushTunnelUpdate(_ tunnelURL: String) {
+        let data = DataStore.shared.data
+        guard !data.cloud_url.isEmpty, !data.cloud_token.isEmpty,
+              let encoded = tunnelURL.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let url = URL(string: "\(data.cloud_url)/api/relay/poll/\(AppConfig.shared.agentID)?token=\(data.cloud_token)&tunnel=\(encoded)") else { return }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 5
+        AppConfig.shared.applyCloudHeaders(to: &req)
+        URLSession.shared.dataTask(with: req) { _, _, _ in
+            logger.info("Tunnel URL pushed to cloud: \(tunnelURL)")
+        }.resume()
+    }
+
+    private func logTunnelAdvertisementIfChanged(_ tunnelURL: String) {
+        stateLock.lock()
+        let previous = lastAdvertisedTunnel
+        if previous != tunnelURL {
+            lastAdvertisedTunnel = tunnelURL
+        }
+        stateLock.unlock()
+
+        guard previous != tunnelURL else { return }
+        if tunnelURL.isEmpty {
+            logger.warning("Cloud relay advertising no tunnel URL. If the web app only plays audio through direct tunnel URLs, waveform/artwork can work while audio never requests /stream.")
+        } else {
+            logger.info("Cloud relay advertising tunnel URL: \(tunnelURL)")
+        }
+    }
+
     private func handleCommand(_ cmd: [String: Any], cloudURL: String) {
         let reqID = cmd["req_id"] as? String ?? ""
         let method = cmd["method"] as? String ?? "GET"
@@ -141,6 +176,12 @@ final class CloudRelay {
         let headers = rawHeaders.filter { !$0.key.isEmpty && !$0.value.isEmpty }
         let bodyB64 = cmd["body"] as? String
         let body = bodyB64.flatMap { Data(base64Encoded: $0) }
+        let rangeHeader = headers.first { $0.key.lowercased() == "range" }?.value ?? "(none)"
+
+        logger.info("Relay local request: req=\(reqID), method=\(method), path=\(path), range=\(rangeHeader), headers=\(headers.count), body_bytes=\(body?.count ?? 0)")
+        if path.hasPrefix("/stream"), rangeHeader == "(none)" {
+            logger.warning("Relay stream request has no Range header: req=\(reqID), path=\(path). Audio may require large buffered relay response.")
+        }
 
         guard let localURL = URL(string: "http://127.0.0.1:\(AppConfig.shared.port)\(path)") else { return }
 
@@ -159,6 +200,7 @@ final class CloudRelay {
         var resultStatus = 502
         var resultHeaders = [String: String]()
         var localError: Error?
+        let startedAt = Date()
 
         URLSession.shared.dataTask(with: req) { data, resp, error in
             localError = error
@@ -174,6 +216,7 @@ final class CloudRelay {
             sema.signal()
         }.resume()
         sema.wait()
+        let elapsed = Date().timeIntervalSince(startedAt)
 
         let result: [String: Any]
         if let localError {
@@ -185,6 +228,7 @@ final class CloudRelay {
                 "body_b64": Data(localError.localizedDescription.utf8).base64EncodedString(),
             ]
         } else {
+            logger.info("Relay local response: req=\(reqID), status=\(resultStatus), body_bytes=\(resultBody.count), elapsed=\(String(format: "%.2f", elapsed))s, path=\(path)")
             result = [
                 "req_id": reqID,
                 "status": resultStatus,
@@ -201,7 +245,7 @@ final class CloudRelay {
         var post = URLRequest(url: resultURL)
         post.httpMethod = "POST"
         post.httpBody = resultData
-        post.timeoutInterval = 10
+        post.timeoutInterval = 30
         AppConfig.shared.applyCloudHeaders(to: &post, contentType: "application/json")
 
         let sema2 = DispatchSemaphore(value: 0)

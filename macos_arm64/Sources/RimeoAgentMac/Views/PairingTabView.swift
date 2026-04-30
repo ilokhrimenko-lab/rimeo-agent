@@ -3,9 +3,6 @@ import AppKit
 
 struct PairingTabView: View {
     @EnvironmentObject var appState: AppState
-    @State private var cacheSize: Double = 0
-    @State private var maxCacheGB: String = "3"
-    @State private var cacheStatus = ""
 
     var body: some View {
         ScrollView {
@@ -75,82 +72,11 @@ struct PairingTabView: View {
                     .padding(20)
                 }
 
-                Spacer().frame(height: 4)
-
-                SectionLabel(text: "CACHE")
-                SurfaceCard {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("The cache stores converted audio (WAV), waveform data and artwork so tracks load faster on repeat plays.")
-                            .font(.system(size: 12))
-                            .foregroundColor(C.dim)
-
-                        Spacer().frame(height: 4)
-
-                        HStack(alignment: .center, spacing: 16) {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text(String(format: "%.2f GB used", cacheSize))
-                                    .font(.system(size: 22, weight: .bold))
-                                    .foregroundColor(C.text)
-
-                                ProgressView(value: cacheProgress)
-                                    .progressViewStyle(.linear)
-                                    .tint(cacheProgress > 0.9 ? C.red : (cacheProgress > 0.7 ? C.amber : C.acc))
-                                    .frame(width: 280)
-
-                                Text("of \(Int(Double(maxCacheGB) ?? 3)) GB max")
-                                    .font(.system(size: 12))
-                                    .foregroundColor(C.dim)
-                            }
-
-                            Spacer()
-
-                            VStack(alignment: .trailing, spacing: 4) {
-                                Text("Max cache (GB)")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(C.dim)
-
-                                HStack(spacing: 8) {
-                                    TextField("3", text: $maxCacheGB)
-                                        .frame(width: 72)
-                                        .textFieldStyle(.roundedBorder)
-                                        .multilineTextAlignment(.center)
-
-                                    RimeoButton(title: "Save", icon: nil, color: C.acc, action: saveMaxCache)
-                                }
-                            }
-                        }
-
-                        HStack(spacing: 12) {
-                            Button(action: clearCache) {
-                                HStack(spacing: 8) {
-                                    Image(systemName: "trash")
-                                    Text("Clear Cache")
-                                        .font(.system(size: 13, weight: .medium))
-                                }
-                                .foregroundColor(C.red)
-                                .padding(.horizontal, 20)
-                                .padding(.vertical, 10)
-                                .background(C.surf)
-                                .cornerRadius(16)
-                                .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color(hex: "#7f1d1d"), lineWidth: 1))
-                            }
-                            .buttonStyle(.plain)
-
-                            if !cacheStatus.isEmpty {
-                                Text(cacheStatus)
-                                    .font(.system(size: 12))
-                                    .foregroundColor(cacheStatus.hasPrefix("✓") ? C.green : C.red)
-                            }
-                        }
-                    }
-                    .padding(20)
-                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(C.bg)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onAppear { refreshCacheSize() }
     }
 
     @ViewBuilder
@@ -184,55 +110,6 @@ struct PairingTabView: View {
             .overlay(RoundedRectangle(cornerRadius: 16).stroke(C.brd, lineWidth: 1))
             .clipShape(RoundedRectangle(cornerRadius: 16))
         }
-    }
-
-    private var cacheProgress: Double {
-        let maxGB = Double(maxCacheGB) ?? 3.0
-        guard maxGB > 0 else { return 0 }
-        return min(cacheSize / maxGB, 1.0)
-    }
-
-    private func refreshCacheSize() {
-        let dir = AppConfig.shared.cacheDir
-        let stored = Int(DataStore.shared.data.max_cache_gb)
-        if stored > 0 { maxCacheGB = "\(stored)" }
-
-        DispatchQueue.global(qos: .utility).async {
-            var total: Int64 = 0
-            if let enumerator = FileManager.default.enumerator(at: dir, includingPropertiesForKeys: [.fileSizeKey]) {
-                for case let url as URL in enumerator {
-                    total += (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize.map { Int64($0) } ?? 0
-                }
-            }
-            let gb = Double(total) / 1_073_741_824
-            DispatchQueue.main.async { cacheSize = gb }
-        }
-    }
-
-    private func clearCache() {
-        cacheStatus = "Clearing…"
-        DispatchQueue.global(qos: .utility).async {
-            let dir = AppConfig.shared.cacheDir
-            do {
-                let files = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
-                for file in files { try? FileManager.default.removeItem(at: file) }
-                DispatchQueue.main.async {
-                    cacheStatus = "✓ Cache cleared"
-                    refreshCacheSize()
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    cacheStatus = "Error: \(error.localizedDescription)"
-                }
-            }
-        }
-    }
-
-    private func saveMaxCache() {
-        let value = max(1, Int(maxCacheGB) ?? 3)
-        DataStore.shared.update { $0.max_cache_gb = Double(value) }
-        maxCacheGB = "\(value)"
-        cacheStatus = "✓ Max cache set to \(value) GB"
     }
 
     private func openRimeoApp() {

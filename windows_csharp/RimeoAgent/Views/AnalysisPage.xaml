@@ -1,0 +1,40 @@
+<Page
+    x:Class="RimeoAgent.Views.AnalysisPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*"    />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="Analysis" Style="{StaticResource TitleTextBlockStyle}" Margin="0,0,0,8"/>
+
+        <!-- Buttons -->
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="8" Margin="0,0,0,8">
+            <Button x:Name="StartBtn"   Content="Start Analysis" Click="Start_Click"   />
+            <Button x:Name="StopBtn"    Content="Stop"           Click="Stop_Click"    IsEnabled="False"/>
+            <Button x:Name="RecheckBtn" Content="Recheck"        Click="Recheck_Click" />
+        </StackPanel>
+
+        <!-- Progress -->
+        <StackPanel Grid.Row="2" Margin="0,0,0,8">
+            <ProgressBar x:Name="ProgressBar" Minimum="0" Maximum="100" Value="0" Height="6" Margin="0,0,0,4"/>
+            <TextBlock x:Name="ProgressLabel" FontSize="12" Foreground="Gray"/>
+        </StackPanel>
+
+        <!-- Stats -->
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="16" Margin="0,0,0,8">
+            <TextBlock x:Name="StatAnalyzed"     FontSize="12"/>
+            <TextBlock x:Name="StatUnavailable"  FontSize="12" Foreground="Gray"/>
+            <TextBlock x:Name="StatErrors"       FontSize="12" Foreground="OrangeRed"/>
+        </StackPanel>
+
+        <!-- Current track -->
+        <TextBlock Grid.Row="4" x:Name="CurrentTrack" FontSize="13"
+                   Foreground="Gray" TextWrapping="Wrap" VerticalAlignment="Top"/>
+    </Grid>
+</Page>

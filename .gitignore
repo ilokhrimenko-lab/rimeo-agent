@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 *.pyo
+*.swp
 .env
 
 # Runtime data
@@ -8,7 +9,11 @@ rimo_data.json
 analysis_data.json
 agent.log
 cache/
-macos_arm64/
+macos_arm64/.build/
+macos_arm64/.swiftpm/
+macos_arm64/.DS_Store
+macos_arm64/Sources/.DS_Store
+macos_arm64/Sources/RimeoAgentMac/.DS_Store
 
 # Build output
 build/RimeoAgent/

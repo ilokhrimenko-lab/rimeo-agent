@@ -45,15 +45,22 @@ final class SimilarityEngine {
                       useKey: Bool) -> MatchScore? {
         guard let ts = tempoScore(bpmA: trackA.bpm, bpmB: trackB.bpm) else { return nil }
 
-        let vs = vibeScore(featA: featA, featB: featB)
+        let cs = clapScore(featA: featA, featB: featB)
+        let vs = cs ?? vibeScore(featA: featA, featB: featB)
         let ks = camelotScore(keyA: trackA.key, keyB: trackB.key)
         let ms = metadataScore(trackA: trackA, trackB: trackB)
 
         let total: Double
-        if useKey {
-            total = (vs * 0.45 + ks * 0.25 + ts * 0.20 + ms * 0.10) * 100
+        if cs != nil {
+            // CLAP mode — embedding dominates, key/tempo as minor anchors
+            total = useKey
+                ? (vs * 0.80 + ks * 0.12 + ts * 0.08) * 100
+                : (vs * 0.90 + ts * 0.10) * 100
         } else {
-            total = (vs * 0.60 + ts * 0.25 + ms * 0.15) * 100
+            // MFCC fallback
+            total = useKey
+                ? (vs * 0.45 + ks * 0.25 + ts * 0.20 + ms * 0.10) * 100
+                : (vs * 0.60 + ts * 0.25 + ms * 0.15) * 100
         }
 
         let keyVal = round(ks * 100 * 10) / 10
@@ -64,8 +71,15 @@ final class SimilarityEngine {
             harmony:  keyVal,
             tempo:    round(ts * 100 * 10) / 10,
             metadata: round(ms * 100 * 10) / 10,
-            clap:     false
+            clap:     cs != nil
         )
+    }
+
+    // Cosine similarity between pre-normalised 512-dim CLAP embeddings → 0–1
+    private func clapScore(featA: TrackFeatures, featB: TrackFeatures) -> Double? {
+        guard let a = featA.clap, let b = featB.clap, !a.isEmpty, a.count == b.count else { return nil }
+        let dot = zip(a, b).map(*).reduce(0, +)
+        return round((dot + 1.0) / 2.0 * 10000) / 10000
     }
 
     // BPM delta filter: >8 → nil (hard exclude), 0–8 → 0.25–1.0

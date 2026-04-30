@@ -20,15 +20,23 @@ struct ContentView: View {
     @EnvironmentObject var appState: AppState
 
     var body: some View {
-        ZStack {
-            if appState.isOnboarding {
-                OnboardingView()
-            } else {
-                MainLayout()
+        Group {
+            switch appState.componentGateState {
+            case .clear:
+                if appState.isOnboarding {
+                    OnboardingView()
+                } else {
+                    MainLayout()
+                        .sheet(isPresented: $appState.showDiskAccessBanner) {
+                            DiskAccessBannerView()
+                        }
+                }
+            default:
+                ComponentGateView()
             }
-            if appState.showDiskAccessBanner {
-                DiskAccessBannerView()
-            }
+        }
+        .onAppear {
+            appState.refreshDiskAccessBannerState()
         }
     }
 }
@@ -55,6 +63,16 @@ struct MainLayout: View {
         .background(C.bg)
         .preferredColorScheme(.dark)
         .padding(.top, 8)
+        .overlay(
+            VStack {
+                Spacer()
+                if appState.tunnelRateLimited {
+                    TunnelRateLimitBanner()
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .animation(.easeInOut(duration: 0.3), value: appState.tunnelRateLimited)
+        )
     }
 
     @ViewBuilder
@@ -78,7 +96,7 @@ struct RailSidebarView: View {
         ("waveform",  "Analysis", 1),
         ("qrcode",    "Pairing",  2),
         ("cloud",     "Account",  3),
-        ("terminal",  "Logs",     4),
+        ("gearshape", "Settings", 4),
     ]
 
     var body: some View {
@@ -211,6 +229,26 @@ struct RimeoButton: View {
             .cornerRadius(10)
         }
         .buttonStyle(.plain)
+    }
+}
+
+struct TunnelRateLimitBanner: View {
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundColor(C.amber)
+                .font(.system(size: 13))
+            Text("Too many tunnel connection attempts. Retrying in \(appState.tunnelRetryIn).")
+                .font(.system(size: 12))
+                .foregroundColor(C.text)
+            Spacer()
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .background(C.amber.opacity(0.12))
+        .overlay(Rectangle().frame(height: 1).foregroundColor(C.amber.opacity(0.35)), alignment: .top)
     }
 }
 

@@ -42,7 +42,7 @@ struct AnalysisTabView: View {
 
                         ProgressView(value: progressValue)
                             .progressViewStyle(.linear)
-                            .tint(C.acc)
+                            .accentColor(C.acc)
                             .frame(maxWidth: 400)
 
                         HStack(spacing: 12) {

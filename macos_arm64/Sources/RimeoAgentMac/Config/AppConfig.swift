@@ -11,7 +11,7 @@ final class AppConfig {
     let displayVersion: String
     let port: UInt16 = 8000
     let rimeoAppURL = "https://rimeo.app"
-    let githubRepo  = "your-org/rimeo"
+    let githubRepo  = "ilokhrimenko-lab/rimeo-agent"
 
     let baseDir:      URL
     let cacheDir:     URL

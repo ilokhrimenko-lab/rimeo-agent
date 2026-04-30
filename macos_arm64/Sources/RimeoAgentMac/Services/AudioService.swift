@@ -19,17 +19,36 @@ final class AudioService {
     // Returns path to a WAV file (from cache or freshly converted)
     func ensureWAV(path: String, trackID: String) throws -> String {
         let cached = AppConfig.shared.cacheDir.appendingPathComponent("conv_\(trackID).wav")
-        if FileManager.default.fileExists(atPath: cached.path) { return cached.path }
+        if FileManager.default.fileExists(atPath: cached.path) {
+            logger.info("AIFF conversion cache hit: track=\(trackID), wav=\(cached.path)")
+            return cached.path
+        }
 
         let lock = convLock(for: trackID)
         lock.lock(); defer { lock.unlock() }
-        if FileManager.default.fileExists(atPath: cached.path) { return cached.path }
+        if FileManager.default.fileExists(atPath: cached.path) {
+            logger.info("AIFF conversion cache hit after lock: track=\(trackID), wav=\(cached.path)")
+            return cached.path
+        }
 
         logger.info("Converting AIFF → WAV: \(trackID)")
+        TCCDiagnostics.logPathAccess("convert-aiff", path: path)
+        let exists = FileManager.default.fileExists(atPath: path)
+        let readable = FileManager.default.isReadableFile(atPath: path)
+        TCCDiagnostics.logPathResult("convert-aiff", path: path, exists: exists, readable: readable)
+        logger.info("AIFF conversion input: track=\(trackID), exists=\(exists), readable=\(readable), path=\(path)")
+        if let ffmpegPath = findBinary("ffmpeg") {
+            logger.info("AIFF conversion ffmpeg: track=\(trackID), binary=\(ffmpegPath)")
+        } else {
+            logger.warning("AIFF conversion ffmpeg missing: track=\(trackID)")
+        }
         let result = runFFmpeg(["-i", path, "-f", "wav", cached.path, "-y"], timeout: 120)
         guard result.success, FileManager.default.fileExists(atPath: cached.path) else {
+            logger.warning("AIFF conversion failed: track=\(trackID), stderr=\(result.stderr)")
             throw AudioError.conversionFailed(result.stderr)
         }
+        let size = (try? FileManager.default.attributesOfItem(atPath: cached.path))?[.size] as? Int ?? 0
+        logger.info("AIFF conversion complete: track=\(trackID), wav=\(cached.path), bytes=\(size)")
         return cached.path
     }
 
@@ -41,7 +60,10 @@ final class AudioService {
             return json
         }
 
-        guard FileManager.default.fileExists(atPath: path) else {
+        let exists = FileManager.default.fileExists(atPath: path)
+        let readable = FileManager.default.isReadableFile(atPath: path)
+        TCCDiagnostics.logPathResult("waveform", path: path, exists: exists, readable: readable)
+        guard exists else {
             return ["duration": 0.0, "peaks": [Double]()]
         }
 
@@ -59,6 +81,7 @@ final class AudioService {
                    "-filter:a", "aresample=100", "-f", "s8", "-"]
         let result = runFFmpeg(cmd, timeout: 60)
         guard result.success, !result.rawOutput.isEmpty else {
+            logger.warning("Waveform failed: track=\(trackID), stderr=\(result.stderr)")
             return ["duration": duration, "peaks": [Double]()]
         }
 
@@ -88,18 +111,51 @@ final class AudioService {
     func artwork(path: String, trackID: String) -> String? {
         let cacheURL = AppConfig.shared.cacheDir.appendingPathComponent("art_\(trackID).jpg")
         if FileManager.default.fileExists(atPath: cacheURL.path) { return cacheURL.path }
-        guard FileManager.default.fileExists(atPath: path) else { return nil }
+        let exists = FileManager.default.fileExists(atPath: path)
+        let readable = FileManager.default.isReadableFile(atPath: path)
+        TCCDiagnostics.logPathResult("artwork", path: path, exists: exists, readable: readable)
+        guard exists else { return nil }
+
+        // WAV/AIFF and many plain audio files do not contain embedded artwork streams.
+        // Probe first so we do not treat a "no stream" case as an extraction failure.
+        let probe = runFFmpeg(
+            [
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=index",
+                "-of", "csv=p=0",
+                path
+            ],
+            binary: "ffprobe",
+            timeout: 12
+        )
+        let hasArtworkStream = !probe.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if !hasArtworkStream {
+            logger.info("Artwork stream missing: track=\(trackID)")
+            return nil
+        }
 
         let result = runFFmpeg([
-            "-i", path, "-an", "-vcodec", "mjpeg",
-            "-vframes", "1", "-s", "512x512", cacheURL.path, "-y"
+            "-v", "error",
+            "-i", path,
+            "-map", "0:v:0",
+            "-an",
+            "-vcodec", "mjpeg",
+            "-vframes", "1",
+            "-s", "512x512",
+            cacheURL.path,
+            "-y"
         ], timeout: 45)
-        return (result.success && FileManager.default.fileExists(atPath: cacheURL.path))
-            ? cacheURL.path : nil
+        let ok = result.success && FileManager.default.fileExists(atPath: cacheURL.path)
+        if !ok {
+            logger.warning("Artwork extraction failed: track=\(trackID), stderr=\(result.stderr)")
+        }
+        return ok ? cacheURL.path : nil
     }
 
     // Probe duration only
     func probeDuration(_ path: String) -> Double {
+        TCCDiagnostics.logPathAccess("probe-duration", path: path)
         let r = runFFmpeg(
             ["-v", "error", "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", path],
@@ -113,6 +169,7 @@ final class AudioService {
     func extractSegment(path: String, start: Double, duration: Double) -> String? {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("rimeo_seg_\(UUID().uuidString).wav")
+        TCCDiagnostics.logPathAccess("extract-segment", path: path)
         let result = runFFmpeg([
             "-v", "error",
             "-ss", String(start), "-t", String(duration),
@@ -120,7 +177,10 @@ final class AudioService {
             "-ac", "1", "-ar", "22050",
             "-f", "wav", "-y", tmp.path
         ], timeout: 45)
-        guard result.success, FileManager.default.fileExists(atPath: tmp.path) else { return nil }
+        guard result.success, FileManager.default.fileExists(atPath: tmp.path) else {
+            logger.warning("Segment extraction failed: stderr=\(result.stderr)")
+            return nil
+        }
         return tmp.path
     }
 }
@@ -136,6 +196,7 @@ struct RunResult {
 
 func runFFmpeg(_ args: [String], binary: String = "ffmpeg", timeout: TimeInterval = 120) -> RunResult {
     guard let bin = findBinary(binary) else {
+        logger.warning("Audio command failed: \(binary) not found")
         return RunResult(success: false, stdout: "", stderr: "\(binary) not found", rawOutput: [])
     }
     let proc = Process()
@@ -194,22 +255,14 @@ func runFFmpeg(_ args: [String], binary: String = "ffmpeg", timeout: TimeInterva
 }
 
 func findBinary(_ name: String) -> String? {
-    let paths = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/opt/homebrew/opt/ffmpeg/bin"]
-    for dir in paths {
-        let full = "\(dir)/\(name)"
-        if FileManager.default.fileExists(atPath: full) { return full }
-    }
-    // Try PATH via which
-    let proc = Process()
-    proc.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-    proc.arguments = [name]
-    let pipe = Pipe()
-    proc.standardOutput = pipe
-    proc.standardError  = Pipe()
-    try? proc.run(); proc.waitUntilExit()
-    let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    return out.isEmpty ? nil : out
+    let bundled = Bundle.main.bundleURL
+        .appendingPathComponent("Contents/MacOS/\(name)").path
+    if FileManager.default.isExecutableFile(atPath: bundled) { return bundled }
+
+    let component = ComponentManager.shared.componentURL(id: name).path
+    if FileManager.default.isExecutableFile(atPath: component) { return component }
+
+    return findSystemExecutable(name)
 }
 
 enum AudioError: Error {

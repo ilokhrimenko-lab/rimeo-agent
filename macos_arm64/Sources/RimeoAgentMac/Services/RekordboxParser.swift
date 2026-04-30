@@ -8,6 +8,12 @@ final class RekordboxParser: NSObject {
     private var cachedMtime: Double = 0
     private var cachedSourceKey: String = ""
 
+    // Last error from master.db helper; nil when last attempt succeeded or cache was cleared
+    private(set) var masterDBError: String? = nil
+    // Avoid re-running the Python helper for the same file version that already failed
+    private var masterDBLastFailedPath:  String = ""
+    private var masterDBLastFailedMtime: Double = -1
+
     func parse() -> LibraryData {
         return queue.sync { _parse() }
     }
@@ -21,13 +27,21 @@ final class RekordboxParser: NSObject {
                 return cached
             }
 
-            if let dbResult = parseMasterDB(dbPath: dbPath, mtime: mtime),
-               !dbResult.tracks.isEmpty {
-                cachedData = dbResult
-                cachedMtime = mtime
-                cachedSourceKey = cacheKey
-                logger.info("master.db parsed: \(dbResult.tracks.count) tracks")
-                return dbResult
+            let alreadyFailed = dbPath == masterDBLastFailedPath && mtime == masterDBLastFailedMtime
+            if !alreadyFailed {
+                if let dbResult = parseMasterDB(dbPath: dbPath, mtime: mtime),
+                   !dbResult.tracks.isEmpty {
+                    cachedData = dbResult
+                    cachedMtime = mtime
+                    cachedSourceKey = cacheKey
+                    masterDBError = nil
+                    masterDBLastFailedPath = ""
+                    masterDBLastFailedMtime = -1
+                    logger.info("master.db parsed: \(dbResult.tracks.count) tracks")
+                    return dbResult
+                }
+                masterDBLastFailedPath = dbPath
+                masterDBLastFailedMtime = mtime
             }
         }
 
@@ -176,6 +190,9 @@ final class RekordboxParser: NSObject {
             cachedMtime = 0
             cachedData = nil
             cachedSourceKey = ""
+            masterDBLastFailedMtime = -1
+            masterDBLastFailedPath = ""
+            masterDBError = nil
         }
     }
 
@@ -189,8 +206,84 @@ final class RekordboxParser: NSObject {
     }
 
     private func parseMasterDB(dbPath: String, mtime: Double) -> LibraryData? {
+        if let nativeResult = parseMasterDBWithBundledHelper(dbPath: dbPath, mtime: mtime) {
+            return nativeResult
+        }
+        return parseMasterDBWithPythonHelper(dbPath: dbPath, mtime: mtime)
+    }
+
+    private func parseMasterDBWithBundledHelper(dbPath: String, mtime: Double) -> LibraryData? {
+        guard let helper = bundledMasterDBHelperPath() else {
+            logger.info("bundled master.db helper not found; falling back to Python helper")
+            return nil
+        }
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: helper)
+        let tempOutput = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rimeo_masterdb_native_\(UUID().uuidString).json")
+        proc.arguments = [dbPath, String(mtime), tempOutput.path]
+
+        let errPipe = Pipe()
+        proc.standardError = errPipe
+
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+        } catch {
+            logger.warning("bundled master.db helper launch failed: \(error)")
+            masterDBError = error.localizedDescription
+            return nil
+        }
+
+        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        let stderr = String(data: errData, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        guard proc.terminationStatus == 0 else {
+            try? FileManager.default.removeItem(at: tempOutput)
+            logger.warning("bundled master.db helper failed: \(stderr)")
+            masterDBError = stderr.isEmpty ? "bundled helper failed" : stderr
+            return nil
+        }
+
+        guard let outData = try? Data(contentsOf: tempOutput) else {
+            logger.warning("bundled master.db helper did not produce output file")
+            masterDBError = "bundled helper produced no output"
+            return nil
+        }
+        try? FileManager.default.removeItem(at: tempOutput)
+
+        do {
+            return try JSONDecoder().decode(LibraryData.self, from: outData)
+        } catch {
+            let snippet = String(data: outData.prefix(300), encoding: .utf8) ?? ""
+            logger.warning("bundled master.db helper decode failed: \(error); payload=\(snippet)")
+            masterDBError = "bundled helper JSON decode error: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    private func bundledMasterDBHelperPath() -> String? {
+        let fm = FileManager.default
+        let execDir = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+        let candidates = [
+            execDir.appendingPathComponent("rbdb-helper").path,
+            execDir.appendingPathComponent("RekordboxDBHelper").path,
+            Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/rbdb-helper").path,
+            Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/RekordboxDBHelper").path,
+        ]
+
+        for path in candidates where fm.isExecutableFile(atPath: path) {
+            return path
+        }
+        return nil
+    }
+
+    private func parseMasterDBWithPythonHelper(dbPath: String, mtime: Double) -> LibraryData? {
         guard let python = findBinary("python3") else {
             logger.warning("python3 not found — master.db fallback unavailable")
+            masterDBError = "python3 not found"
             return nil
         }
 
@@ -202,7 +295,14 @@ import os
 import sys
 import zlib
 
-from sqlcipher3 import dbapi2 as sqlite3
+try:
+    from sqlcipher3 import dbapi2 as sqlite3
+except ModuleNotFoundError:
+    try:
+        from pysqlcipher3 import dbapi2 as sqlite3
+    except ModuleNotFoundError:
+        sys.stderr.write("SQLCipher Python module missing: tried sqlcipher3 and pysqlcipher3")
+        sys.exit(2)
 
 BLOB_KEY = b"657f48f84c437cc1"
 BLOB = b"PN_Pq^*N>(JYe*u^8;Yg76HuZ<mR13S?=>)b9;DpoTXV(6ItkU`}8*m6tx_I{Solh_N#dfe{v="
@@ -367,6 +467,7 @@ with open(out_path, "w", encoding="utf-8") as fh:
             proc.waitUntilExit()
         } catch {
             logger.warning("master.db helper launch failed: \(error)")
+            masterDBError = error.localizedDescription
             return nil
         }
 
@@ -377,6 +478,7 @@ with open(out_path, "w", encoding="utf-8") as fh:
         guard proc.terminationStatus == 0 else {
             try? FileManager.default.removeItem(at: tempOutput)
             logger.warning("master.db helper failed: \(stderr)")
+            masterDBError = stderr
             return nil
         }
 
@@ -386,6 +488,7 @@ with open(out_path, "w", encoding="utf-8") as fh:
 
         guard let outData = try? Data(contentsOf: tempOutput) else {
             logger.warning("master.db helper did not produce output file")
+            masterDBError = "helper produced no output"
             return nil
         }
         try? FileManager.default.removeItem(at: tempOutput)
@@ -395,6 +498,7 @@ with open(out_path, "w", encoding="utf-8") as fh:
         } catch {
             let snippet = String(data: outData.prefix(300), encoding: .utf8) ?? ""
             logger.warning("master.db decode failed: \(error); payload=\(snippet)")
+            masterDBError = "JSON decode error: \(error.localizedDescription)"
             return nil
         }
     }

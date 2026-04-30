@@ -1,0 +1,26 @@
+<Application
+    x:Class="RimeoAgent.App"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:tb="using:H.NotifyIcon">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+            </ResourceDictionary.MergedDictionaries>
+
+            <tb:TaskbarIcon x:Key="TrayIcon"
+                            ToolTipText="Rimeo Agent"
+                            IconSource="Assets/rimeo.ico">
+                <tb:TaskbarIcon.ContextMenuMode>PopupMenu</tb:TaskbarIcon.ContextMenuMode>
+                <tb:TaskbarIcon.PopupMenu>
+                    <tb:PopupMenu>
+                        <tb:PopupMenuItem Text="Open" Click="TrayOpen_Click" />
+                        <tb:PopupMenuSeparator />
+                        <tb:PopupMenuItem Text="Quit" Click="TrayQuit_Click" />
+                    </tb:PopupMenu>
+                </tb:TaskbarIcon.PopupMenu>
+            </tb:TaskbarIcon>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>
