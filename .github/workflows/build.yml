@@ -126,6 +126,7 @@ jobs:
             -r win-x64 `
             --no-restore `
             --self-contained true `
+            -p:UseXamlCompilerExecutable=false `
             -o ..\dist\RimeoAgent
 
       - name: Dump XAML compiler diagnostics
