@@ -1,3 +1,3 @@
 VERSION = "1.0"
-BUILD_NUMBER = "129"
-RELEASE_TAG = "mac-v1.0-build129"
+BUILD_NUMBER = "128"
+RELEASE_TAG = "win-v1.0-build128"
