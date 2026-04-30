@@ -78,7 +78,7 @@ jobs:
 
   build-windows:
     name: Windows (x86_64)
-    runs-on: windows-latest
+    runs-on: windows-2022
     if: "!startsWith(github.ref_name, 'mac-')"
     steps:
       - uses: actions/checkout@v4
