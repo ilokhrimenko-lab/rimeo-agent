@@ -64,21 +64,6 @@ jobs:
           cp "$ICON_ICNS" "$APP/Contents/Resources/RimeoAgent.icns"
           cp "$GITHUB_WORKSPACE/build_info.py" "$APP/Contents/Resources/build_info.py"
 
-          # Bundle cloudflared (out-of-box tunnel, no user install needed)
-          CF_VERSION=$(curl -sf https://api.github.com/repos/cloudflare/cloudflared/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
-          if [ -n "$CF_VERSION" ]; then
-            echo "Bundling cloudflared $CF_VERSION (universal)..."
-            curl -fL "https://github.com/cloudflare/cloudflared/releases/download/${CF_VERSION}/cloudflared-darwin-amd64" \
-                -o /tmp/cloudflared-amd64
-            curl -fL "https://github.com/cloudflare/cloudflared/releases/download/${CF_VERSION}/cloudflared-darwin-arm64" \
-                -o /tmp/cloudflared-arm64
-            lipo -create -output "$APP/Contents/MacOS/cloudflared" /tmp/cloudflared-amd64 /tmp/cloudflared-arm64
-            chmod +x "$APP/Contents/MacOS/cloudflared"
-            echo "cloudflared bundled: $CF_VERSION (universal)"
-          else
-            echo "WARNING: could not fetch cloudflared version, skipping bundle"
-          fi
-
       - name: Package
         run: |
           cd dist

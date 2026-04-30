@@ -176,6 +176,30 @@ class RimeoUI:
         if e.data == "close":
             self.page.window.visible = False
             self.page.update()
+            self._show_menubar_hint()
+
+    def _show_menubar_hint(self):
+        import threading as _t
+        key = "rimeo_menubar_hint_shown"
+        try:
+            import AppKit
+            defaults = AppKit.NSUserDefaults.standardUserDefaults()
+            if defaults.boolForKey_(key):
+                return
+            defaults.setBool_forKey_(True, key)
+
+            def _alert():
+                alert = AppKit.NSAlert.new()
+                alert.setMessageText_("Rimeo Agent продолжает работать")
+                alert.setInformativeText_(
+                    "Иконка в строке меню (вверху экрана) — нажми, чтобы открыть снова или выйти."
+                )
+                alert.addButtonWithTitle_("Понятно")
+                alert.runModal()
+
+            _t.Thread(target=_alert, daemon=True).start()
+        except Exception:
+            pass
 
     # ── System tray / status bar ──────────────────────────────────────────────
     def _setup_system_tray(self):
@@ -1271,25 +1295,11 @@ def start_gui():
 
 def _start_gui_macos():
     """
-    macOS: run as a normal app with a Dock icon, while also keeping the
-    status bar item alive as a secondary re-open path if the window closes.
-
-      1. Running ft.app() in a loop so the window can be re-opened.
-      2. Between Flet runs, pumping NSRunLoop on the main thread so the
-         status bar menu remains responsive.
-      3. The status bar item itself lives at class level and survives restarts.
+    macOS: Flet spawns its own subprocess (flet_desktop) which owns the dock
+    icon. We keep our Python process as Accessory (no dock entry, no bounce)
+    and manage only the status bar icon + reopen logic.
     """
-    import AppKit
     global _flet_running
-
-    # Set activation policy BEFORE Flet starts so macOS doesn't bounce the
-    # dock icon mid-launch when we change it later inside the async setup.
-    ns_app = AppKit.NSApplication.sharedApplication()
-    ns_app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyRegular)
-    try:
-        ns_app.activateIgnoringOtherApps_(True)
-    except Exception:
-        pass
 
     while True:
         logger.info("Launching Flet window")

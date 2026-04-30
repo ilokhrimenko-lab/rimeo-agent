@@ -84,7 +84,8 @@ def _run_tunnel_thread():
         return
     try:
         _tunnel_proc = subprocess.Popen(
-            [cmd, "tunnel", "--url", f"http://localhost:{settings.PORT}", "--no-autoupdate"],
+            [cmd, "tunnel", "--url", f"http://127.0.0.1:{settings.PORT}",
+             "--metrics", "127.0.0.1:0", "--no-autoupdate", "--protocol", "http2"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1,
         )
@@ -804,7 +805,7 @@ async def _cloud_relay_worker():
         tunnel  = _tunnel_url or ""
         poll_url = (f"{cloud_url}/api/relay/poll/{settings.AGENT_ID}"
                     f"?token={cloud_token}"
-                    + (f"&tunnel={_uparse.quote(tunnel, safe='/:')}" if tunnel else ""))
+                    + f"&tunnel={_uparse.quote(tunnel, safe='/:')}")
 
         try:
             logger.info("Cloud relay connecting: %s", cloud_url)

@@ -241,13 +241,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             CloudRelay.shared.startIfLinked()
         }
 
-        // Check for updates after 4s
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 4) {
-            UpdateChecker.shared.checkAsync { info in
-                guard let info else { return }
-                DispatchQueue.main.async { self.showUpdateBanner(info) }
+        // Apply pending update (scheduled via "Update on Next Launch")
+        if let pending = UpdateChecker.shared.pendingUpdate {
+            UpdateChecker.shared.clearPending()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                self.downloadUpdate(pending)
+            }
+        } else {
+            // Routine background update check (once per 24h)
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 4) {
+                UpdateChecker.shared.checkAsync { info in
+                    guard let info else { return }
+                    DispatchQueue.main.async { self.showUpdateBanner(info) }
+                }
             }
         }
+    }
+
+    func triggerUpdate(_ info: UpdateInfo) {
+        downloadUpdate(info)
     }
 
     private func showUpdateBanner(_ info: UpdateInfo) {

@@ -14,48 +14,21 @@ final class UpdateChecker {
         for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("RimeoAgent/last_update_check")
 
+    // Called automatically at startup — respects 24h cooldown
     func checkAsync(callback: @escaping (UpdateInfo?) -> Void) {
         DispatchQueue.global(qos: .utility).async {
-            callback(self.check())
+            guard self.isDue else { callback(nil); return }
+            self.stamp()
+            callback(self.fetchLatest())
         }
     }
 
-    func check() -> UpdateInfo? {
-        guard isDue else { return nil }
-        stamp()
-
-        let repo    = AppConfig.shared.githubRepo
-        guard repo != "your-org/rimeo",
-              let url = URL(string: "https://api.github.com/repos/\(repo)/releases/latest")
-        else { return nil }
-
-        var req = URLRequest(url: url)
-        req.setValue("RimeoAgentMac/\(AppConfig.shared.version)", forHTTPHeaderField: "User-Agent")
-        req.timeoutInterval = 10
-
-        let sema = DispatchSemaphore(value: 0)
-        var payload: Data?
-        URLSession.shared.dataTask(with: req) { data, _, _ in
-            payload = data; sema.signal()
-        }.resume()
-        sema.wait()
-
-        guard let data = payload,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let tag  = json["tag_name"] as? String, !tag.isEmpty,
-              tag != AppConfig.shared.releaseTag else { return nil }
-
-        let assetName = "RimeoAgent_mac.zip"
-        guard let assets = json["assets"] as? [[String: Any]],
-              let asset  = assets.first(where: { $0["name"] as? String == assetName }),
-              let dlURL  = asset["browser_download_url"] as? String else { return nil }
-
-        logger.info("Update available: \(AppConfig.shared.version) → \(tag)")
-        return UpdateInfo(
-            version:     tag,
-            downloadURL: dlURL,
-            notes:       (json["body"] as? String ?? "").prefix(400).description
-        )
+    // Called by the user manually — always hits the network
+    func forceCheckAsync(callback: @escaping (UpdateInfo?) -> Void) {
+        DispatchQueue.global(qos: .utility).async {
+            self.stamp()
+            callback(self.fetchLatest())
+        }
     }
 
     // Download zip, extract .app, run shell script to replace current bundle + relaunch
@@ -135,6 +108,65 @@ final class UpdateChecker {
         reopen.arguments = [currentPath]
         try reopen.run()
         exit(0)
+    }
+
+    // MARK: - Pending update (update on next launch)
+
+    var pendingUpdate: UpdateInfo? {
+        let d = DataStore.shared.data
+        guard !d.pending_update_url.isEmpty else { return nil }
+        return UpdateInfo(version: d.pending_update_tag, downloadURL: d.pending_update_url, notes: "")
+    }
+
+    func setPending(_ info: UpdateInfo) {
+        DataStore.shared.update {
+            $0.pending_update_url = info.downloadURL
+            $0.pending_update_tag = info.version
+        }
+    }
+
+    func clearPending() {
+        DataStore.shared.update {
+            $0.pending_update_url = ""
+            $0.pending_update_tag = ""
+        }
+    }
+
+    // MARK: - Private
+
+    private func fetchLatest() -> UpdateInfo? {
+        let repo = AppConfig.shared.githubRepo
+        guard repo != "your-org/rimeo",
+              let url = URL(string: "https://api.github.com/repos/\(repo)/releases/latest")
+        else { return nil }
+
+        var req = URLRequest(url: url)
+        req.setValue("RimeoAgentMac/\(AppConfig.shared.version)", forHTTPHeaderField: "User-Agent")
+        req.timeoutInterval = 10
+
+        let sema = DispatchSemaphore(value: 0)
+        var payload: Data?
+        URLSession.shared.dataTask(with: req) { data, _, _ in
+            payload = data; sema.signal()
+        }.resume()
+        sema.wait()
+
+        guard let data = payload,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tag  = json["tag_name"] as? String, !tag.isEmpty,
+              tag != AppConfig.shared.releaseTag else { return nil }
+
+        let assetName = "RimeoAgent_mac.zip"
+        guard let assets = json["assets"] as? [[String: Any]],
+              let asset  = assets.first(where: { $0["name"] as? String == assetName }),
+              let dlURL  = asset["browser_download_url"] as? String else { return nil }
+
+        logger.info("Update available: \(AppConfig.shared.version) → \(tag)")
+        return UpdateInfo(
+            version:     tag,
+            downloadURL: dlURL,
+            notes:       (json["body"] as? String ?? "").prefix(400).description
+        )
     }
 
     private func replaceApp(from src: String, to dst: String) throws -> Bool {

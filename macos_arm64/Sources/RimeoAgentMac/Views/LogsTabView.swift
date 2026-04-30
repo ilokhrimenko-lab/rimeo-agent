@@ -15,6 +15,8 @@ struct LogsTabView: View {
     @State private var maxCacheGB: String = "3"
     @State private var cacheStatus = ""
 
+    @State private var updateState: UpdateCheckState = .idle
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
@@ -56,6 +58,12 @@ struct LogsTabView: View {
                         }
                     }
                     .padding(20)
+                }
+
+                SectionLabel(text: "CHECK FOR UPDATES")
+                SurfaceCard {
+                    updateCheckContent
+                        .padding(20)
                 }
 
                 SectionLabel(text: "REPORT A BUG")
@@ -295,6 +303,95 @@ struct LogsTabView: View {
         cacheStatus = "✓ Max cache set to \(value) GB"
     }
 
+    // MARK: - Update checker
+
+    @ViewBuilder
+    private var updateCheckContent: some View {
+        switch updateState {
+        case .idle:
+            HStack {
+                compactActionButton(title: "Check for Updates", icon: "arrow.triangle.2.circlepath", action: runUpdateCheck)
+                Spacer()
+            }
+
+        case .checking:
+            HStack(spacing: 10) {
+                ProgressView().scaleEffect(0.7)
+                Text("Checking for updates…")
+                    .font(.system(size: 13))
+                    .foregroundColor(C.dim)
+                Spacer()
+            }
+
+        case .upToDate:
+            HStack(spacing: 10) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundColor(C.green)
+                Text("You're up to date")
+                    .font(.system(size: 13))
+                    .foregroundColor(C.text)
+                Spacer()
+                compactActionButton(title: "Check Again", icon: "arrow.triangle.2.circlepath", action: runUpdateCheck)
+            }
+
+        case .available(let info):
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .foregroundColor(C.acc)
+                        .font(.system(size: 16))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Update available: \(info.version)")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(C.text)
+                        if !info.notes.isEmpty {
+                            Text(info.notes)
+                                .font(.system(size: 11))
+                                .foregroundColor(C.dim)
+                                .lineLimit(3)
+                        }
+                    }
+                }
+                HStack(spacing: 10) {
+                    RimeoButton(title: "Update Now", icon: "arrow.down.circle", color: C.acc) {
+                        (NSApp.delegate as? AppDelegate)?.triggerUpdate(info)
+                    }
+                    compactActionButton(title: "On Next Launch", icon: "clock", action: {
+                        UpdateChecker.shared.setPending(info)
+                        updateState = .scheduled(info.version)
+                    })
+                }
+            }
+
+        case .scheduled(let version):
+            HStack(spacing: 10) {
+                Image(systemName: "clock.fill")
+                    .foregroundColor(C.amber)
+                Text("Will update to \(version) on next launch")
+                    .font(.system(size: 13))
+                    .foregroundColor(C.text)
+                Spacer()
+                compactActionButton(title: "Cancel", icon: "xmark", action: {
+                    UpdateChecker.shared.clearPending()
+                    updateState = .idle
+                })
+            }
+        }
+    }
+
+    private func runUpdateCheck() {
+        updateState = .checking
+        UpdateChecker.shared.forceCheckAsync { info in
+            DispatchQueue.main.async {
+                if let info {
+                    updateState = .available(info)
+                } else {
+                    updateState = .upToDate
+                }
+            }
+        }
+    }
+
     private func sendBugReport() {
         let desc = bugDesc.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !desc.isEmpty else {
@@ -335,6 +432,14 @@ struct LogsTabView: View {
         }
         return object["detail"] as? String
     }
+}
+
+private enum UpdateCheckState {
+    case idle
+    case checking
+    case upToDate
+    case available(UpdateInfo)
+    case scheduled(String)
 }
 
 private struct SelectableTextModifier: ViewModifier {

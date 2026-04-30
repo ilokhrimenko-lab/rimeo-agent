@@ -11,6 +11,8 @@ struct RimoData: Codable {
     var tunnel_url:        String              = ""
     var max_cache_gb:      Double              = 3.0
     var just_updated:      Bool               = false
+    var pending_update_url: String            = ""
+    var pending_update_tag: String            = ""
 }
 
 final class DataStore {
