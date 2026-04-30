@@ -14,6 +14,7 @@
     <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
     <SelfContained>true</SelfContained>
     <UseRidGraph>true</UseRidGraph>
+    <UseXamlCompilerExecutable>false</UseXamlCompilerExecutable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Platforms>x64</Platforms>
   </PropertyGroup>
