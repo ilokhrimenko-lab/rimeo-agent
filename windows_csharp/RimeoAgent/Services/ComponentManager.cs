@@ -134,18 +134,18 @@ public sealed class ComponentManager
         var hash = sha.ComputeHash(file);
         return Convert.ToHexString(hash).ToLowerInvariant();
     }
-}
 
-file sealed class RuntimeManifest
-{
-    public string Version { get; set; } = "";
-    public List<ComponentInfo> Components { get; set; } = [];
-}
+    private sealed class RuntimeManifest
+    {
+        public string Version { get; set; } = "";
+        public List<ComponentInfo> Components { get; set; } = [];
+    }
 
-file sealed class ComponentInfo
-{
-    public string Id     { get; set; } = "";
-    public string Url    { get; set; } = "";
-    public string Sha256 { get; set; } = "";
-    public long   Size   { get; set; }
+    private sealed class ComponentInfo
+    {
+        public string Id     { get; set; } = "";
+        public string Url    { get; set; } = "";
+        public string Sha256 { get; set; } = "";
+        public long   Size   { get; set; }
+    }
 }
