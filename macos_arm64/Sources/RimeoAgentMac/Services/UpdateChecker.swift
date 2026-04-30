@@ -43,9 +43,9 @@ final class UpdateChecker {
         guard let data = payload,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let tag  = json["tag_name"] as? String, !tag.isEmpty,
-              tag != AppConfig.shared.version else { return nil }
+              tag != AppConfig.shared.releaseTag else { return nil }
 
-        let assetName = "RimeoAgentMac.zip"
+        let assetName = "RimeoAgent_mac.zip"
         guard let assets = json["assets"] as? [[String: Any]],
               let asset  = assets.first(where: { $0["name"] as? String == assetName }),
               let dlURL  = asset["browser_download_url"] as? String else { return nil }
@@ -83,7 +83,11 @@ final class UpdateChecker {
             sema.signal()
         }
         task.resume()
+        let obs = task.progress.observe(\.fractionCompleted) { p, _ in
+            progress(p.fractionCompleted * 0.8)
+        }
         sema.wait()
+        obs.invalidate()
         if let e = dlError { throw e }
 
         // Extract
@@ -101,27 +105,44 @@ final class UpdateChecker {
                           userInfo: [NSLocalizedDescriptionKey: "No .app in archive"])
         }
 
-        // Get current bundle path
         let currentApp = Bundle.main.bundleURL
-        let script = tmp.appendingPathComponent("update.sh")
-        let scriptText = """
-        #!/bin/bash
-        sleep 2
-        rm -rf "\(currentApp.path)"
-        cp -R "\(newApp.path)" "\(currentApp.path)"
-        open "\(currentApp.path)"
-        rm -rf "\(tmp.path)"
-        """
-        try scriptText.write(to: script, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        let newAppPath = newApp.path
+        let currentPath = currentApp.path
 
-        let sh = Process()
-        sh.executableURL = URL(fileURLWithPath: "/bin/bash")
-        sh.arguments = [script.path]
-        try sh.run()
+        // Try unprivileged replace first (works when .app is in user-writable location)
+        let replaced = (try? replaceApp(from: newAppPath, to: currentPath)) ?? false
 
-        logger.info("Update script launched — exiting")
+        if !replaced {
+            // Fall back to osascript — shows Touch ID / password dialog
+            let shellCmd = "rm -rf '\(currentPath)' && cp -R '\(newAppPath)' '\(currentPath)'"
+            let appleScript = "do shell script \"\(shellCmd)\" with administrator privileges"
+            let osascript = Process()
+            osascript.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            osascript.arguments = ["-e", appleScript]
+            try osascript.run()
+            osascript.waitUntilExit()
+            guard osascript.terminationStatus == 0 else {
+                throw NSError(domain: "Updater", code: 3,
+                              userInfo: [NSLocalizedDescriptionKey: "Installation cancelled or failed"])
+            }
+        }
+
+        progress(1.0)
+        logger.info("Update installed — relaunching")
+        DataStore.shared.update { $0.just_updated = true }
+        let reopen = Process()
+        reopen.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        reopen.arguments = [currentPath]
+        try reopen.run()
         exit(0)
+    }
+
+    private func replaceApp(from src: String, to dst: String) throws -> Bool {
+        let fm = FileManager.default
+        guard fm.isWritableFile(atPath: (dst as NSString).deletingLastPathComponent) else { return false }
+        if fm.fileExists(atPath: dst) { try fm.removeItem(atPath: dst) }
+        try fm.copyItem(atPath: src, toPath: dst)
+        return true
     }
 
     private var isDue: Bool {

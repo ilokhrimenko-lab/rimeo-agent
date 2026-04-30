@@ -10,6 +10,7 @@ struct RimoData: Codable {
     var cloud_token:       String              = ""
     var tunnel_url:        String              = ""
     var max_cache_gb:      Double              = 3.0
+    var just_updated:      Bool               = false
 }
 
 final class DataStore {
