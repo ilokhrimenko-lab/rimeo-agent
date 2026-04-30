@@ -47,4 +47,5 @@ git push origin "$TAG_NAME"
 
 echo ""
 echo "✓ Pushed $TAG_NAME — macOS CI is building."
-echo "  Watch: gh run watch"
+echo ""
+gh run watch
