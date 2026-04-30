@@ -12,6 +12,7 @@
     <WindowsPackageType>None</WindowsPackageType>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
+    <UseRidGraph>true</UseRidGraph>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Platforms>x64</Platforms>
   </PropertyGroup>
