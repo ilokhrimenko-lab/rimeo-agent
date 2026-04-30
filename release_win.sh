@@ -15,9 +15,8 @@ MESSAGE="${1:-}"
 # 1. Get latest build number from GitHub tags (not releases — failed builds don't create releases)
 echo "==> Fetching latest build number from GitHub..."
 LATEST_TAG=$(git ls-remote --tags origin \
-  | grep -oE '(mac-|win-)?v1\.0-build[0-9]+$' \
-  | sed 's/^\(mac-\|win-\)//' \
-  | sed -n 's/^v1\.0-build\([0-9][0-9]*\)$/\1/p' \
+  | grep -oE 'win-v1\.0-build[0-9]+$' \
+  | sed -n 's/^win-v1\.0-build\([0-9][0-9]*\)$/\1/p' \
   | sort -n | tail -1)
 
 if [ -z "$LATEST_TAG" ]; then
