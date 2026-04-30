@@ -21,13 +21,6 @@ public sealed partial class MainWindow : Window
         // Provide DispatcherQueue to AppState
         AppState.Shared.SetDispatcherQueue(Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
 
-        // Close → hide to tray instead of exit
-        AppWindow.Closing += (_, e) =>
-        {
-            e.Cancel = true;
-            AppWindow.Hide();
-        };
-
         // Navigate to Library by default
         NavView.SelectedItem = NavView.MenuItems[0];
         ContentFrame.Navigate(typeof(LibraryPage));

@@ -1,10 +1,7 @@
-using H.NotifyIcon;
-using H.NotifyIcon.Core;
 using Microsoft.UI.Xaml;
 using RimeoAgent.Config;
 using RimeoAgent.HttpServer;
 using RimeoAgent.Services;
-using System.Drawing;
 
 namespace RimeoAgent;
 
@@ -12,7 +9,6 @@ public partial class App : Application
 {
     private MainWindow?      _window;
     private AgentHttpServer? _server;
-    private TaskbarIcon?     _trayIcon;
 
     public App()
     {
@@ -45,13 +41,6 @@ public partial class App : Application
         // Create main window
         _window = new MainWindow();
 
-        // Set up tray icon outside XAML so WinUI compilation stays focused on app views.
-        _trayIcon = CreateTrayIcon();
-        _trayIcon.ForceCreate();
-
-        // Attach tray click → show window
-        _trayIcon.TrayMouseDoubleClick += (_, _) => ShowWindow();
-
         _window.Activate();
 
         Log.Info("Rimeo Agent started");
@@ -68,29 +57,12 @@ public partial class App : Application
 
     internal void TrayQuit_Click(object sender, RoutedEventArgs e) => Quit();
 
-    private TaskbarIcon CreateTrayIcon()
-    {
-        var popupMenu = new PopupMenu();
-        popupMenu.Items.Add(new PopupMenuItem("Open", (_, _) => ShowWindow()));
-        popupMenu.Items.Add(new PopupMenuSeparator());
-        popupMenu.Items.Add(new PopupMenuItem("Quit", (_, _) => Quit()));
-
-        return new TaskbarIcon
-        {
-            ToolTipText = "Rimeo Agent",
-            ContextMenuMode = ContextMenuMode.PopupMenu,
-            PopupMenu = popupMenu,
-            Icon = new Icon(Path.Combine(AppContext.BaseDirectory, "Assets", "rimeo.ico"))
-        };
-    }
-
     private void Quit()
     {
         Log.Info("Rimeo Agent shutting down");
         _server?.Stop();
         TunnelManager.Shared.Stop();
         CloudRelay.Shared.Stop();
-        _trayIcon?.Dispose();
         Environment.Exit(0);
     }
 }
