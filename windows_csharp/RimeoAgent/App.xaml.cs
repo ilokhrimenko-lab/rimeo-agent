@@ -12,6 +12,16 @@ public partial class App : Application
 
     public App()
     {
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            Log.Error($"Unhandled exception: {e.ExceptionObject}");
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            Log.Error($"Unobserved task exception: {e.Exception}");
+            e.SetObserved();
+        };
+        UnhandledException += (_, e) =>
+            Log.Error($"Application unhandled exception: {e.Exception}");
+
         InitializeComponent();
     }
 
@@ -40,11 +50,13 @@ public partial class App : Application
 
         try
         {
-            Log.Info("Creating main window");
+            Log.Info("Creating main window shell");
             _window = new MainWindow();
+            Log.Info("Main window shell created");
 
             Log.Info("Activating main window");
             _window.Activate();
+            _window.NavigateToDefaultPage();
 
             Log.Info("Rimeo Agent started");
         }
@@ -59,6 +71,7 @@ public partial class App : Application
     {
         _window ??= new MainWindow();
         _window.Show();
+        _window.NavigateToDefaultPage();
         _window.Activate();
     }
 
