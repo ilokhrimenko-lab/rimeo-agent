@@ -55,7 +55,7 @@ public partial class App : Application
             Log.Info("Main window shell created");
 
             Log.Info("Activating main window");
-            _window.Activate();
+            _window.ShowAndFocus();
             _window.NavigateToDefaultPage();
 
             Log.Info("Rimeo Agent started");
@@ -70,9 +70,8 @@ public partial class App : Application
     private void ShowWindow()
     {
         _window ??= new MainWindow();
-        _window.Show();
+        _window.ShowAndFocus();
         _window.NavigateToDefaultPage();
-        _window.Activate();
     }
 
     internal void TrayOpen_Click(object sender, RoutedEventArgs e) => ShowWindow();

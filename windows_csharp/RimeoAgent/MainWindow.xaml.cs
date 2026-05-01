@@ -4,11 +4,14 @@ using Microsoft.UI.Xaml.Media;
 using RimeoAgent.Config;
 using RimeoAgent.Services;
 using RimeoAgent.Views;
+using System.Runtime.InteropServices;
 
 namespace RimeoAgent;
 
 public sealed partial class MainWindow : Window
 {
+    private const int ShowNormal = 1;
+
     private readonly NavigationView _navView;
     private readonly Frame _contentFrame;
     private bool _defaultPageRequested;
@@ -17,7 +20,7 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         // Comfortable startup size
-        AppWindow.Resize(new Windows.Graphics.SizeInt32(900, 680));
+        AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(80, 80, 900, 680));
         AppWindow.SetIcon("Assets/rimeo.ico");
         Title = $"Rimeo Agent — {AppConfig.Shared.DisplayVersion}";
 
@@ -79,16 +82,25 @@ public sealed partial class MainWindow : Window
         if (libraryItem != null)
         {
             _navigatingProgrammatically = true;
-            _navView.SelectedItem = libraryItem;
-            _navigatingProgrammatically = false;
+            try { _navView.SelectedItem = libraryItem; }
+            finally { _navigatingProgrammatically = false; }
         }
         NavigateSafely(typeof(LibraryPage), "Library");
     }
 
-    public void Show()
+    public void ShowAndFocus()
     {
+        AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(80, 80, 900, 680));
         AppWindow.Show();
         Activate();
+
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        Log.Info($"Main window HWND: 0x{hwnd.ToInt64():X}");
+        if (hwnd != IntPtr.Zero)
+        {
+            ShowWindow(hwnd, ShowNormal);
+            SetForegroundWindow(hwnd);
+        }
     }
 
     private static NavigationViewItem CreateNavItem(string content, string tag) =>
@@ -124,4 +136,10 @@ public sealed partial class MainWindow : Window
             Children = { text }
         };
     }
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
 }
