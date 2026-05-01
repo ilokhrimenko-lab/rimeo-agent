@@ -7,8 +7,11 @@ namespace RimeoAgent;
 
 public partial class App : Application
 {
+    private const string SingleInstanceMutexName = "Local\\RimeoAgent.Windows.SingleInstance";
+
     private MainWindow?      _window;
     private AgentHttpServer? _server;
+    private Mutex?           _singleInstanceMutex;
 
     public App()
     {
@@ -28,6 +31,14 @@ public partial class App : Application
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
         Log.Info($"Rimeo Agent starting — {AppConfig.Shared.DisplayVersion}");
+
+        _singleInstanceMutex = new Mutex(initiallyOwned: true, SingleInstanceMutexName, out var isFirstInstance);
+        if (!isFirstInstance)
+        {
+            Log.Warn("Another Rimeo Agent instance is already running");
+            Environment.Exit(0);
+            return;
+        }
 
         // Start HTTP server
         _server = new AgentHttpServer();
@@ -84,6 +95,8 @@ public partial class App : Application
         _server?.Stop();
         TunnelManager.Shared.Stop();
         CloudRelay.Shared.Stop();
+        _singleInstanceMutex?.ReleaseMutex();
+        _singleInstanceMutex?.Dispose();
         Environment.Exit(0);
     }
 }

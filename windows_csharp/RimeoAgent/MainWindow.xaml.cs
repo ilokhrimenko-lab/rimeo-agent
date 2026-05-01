@@ -1,3 +1,4 @@
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -10,7 +11,10 @@ namespace RimeoAgent;
 
 public sealed partial class MainWindow : Window
 {
-    private const int ShowNormal = 1;
+    private const int SwRestore = 9;
+    private const int GwlStyle = -16;
+    private const int GwlExStyle = -20;
+    private const uint MbOk = 0x00000000;
 
     private readonly NavigationView _navView;
     private readonly Frame _contentFrame;
@@ -20,6 +24,7 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         // Comfortable startup size
+        ConfigurePresenter();
         AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(80, 80, 900, 680));
         AppWindow.SetIcon("Assets/rimeo.ico");
         Title = $"Rimeo Agent — {AppConfig.Shared.DisplayVersion}";
@@ -76,7 +81,6 @@ public sealed partial class MainWindow : Window
         if (_defaultPageRequested) return;
         _defaultPageRequested = true;
 
-        Log.Info("Navigating to Library");
         var libraryItem = _navView.MenuItems.OfType<NavigationViewItem>()
             .FirstOrDefault(item => item.Tag?.ToString() == "Library");
         if (libraryItem != null)
@@ -90,6 +94,7 @@ public sealed partial class MainWindow : Window
 
     public void ShowAndFocus()
     {
+        ConfigurePresenter();
         AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(80, 80, 900, 680));
         AppWindow.Show();
         Activate();
@@ -98,8 +103,14 @@ public sealed partial class MainWindow : Window
         Log.Info($"Main window HWND: 0x{hwnd.ToInt64():X}");
         if (hwnd != IntPtr.Zero)
         {
-            ShowWindow(hwnd, ShowNormal);
-            SetForegroundWindow(hwnd);
+            LogWindowDiagnostics(hwnd, "before restore");
+            var showResult = ShowWindow(hwnd, SwRestore);
+            var foregroundResult = SetForegroundWindow(hwnd);
+            Log.Info($"ShowWindow(SW_RESTORE) result: {showResult}");
+            Log.Info($"SetForegroundWindow result: {foregroundResult}");
+            LogWindowDiagnostics(hwnd, "after restore");
+            Log.Info("Showing temporary debug MessageBoxW");
+            MessageBox(hwnd, "Rimeo Agent window startup reached", "Rimeo Agent Debug", MbOk);
         }
     }
 
@@ -137,9 +148,58 @@ public sealed partial class MainWindow : Window
         };
     }
 
+    private void ConfigurePresenter()
+    {
+        if (AppWindow.Presenter is OverlappedPresenter presenter)
+        {
+            presenter.IsMinimizable = true;
+            presenter.IsMaximizable = true;
+            presenter.IsResizable = true;
+            presenter.Restore();
+        }
+    }
+
+    private static void LogWindowDiagnostics(IntPtr hwnd, string phase)
+    {
+        var isWindow = IsWindow(hwnd);
+        var isVisible = IsWindowVisible(hwnd);
+        var rectOk = GetWindowRect(hwnd, out var rect);
+        var style = GetWindowLongPtr(hwnd, GwlStyle);
+        var exStyle = GetWindowLongPtr(hwnd, GwlExStyle);
+        Log.Info(
+            $"Window diagnostics ({phase}): is_window={isWindow}, visible={isVisible}, " +
+            $"rect_ok={rectOk}, rect=({rect.Left},{rect.Top},{rect.Right},{rect.Bottom}), " +
+            $"style=0x{style.ToInt64():X}, exstyle=0x{exStyle.ToInt64():X}, " +
+            $"pid={Environment.ProcessId}, session={System.Diagnostics.Process.GetCurrentProcess().SessionId}");
+    }
+
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
     [DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetWindowRect(IntPtr hWnd, out WindowRect lpRect);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
+    private static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", EntryPoint = "MessageBoxW", CharSet = CharSet.Unicode)]
+    private static extern int MessageBox(IntPtr hWnd, string text, string caption, uint type);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WindowRect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
 }
