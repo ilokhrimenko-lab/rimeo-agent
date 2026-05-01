@@ -42,7 +42,8 @@ final class AudioService {
         } else {
             logger.warning("AIFF conversion ffmpeg missing: track=\(trackID)")
         }
-        let result = runFFmpeg(["-i", path, "-f", "wav", cached.path, "-y"], timeout: 120)
+        let result = runFFmpegWithStdin(["-f", "aiff", "-i", "pipe:0", "-f", "wav", cached.path, "-y"],
+                                       inputPath: path, timeout: 120)
         guard result.success, FileManager.default.fileExists(atPath: cached.path) else {
             logger.warning("AIFF conversion failed: track=\(trackID), stderr=\(result.stderr)")
             throw AudioError.conversionFailed(result.stderr)
@@ -68,18 +69,19 @@ final class AudioService {
         }
 
         // Probe duration
-        let probeResult = runFFmpeg(
+        let probeResult = runFFmpegWithStdin(
             ["-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", path],
+             "-of", "default=noprint_wrappers=1:nokey=1", "pipe:0"],
+            inputPath: path,
             binary: "ffprobe",
             timeout: 12
         )
         let duration = Double(probeResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0.0
 
         // Downsample to 8000 peaks via s8 raw PCM
-        let cmd = ["-v", "error", "-i", path, "-ac", "1",
+        let cmd = ["-v", "error", "-i", "pipe:0", "-ac", "1",
                    "-filter:a", "aresample=100", "-f", "s8", "-"]
-        let result = runFFmpeg(cmd, timeout: 60)
+        let result = runFFmpegWithStdin(cmd, inputPath: path, timeout: 60)
         guard result.success, !result.rawOutput.isEmpty else {
             logger.warning("Waveform failed: track=\(trackID), stderr=\(result.stderr)")
             return ["duration": duration, "peaks": [Double]()]
@@ -118,14 +120,15 @@ final class AudioService {
 
         // WAV/AIFF and many plain audio files do not contain embedded artwork streams.
         // Probe first so we do not treat a "no stream" case as an extraction failure.
-        let probe = runFFmpeg(
+        let probe = runFFmpegWithStdin(
             [
                 "-v", "error",
                 "-select_streams", "v:0",
                 "-show_entries", "stream=index",
                 "-of", "csv=p=0",
-                path
+                "pipe:0"
             ],
+            inputPath: path,
             binary: "ffprobe",
             timeout: 12
         )
@@ -135,9 +138,9 @@ final class AudioService {
             return nil
         }
 
-        let result = runFFmpeg([
+        let result = runFFmpegWithStdin([
             "-v", "error",
-            "-i", path,
+            "-i", "pipe:0",
             "-map", "0:v:0",
             "-an",
             "-vcodec", "mjpeg",
@@ -145,7 +148,7 @@ final class AudioService {
             "-s", "512x512",
             cacheURL.path,
             "-y"
-        ], timeout: 45)
+        ], inputPath: path, timeout: 45)
         let ok = result.success && FileManager.default.fileExists(atPath: cacheURL.path)
         if !ok {
             logger.warning("Artwork extraction failed: track=\(trackID), stderr=\(result.stderr)")
@@ -156,9 +159,10 @@ final class AudioService {
     // Probe duration only
     func probeDuration(_ path: String) -> Double {
         TCCDiagnostics.logPathAccess("probe-duration", path: path)
-        let r = runFFmpeg(
+        let r = runFFmpegWithStdin(
             ["-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", path],
+             "-of", "default=noprint_wrappers=1:nokey=1", "pipe:0"],
+            inputPath: path,
             binary: "ffprobe",
             timeout: 12
         )
@@ -207,6 +211,93 @@ func runFFmpeg(_ args: [String], binary: String = "ffmpeg", timeout: TimeInterva
     let errPipe = Pipe()
     proc.standardOutput = outPipe
     proc.standardError  = errPipe
+
+    let outputQueue = DispatchQueue(label: "rimeo.\(binary).output", qos: .utility, attributes: .concurrent)
+    let outGroup = DispatchGroup()
+    var rawOut = Data()
+    var rawErr = Data()
+
+    outGroup.enter()
+    outputQueue.async {
+        rawOut = outPipe.fileHandleForReading.readDataToEndOfFile()
+        outGroup.leave()
+    }
+
+    outGroup.enter()
+    outputQueue.async {
+        rawErr = errPipe.fileHandleForReading.readDataToEndOfFile()
+        outGroup.leave()
+    }
+
+    do {
+        try proc.run()
+    } catch {
+        return RunResult(success: false, stdout: "", stderr: "\(error)", rawOutput: [])
+    }
+
+    let finished = DispatchSemaphore(value: 0)
+    DispatchQueue.global(qos: .utility).async {
+        proc.waitUntilExit()
+        finished.signal()
+    }
+
+    if finished.wait(timeout: .now() + timeout) == .timedOut {
+        proc.terminate()
+        _ = finished.wait(timeout: .now() + 5)
+        outPipe.fileHandleForReading.closeFile()
+        errPipe.fileHandleForReading.closeFile()
+        _ = outGroup.wait(timeout: .now() + 5)
+        return RunResult(success: false, stdout: "", stderr: "\(binary) timed out", rawOutput: [])
+    }
+
+    _ = outGroup.wait(timeout: .now() + 5)
+    let stdout = String(data: rawOut, encoding: .utf8) ?? ""
+    let stderr = String(data: rawErr, encoding: .utf8) ?? ""
+    let raw    = [UInt8](rawOut)
+
+    return RunResult(success: proc.terminationStatus == 0, stdout: stdout, stderr: stderr, rawOutput: raw)
+}
+
+// Opens inputPath in the main process and pipes data to the child process via stdin.
+// The child process never directly opens the file, so TCC checks for removable volumes
+// happen only in the parent app context (which has FDA).
+func runFFmpegWithStdin(_ args: [String], inputPath: String, binary: String = "ffmpeg", timeout: TimeInterval = 120) -> RunResult {
+    guard let bin = findBinary(binary) else {
+        logger.warning("Audio command failed: \(binary) not found")
+        return RunResult(success: false, stdout: "", stderr: "\(binary) not found", rawOutput: [])
+    }
+    guard let inputFH = FileHandle(forReadingAtPath: inputPath) else {
+        logger.warning("runFFmpegWithStdin: cannot open \(inputPath)")
+        return RunResult(success: false, stdout: "", stderr: "Cannot open input file", rawOutput: [])
+    }
+
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: bin)
+    proc.arguments     = args
+
+    let stdinPipe = Pipe()
+    let outPipe   = Pipe()
+    let errPipe   = Pipe()
+    proc.standardInput  = stdinPipe
+    proc.standardOutput = outPipe
+    proc.standardError  = errPipe
+
+    // Pump file → stdin pipe on a background thread to avoid deadlock.
+    // The pipe buffer is small (~64 KB); this loop blocks when full and resumes
+    // as ffmpeg reads, so total memory usage stays bounded.
+    let pumpQueue = DispatchQueue(label: "rimeo.\(binary).stdin-pump", qos: .utility)
+    pumpQueue.async {
+        defer {
+            inputFH.closeFile()
+            stdinPipe.fileHandleForWriting.closeFile()
+        }
+        let chunkSize = 65536
+        while true {
+            let chunk = inputFH.readData(ofLength: chunkSize)
+            if chunk.isEmpty { break }
+            stdinPipe.fileHandleForWriting.write(chunk)
+        }
+    }
 
     let outputQueue = DispatchQueue(label: "rimeo.\(binary).output", qos: .utility, attributes: .concurrent)
     let outGroup = DispatchGroup()

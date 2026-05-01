@@ -79,7 +79,7 @@ final class AgentSettings {
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-        p.arguments = ["-dimsu"]
+        p.arguments = ["-i"]
         p.standardOutput = Pipe()
         p.standardError = Pipe()
 
