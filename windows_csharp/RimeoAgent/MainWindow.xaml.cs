@@ -12,6 +12,7 @@ public sealed partial class MainWindow : Window
     private readonly NavigationView _navView;
     private readonly Frame _contentFrame;
     private bool _defaultPageRequested;
+    private bool _navigatingProgrammatically;
 
     public MainWindow()
     {
@@ -51,6 +52,8 @@ public sealed partial class MainWindow : Window
     {
         if (args.IsSettingsSelected) return;
 
+        if (_navigatingProgrammatically) return;
+
         var tag = (args.SelectedItem as NavigationViewItem)?.Tag?.ToString();
         switch (tag)
         {
@@ -73,7 +76,12 @@ public sealed partial class MainWindow : Window
         Log.Info("Navigating to Library");
         var libraryItem = _navView.MenuItems.OfType<NavigationViewItem>()
             .FirstOrDefault(item => item.Tag?.ToString() == "Library");
-        if (libraryItem != null) _navView.SelectedItem = libraryItem;
+        if (libraryItem != null)
+        {
+            _navigatingProgrammatically = true;
+            _navView.SelectedItem = libraryItem;
+            _navigatingProgrammatically = false;
+        }
         NavigateSafely(typeof(LibraryPage), "Library");
     }
 
