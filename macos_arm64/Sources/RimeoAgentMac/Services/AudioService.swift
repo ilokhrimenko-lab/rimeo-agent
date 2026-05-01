@@ -283,19 +283,34 @@ func runFFmpegWithStdin(_ args: [String], inputPath: String, binary: String = "f
     proc.standardError  = errPipe
 
     // Pump file → stdin pipe on a background thread to avoid deadlock.
-    // The pipe buffer is small (~64 KB); this loop blocks when full and resumes
-    // as ffmpeg reads, so total memory usage stays bounded.
+    // Uses Darwin.write() with F_SETNOSIGPIPE so that if the child process exits
+    // early (e.g. ffprobe reads only the header), the write returns EPIPE instead
+    // of raising SIGABRT via an uncatchable ObjC exception from NSFileHandle.writeData:.
+    let writeFD = stdinPipe.fileHandleForWriting.fileDescriptor
+    var noSig: Int32 = 1
+    _ = fcntl(writeFD, F_SETNOSIGPIPE, &noSig)
+
     let pumpQueue = DispatchQueue(label: "rimeo.\(binary).stdin-pump", qos: .utility)
     pumpQueue.async {
         defer {
             inputFH.closeFile()
-            stdinPipe.fileHandleForWriting.closeFile()
+            close(writeFD)
         }
         let chunkSize = 65536
         while true {
             let chunk = inputFH.readData(ofLength: chunkSize)
             if chunk.isEmpty { break }
-            stdinPipe.fileHandleForWriting.write(chunk)
+            var offset = 0
+            let written: Bool = chunk.withUnsafeBytes { ptr in
+                guard let base = ptr.baseAddress else { return false }
+                while offset < chunk.count {
+                    let n = Darwin.write(writeFD, base.advanced(by: offset), chunk.count - offset)
+                    if n <= 0 { return false }  // EPIPE: child exited, stop pumping
+                    offset += n
+                }
+                return true
+            }
+            if !written { break }
         }
     }
 

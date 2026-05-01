@@ -227,6 +227,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             logger.error("HTTP server failed to start: \(error)")
         }
 
+        // Pre-authorize removable volumes: open one file per unique /Volumes/... mount
+        // so that TCC shows the consent dialog at startup (while FDA is being confirmed)
+        // rather than interrupting playback mid-track.
+        DispatchQueue.global(qos: .background).async {
+            preauthorizeRemovableVolumes()
+        }
+
         // Log cloudflared availability immediately (visible in first lines of log)
         let cfPath = TunnelManager.shared.findCloudflared()
         logger.info("Startup: cloudflared_found=\(cfPath != nil), path=\(cfPath ?? "none")")
@@ -313,6 +320,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     alert.runModal()
                 }
             }
+        }
+    }
+}
+
+// MARK: - Removable volume pre-authorization
+
+// Opens one file per unique external volume found in the Rekordbox library so
+// that the TCC "access removable volume" dialog appears at startup rather than
+// during playback. After the user clicks Allow once per volume, TCC remembers
+// the grant permanently (for this app binary signature).
+private func preauthorizeRemovableVolumes() {
+    guard AppState.hasFullDiskAccess() else { return }
+
+    let lib = RekordboxParser.shared.parse()
+    guard !lib.tracks.isEmpty else { return }
+
+    // Collect one representative file path per unique /Volumes/<name> mount point.
+    var seenVolumes = Set<String>()
+    var probeFiles: [String] = []
+    for track in lib.tracks {
+        let path = track.location
+        guard path.hasPrefix("/Volumes/") else { continue }
+        let components = path.split(separator: "/", maxSplits: 3, omittingEmptySubsequences: false)
+        guard components.count >= 3 else { continue }
+        let volumeName = String(components[2])
+        if seenVolumes.insert(volumeName).inserted {
+            probeFiles.append(path)
+        }
+    }
+
+    for path in probeFiles {
+        // Opening the FileHandle in the main app process (which has FDA) establishes
+        // the TCC grant for the volume. The handle is closed immediately after.
+        if let fh = FileHandle(forReadingAtPath: path) {
+            fh.closeFile()
+            logger.info("Pre-authorized removable volume for path: \(path)")
+        } else {
+            logger.warning("Pre-authorization failed (file not accessible): \(path)")
         }
     }
 }
