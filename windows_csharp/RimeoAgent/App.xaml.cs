@@ -38,12 +38,21 @@ public partial class App : Application
             if (info != null) Log.Info($"Update available: {info.Version}");
         });
 
-        // Create main window
-        _window = new MainWindow();
+        try
+        {
+            Log.Info("Creating main window");
+            _window = new MainWindow();
 
-        _window.Activate();
+            Log.Info("Activating main window");
+            _window.Activate();
 
-        Log.Info("Rimeo Agent started");
+            Log.Info("Rimeo Agent started");
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"Main window startup failed: {ex}");
+            throw;
+        }
     }
 
     private void ShowWindow()
