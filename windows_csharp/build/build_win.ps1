@@ -9,6 +9,7 @@ $Root    = Split-Path $PSScriptRoot -Parent
 $Project = Join-Path $Root "RimeoAgent\RimeoAgent.csproj"
 $Dist    = Join-Path $Root "dist"
 $ZipName = "RimeoAgent_win.zip"
+$InstallerName = "RimeoAgentSetup_win.exe"
 
 Write-Host "=== Rimeo Agent Windows Build ===" -ForegroundColor Cyan
 Write-Host "Build number: $BuildNumber"
@@ -61,7 +62,27 @@ if (Test-Path $CloudflaredSrc) {
 # Zip
 $ZipPath = Join-Path $Dist $ZipName
 Compress-Archive -Path (Join-Path $Dist "RimeoAgent\*") -DestinationPath $ZipPath -Force
+
+# Installer
+$InstallerScript = Join-Path $PSScriptRoot "RimeoAgentInstaller.nsi"
+$InstallerPath = Join-Path $Dist $InstallerName
+$MakeNsis = Get-Command makensis -ErrorAction SilentlyContinue
+if ($MakeNsis) {
+    Write-Host "Building installer..." -ForegroundColor Cyan
+    & $MakeNsis.Source `
+        "/DSOURCE_DIR=$(Join-Path $Dist "RimeoAgent")" `
+        "/DOUT_FILE=$InstallerPath" `
+        $InstallerScript
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: makensis failed" -ForegroundColor Red
+        exit 1
+    }
+} else {
+    Write-Host "WARNING: makensis not found; skipping installer build" -ForegroundColor Yellow
+}
+
 Write-Host ""
 Write-Host "=== Build complete ===" -ForegroundColor Green
 Write-Host "Executable: $Dist\RimeoAgent\RimeoAgent.exe"
 Write-Host "Archive:    $ZipPath"
+Write-Host "Installer:  $InstallerPath"

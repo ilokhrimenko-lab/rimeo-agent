@@ -145,12 +145,27 @@ jobs:
 
       - name: Package
         shell: pwsh
-        run: Compress-Archive -Path dist\RimeoAgent\* -DestinationPath dist\RimeoAgent_win.zip -Force
+        run: |
+          Compress-Archive -Path dist\RimeoAgent\* -DestinationPath dist\RimeoAgent_win.zip -Force
+
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis --no-progress -y
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          makensis `
+            "/DSOURCE_DIR=$PWD\dist\RimeoAgent" `
+            "/DOUT_FILE=$PWD\dist\RimeoAgentSetup_win.exe" `
+            windows_csharp\build\RimeoAgentInstaller.nsi
 
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: dist\RimeoAgent_win.zip
+          path: |
+            dist\RimeoAgentSetup_win.exe
+            dist\RimeoAgent_win.zip
 
   release:
     name: Attach to Release
@@ -182,6 +197,7 @@ jobs:
           name: ${{ env.RELEASE_NAME }}
           files: |
             artifacts/mac/RimeoAgent_mac.zip
+            artifacts/windows/RimeoAgentSetup_win.exe
             artifacts/windows/RimeoAgent_win.zip
 
       - name: Upload to release (macOS only)
@@ -198,4 +214,5 @@ jobs:
         with:
           name: ${{ env.RELEASE_NAME }}
           files: |
+            artifacts/windows/RimeoAgentSetup_win.exe
             artifacts/windows/RimeoAgent_win.zip
