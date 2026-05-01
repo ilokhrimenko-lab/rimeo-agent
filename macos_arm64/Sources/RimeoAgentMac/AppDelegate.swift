@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let defaultWindowSize = NSSize(width: 1180, height: 820)
     private let minimumWindowSize = NSSize(width: 1120, height: 760)
     private var servicesStarted = false
+    private var fdaWasGranted = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Ignore SIGPIPE (prevents crashes on broken socket writes)
@@ -28,6 +29,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidBecomeActive(_ notification: Notification) {
         AppState.shared.refreshDiskAccessBannerState()
+        triggerVolumePreAuthIfFDAJustGranted()
+    }
+
+    private func triggerVolumePreAuthIfFDAJustGranted() {
+        let hasAccess = AppState.hasFullDiskAccess()
+        guard hasAccess, !fdaWasGranted else {
+            if hasAccess { fdaWasGranted = true }
+            return
+        }
+        fdaWasGranted = true
+        logger.info("FDA just detected — running volume pre-authorization")
+        DispatchQueue.global(qos: .userInitiated).async {
+            preauthorizeRemovableVolumes()
+        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
@@ -227,10 +242,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             logger.error("HTTP server failed to start: \(error)")
         }
 
-        // Pre-authorize removable volumes: open one file per unique /Volumes/... mount
-        // so that TCC shows the consent dialog at startup (while FDA is being confirmed)
-        // rather than interrupting playback mid-track.
-        DispatchQueue.global(qos: .background).async {
+        // Pre-authorize removable volumes at startup so TCC consent is established
+        // before any streaming request arrives.
+        DispatchQueue.global(qos: .userInitiated).async {
             preauthorizeRemovableVolumes()
         }
 
@@ -326,38 +340,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
 // MARK: - Removable volume pre-authorization
 
-// Opens one file per unique external volume found in the Rekordbox library so
-// that the TCC "access removable volume" dialog appears at startup rather than
-// during playback. After the user clicks Allow once per volume, TCC remembers
-// the grant permanently (for this app binary signature).
+// Probes each unique /Volumes/<name> mount found in the Rekordbox library so that
+// TCC consent is established at startup rather than during playback/streaming.
+// Uses the volume root directory — more reliable than a specific file which may have moved.
+// Falls back to a known track file if the directory listing fails.
 private func preauthorizeRemovableVolumes() {
-    guard AppState.hasFullDiskAccess() else { return }
+    guard AppState.hasFullDiskAccess() else {
+        logger.info("Volume pre-auth skipped: Full Disk Access not yet granted")
+        return
+    }
 
     let lib = RekordboxParser.shared.parse()
-    guard !lib.tracks.isEmpty else { return }
+    guard !lib.tracks.isEmpty else {
+        logger.info("Volume pre-auth skipped: library is empty")
+        return
+    }
 
-    // Collect one representative file path per unique /Volumes/<name> mount point.
-    var seenVolumes = Set<String>()
-    var probeFiles: [String] = []
+    // Collect unique /Volumes/<name> mount points and one representative file each.
+    var volumeRoots: [String: String] = [:]  // volumeName → first track path
     for track in lib.tracks {
         let path = track.location
         guard path.hasPrefix("/Volumes/") else { continue }
-        let components = path.split(separator: "/", maxSplits: 3, omittingEmptySubsequences: false)
-        guard components.count >= 3 else { continue }
-        let volumeName = String(components[2])
-        if seenVolumes.insert(volumeName).inserted {
-            probeFiles.append(path)
+        let parts = path.split(separator: "/", maxSplits: 3, omittingEmptySubsequences: false)
+        guard parts.count >= 3 else { continue }
+        let name = String(parts[2])
+        if volumeRoots[name] == nil {
+            volumeRoots[name] = path
         }
     }
 
-    for path in probeFiles {
-        // Opening the FileHandle in the main app process (which has FDA) establishes
-        // the TCC grant for the volume. The handle is closed immediately after.
-        if let fh = FileHandle(forReadingAtPath: path) {
+    guard !volumeRoots.isEmpty else {
+        logger.info("Volume pre-auth: no /Volumes tracks in library")
+        return
+    }
+
+    logger.info("Volume pre-auth: probing \(volumeRoots.count) volume(s): \(volumeRoots.keys.sorted().joined(separator: ", "))")
+
+    let fm = FileManager.default
+    for (name, trackPath) in volumeRoots {
+        let root = "/Volumes/\(name)"
+
+        // Primary: list the volume root. Any successful FS operation establishes TCC consent.
+        if (try? fm.contentsOfDirectory(atPath: root)) != nil {
+            logger.info("Volume pre-auth OK (dir list): \(root)")
+            continue
+        }
+
+        // Fallback: open a known file from the library on that volume.
+        if let fh = FileHandle(forReadingAtPath: trackPath) {
             fh.closeFile()
-            logger.info("Pre-authorized removable volume for path: \(path)")
+            logger.info("Volume pre-auth OK (file open): \(trackPath)")
         } else {
-            logger.warning("Pre-authorization failed (file not accessible): \(path)")
+            logger.warning("Volume pre-auth failed for \(name) — volume may not be mounted")
         }
     }
 }
