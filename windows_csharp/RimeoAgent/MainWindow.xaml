@@ -12,15 +12,15 @@
                         OpenPaneLength="200"
                         SelectionChanged="NavView_SelectionChanged">
             <NavigationView.MenuItems>
-                <NavigationViewItem Content="Library"  Tag="Library"  Icon="Library" />
-                <NavigationViewItem Content="Analysis" Tag="Analysis" Icon="Audio"   />
-                <NavigationViewItem Content="Pairing"  Tag="Pairing"  Icon="Link"    />
-                <NavigationViewItem Content="Account"  Tag="Account"  Icon="Contact" />
-                <NavigationViewItem Content="Logs"     Tag="Logs"     Icon="Document"/>
+                <NavigationViewItem Content="Library"  Tag="Library" />
+                <NavigationViewItem Content="Analysis" Tag="Analysis" />
+                <NavigationViewItem Content="Pairing"  Tag="Pairing" />
+                <NavigationViewItem Content="Account"  Tag="Account" />
+                <NavigationViewItem Content="Logs"     Tag="Logs" />
             </NavigationView.MenuItems>
 
             <NavigationView.FooterMenuItems>
-                <NavigationViewItem Content="Quit" Tag="Quit" Icon="Cancel" />
+                <NavigationViewItem Content="Quit" Tag="Quit" />
             </NavigationView.FooterMenuItems>
 
             <Frame x:Name="ContentFrame" Margin="0" />
