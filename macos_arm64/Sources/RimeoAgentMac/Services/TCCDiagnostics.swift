@@ -39,17 +39,52 @@ enum TCCDiagnostics {
     }
 
     static func hasFullDiskAccess() -> Bool {
-        // Try multiple paths that require FDA (location changed across macOS versions)
-        let candidates: [String] = [
-            "/Library/Application Support/com.apple.TCC/TCC.db",
-            "/private/var/db/dslocal/nodes/Default/users.plist",
+        let home = NSHomeDirectory()
+
+        // User-level TCC-protected files: require FDA on all macOS versions regardless of path changes.
+        let userProtectedFiles: [String] = [
+            "\(home)/Library/Safari/History.db",
+            "\(home)/Library/Messages/chat.db",
+            "\(home)/Library/Mail/V10/MailData/Envelope Index",
+            "\(home)/Library/Mail/V9/MailData/Envelope Index",
         ]
-        for path in candidates {
+        for path in userProtectedFiles {
             if let fh = FileHandle(forReadingAtPath: path) {
                 fh.closeFile()
+                logger.info("FDA check: granted via \(path)")
                 return true
             }
+            logger.info("FDA check: \(path) not accessible")
         }
+
+        // System paths: may vary across macOS versions.
+        let systemFiles: [String] = [
+            "/Library/Application Support/com.apple.TCC/TCC.db",
+            "/private/var/db/dslocal/nodes/Default/users.plist",
+            "/private/etc/sudoers",
+        ]
+        for path in systemFiles {
+            if let fh = FileHandle(forReadingAtPath: path) {
+                fh.closeFile()
+                logger.info("FDA check: granted via \(path)")
+                return true
+            }
+            logger.info("FDA check: \(path) not accessible")
+        }
+
+        // Directory listing fallbacks.
+        let dirCandidates: [String] = [
+            "/private/var/db/dslocal/nodes/Default",
+            "/private/var/root",
+        ]
+        for dirPath in dirCandidates {
+            if (try? FileManager.default.contentsOfDirectory(atPath: dirPath)) != nil {
+                logger.info("FDA check: granted via dir listing \(dirPath)")
+                return true
+            }
+            logger.info("FDA check: dir listing failed \(dirPath)")
+        }
+        logger.info("FDA check: not granted (all paths failed)")
         return false
     }
 

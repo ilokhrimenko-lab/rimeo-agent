@@ -55,10 +55,11 @@ struct DiskAccessBannerView: View {
                             .font(.system(size: 13))
                         Text("Open Privacy Settings")
                             .font(.system(size: 13, weight: .medium))
+                            .lineLimit(1)
                     }
                     .foregroundColor(.white)
+                    .frame(height: 34)
                     .padding(.horizontal, 16)
-                    .padding(.vertical, 9)
                     .background(C.acc)
                     .cornerRadius(10)
                 }
@@ -70,10 +71,11 @@ struct DiskAccessBannerView: View {
                             .font(.system(size: 13))
                         Text("Restart Now")
                             .font(.system(size: 13, weight: .medium))
+                            .lineLimit(1)
                     }
                     .foregroundColor(.white)
+                    .frame(height: 34)
                     .padding(.horizontal, 16)
-                    .padding(.vertical, 9)
                     .background(C.acc)
                     .cornerRadius(10)
                 }
@@ -83,8 +85,9 @@ struct DiskAccessBannerView: View {
                     Text("Dismiss")
                         .font(.system(size: 13))
                         .foregroundColor(C.dim)
+                        .lineLimit(1)
+                        .frame(height: 34)
                         .padding(.horizontal, 16)
-                        .padding(.vertical, 9)
                         .background(C.surf)
                         .cornerRadius(10)
                         .overlay(RoundedRectangle(cornerRadius: 10).stroke(C.brd, lineWidth: 1))
