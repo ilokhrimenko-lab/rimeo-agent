@@ -27,8 +27,13 @@ struct ContentView: View {
                     OnboardingView()
                 } else {
                     MainLayout()
-                        .sheet(isPresented: $appState.showDiskAccessBanner) {
-                            DiskAccessBannerView()
+                        .overlay {
+                            if appState.showDiskAccessBanner {
+                                ZStack {
+                                    Color.black.opacity(0.5).ignoresSafeArea()
+                                    DiskAccessBannerView()
+                                }
+                            }
                         }
                 }
             default:

@@ -385,8 +385,7 @@ private func preauthorizeRemovableVolumes() {
         // Directory listing does NOT trigger the consent check for file reads.
         for trackPath in trackPaths {
             if let fh = FileHandle(forReadingAtPath: trackPath) {
-                _ = fh.readData(ofLength: 1)
-                fh.closeFile()
+                fh.closeFile()  // open() call is the TCC trigger — reading is not required
                 logger.info("Volume pre-auth OK: \(name) via \(trackPath)")
                 authorized = true
                 break

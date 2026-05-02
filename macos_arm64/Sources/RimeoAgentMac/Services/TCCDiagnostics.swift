@@ -39,10 +39,16 @@ enum TCCDiagnostics {
     }
 
     static func hasFullDiskAccess() -> Bool {
-        let tccDB = "/Library/Application Support/com.apple.TCC/TCC.db"
-        if let fh = FileHandle(forReadingAtPath: tccDB) {
-            fh.closeFile()
-            return true
+        // Try multiple paths that require FDA (location changed across macOS versions)
+        let candidates: [String] = [
+            "/Library/Application Support/com.apple.TCC/TCC.db",
+            "/private/var/db/dslocal/nodes/Default/users.plist",
+        ]
+        for path in candidates {
+            if let fh = FileHandle(forReadingAtPath: path) {
+                fh.closeFile()
+                return true
+            }
         }
         return false
     }
