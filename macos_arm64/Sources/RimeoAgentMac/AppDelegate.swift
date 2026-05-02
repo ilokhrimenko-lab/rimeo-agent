@@ -356,16 +356,16 @@ private func preauthorizeRemovableVolumes() {
         return
     }
 
-    // Collect unique /Volumes/<name> mount points and one representative file each.
-    var volumeRoots: [String: String] = [:]  // volumeName → first track path
+    // Collect up to 5 track paths per /Volumes/<name> mount point as fallbacks.
+    var volumeRoots: [String: [String]] = [:]  // volumeName → [trackPath]
     for track in lib.tracks {
         let path = track.location
         guard path.hasPrefix("/Volumes/") else { continue }
         let parts = path.split(separator: "/", maxSplits: 3, omittingEmptySubsequences: false)
         guard parts.count >= 3 else { continue }
         let name = String(parts[2])
-        if volumeRoots[name] == nil {
-            volumeRoots[name] = path
+        if (volumeRoots[name]?.count ?? 0) < 5 {
+            volumeRoots[name, default: []].append(path)
         }
     }
 
@@ -377,21 +377,29 @@ private func preauthorizeRemovableVolumes() {
     logger.info("Volume pre-auth: probing \(volumeRoots.count) volume(s): \(volumeRoots.keys.sorted().joined(separator: ", "))")
 
     let fm = FileManager.default
-    for (name, trackPath) in volumeRoots {
+    for (name, trackPaths) in volumeRoots {
         let root = "/Volumes/\(name)"
+        var authorized = false
 
-        // Primary: list the volume root. Any successful FS operation establishes TCC consent.
-        if (try? fm.contentsOfDirectory(atPath: root)) != nil {
-            logger.info("Volume pre-auth OK (dir list): \(root)")
-            continue
+        // Open an actual file — this is what establishes kTCCServiceRemovableVolumes consent.
+        // Directory listing does NOT trigger the consent check for file reads.
+        for trackPath in trackPaths {
+            if let fh = FileHandle(forReadingAtPath: trackPath) {
+                _ = fh.readData(ofLength: 1)
+                fh.closeFile()
+                logger.info("Volume pre-auth OK: \(name) via \(trackPath)")
+                authorized = true
+                break
+            }
         }
 
-        // Fallback: open a known file from the library on that volume.
-        if let fh = FileHandle(forReadingAtPath: trackPath) {
-            fh.closeFile()
-            logger.info("Volume pre-auth OK (file open): \(trackPath)")
-        } else {
-            logger.warning("Volume pre-auth failed for \(name) — volume may not be mounted")
+        if !authorized {
+            let mounted = (try? fm.contentsOfDirectory(atPath: root)) != nil
+            if mounted {
+                logger.warning("Volume pre-auth: dir OK but no readable track for \(name) — possible TCC dialog on first play")
+            } else {
+                logger.warning("Volume pre-auth failed for \(name) — volume may not be mounted")
+            }
         }
     }
 }

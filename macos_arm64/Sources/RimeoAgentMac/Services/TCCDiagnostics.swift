@@ -57,7 +57,7 @@ enum TCCDiagnostics {
             ("external_volume", "/Volumes/"),
         ]
 
-        for (label, prefix) in checks where path == prefix || path.hasPrefix(prefix + "/") {
+        for (label, prefix) in checks where path == prefix || path.hasPrefix(prefix.hasSuffix("/") ? prefix : prefix + "/") {
             return label
         }
         return "other"
