@@ -27,14 +27,17 @@ struct ContentView: View {
                     OnboardingView()
                 } else {
                     MainLayout()
-                        .overlay {
-                            if appState.showDiskAccessBanner {
-                                ZStack {
-                                    Color.black.opacity(0.5).ignoresSafeArea()
-                                    DiskAccessBannerView()
+                        .overlay(
+                            Group {
+                                if appState.showDiskAccessBanner {
+                                    ZStack {
+                                        Color.black.opacity(0.5)
+                                            .edgesIgnoringSafeArea(.all)
+                                        DiskAccessBannerView()
+                                    }
                                 }
                             }
-                        }
+                        )
                 }
             default:
                 ComponentGateView()
