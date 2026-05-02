@@ -345,7 +345,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 // Uses the volume root directory — more reliable than a specific file which may have moved.
 // Falls back to a known track file if the directory listing fails.
 private func preauthorizeRemovableVolumes() {
-    guard AppState.hasFullDiskAccess() else {
+    // Skip pre-auth only if FDA is reliably detected as not granted.
+    // With ad-hoc signing, hasFullDiskAccess() is unreliable — always run pre-auth
+    // so kTCCServiceRemovableVolumes consent is established at startup.
+    let fdaOk = AppState.hasFullDiskAccess()
+    let fdaReliable = TCCDiagnostics.isReliablyDetectable()
+    guard fdaOk || !fdaReliable else {
         logger.info("Volume pre-auth skipped: Full Disk Access not yet granted")
         return
     }
