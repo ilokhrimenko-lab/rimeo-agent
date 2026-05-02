@@ -51,7 +51,11 @@ final class AppState: ObservableObject {
     private func checkFdaAfterUpdate() {
         guard DataStore.shared.data.just_updated else { return }
         DataStore.shared.update { $0.just_updated = false }
-        guard !AppState.hasFullDiskAccess() else { return }
+        // Only reset the dismiss flag if FDA was genuinely revoked (detectable).
+        // If hasFullDiskAccess() returns false due to ad-hoc signing TCC identity
+        // issues (macOS 26+), we cannot distinguish "revoked" from "detection broken",
+        // so we leave the dismiss flag untouched to avoid spamming the user.
+        guard AppState.hasFullDiskAccess() == false && TCCDiagnostics.isReliablyDetectable() else { return }
         UserDefaults.standard.removeObject(forKey: AppState.fdaDismissedKey)
         fdaResetAfterUpdate = true
     }

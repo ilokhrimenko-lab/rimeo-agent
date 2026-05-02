@@ -38,6 +38,23 @@ enum TCCDiagnostics {
         logger.info("TCC path result: operation=\(operation), location=\(location), exists=\(exists), readable=\(readable), path=\(normalized)")
     }
 
+    // Returns false if the app is ad-hoc signed — on macOS 26+ TCC uses path/hash
+    // identity for ad-hoc apps which may not match the bundle-ID entry in TCC.db,
+    // making hasFullDiskAccess() unreliable regardless of what the user granted.
+    static func isReliablyDetectable() -> Bool {
+        let path = Bundle.main.bundlePath
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+        proc.arguments = ["-dv", path]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = pipe
+        try? proc.run()
+        proc.waitUntilExit()
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return !output.contains("Signature=adhoc") && !output.contains("code object is not signed")
+    }
+
     static func hasFullDiskAccess() -> Bool {
         let home = NSHomeDirectory()
 
