@@ -31,7 +31,7 @@ else:
 GITHUB_REPO = "ilokhrimenko-lab/rimeo-agent"
 # ─────────────────────────────────────────────────────────────────────────────
 
-_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 _CHECK_EVERY_HOURS = 24
 _STAMP_FILE = Path.home() / ".rimeo" / "last_update_check"
 
@@ -106,30 +106,35 @@ def check_update() -> Optional[UpdateInfo]:
             headers={"User-Agent": f"RimeoAgent/{settings.DISPLAY_VERSION}"},
         )
         with urllib.request.urlopen(req, timeout=10) as r:
-            data = json.loads(r.read())
+            releases = json.loads(r.read())
     except Exception as e:
         logger.warning("Update check failed: %s", e)
         _stamp()
         return None
 
     _stamp()
-    tag = data.get("tag_name", "")
-    if not tag or tag == settings.RELEASE_TAG:
-        logger.info("Up to date (%s)", settings.DISPLAY_VERSION)
-        return None
 
-    for asset_name in asset_names:
-        for a in data.get("assets", []):
-            if a.get("name") != asset_name:
-                continue
-            logger.info("Update available: %s → %s", settings.DISPLAY_VERSION, tag)
-            return UpdateInfo(
-                version=_format_release_label(tag),
-                download_url=a["browser_download_url"],
-                notes=(data.get("body") or "")[:400],
-            )
+    # Find the newest release that has an asset for this platform.
+    # This way a Windows-only release never triggers a macOS update and vice versa.
+    for release in releases:  # GitHub returns newest-first
+        tag = release.get("tag_name", "")
+        if not tag:
+            continue
+        for asset_name in asset_names:
+            for a in release.get("assets", []):
+                if a.get("name") != asset_name:
+                    continue
+                if tag == settings.RELEASE_TAG:
+                    logger.info("Up to date (%s)", settings.DISPLAY_VERSION)
+                    return None
+                logger.info("Update available: %s → %s", settings.DISPLAY_VERSION, tag)
+                return UpdateInfo(
+                    version=_format_release_label(tag),
+                    download_url=a["browser_download_url"],
+                    notes=(release.get("body") or "")[:400],
+                )
 
-    logger.warning("Release %s has no supported asset from %s", tag, asset_names)
+    logger.info("No release with a platform asset found")
     return None
 
 
