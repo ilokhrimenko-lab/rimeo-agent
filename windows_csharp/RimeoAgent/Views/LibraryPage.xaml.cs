@@ -15,6 +15,8 @@ public sealed partial class LibraryPage : Page
 
     public LibraryPage()
     {
+        InitializeComponent();
+
         _searchBox = new TextBox { PlaceholderText = "Search...", Width = 320 };
         _searchBox.TextChanged += SearchBox_TextChanged;
 
@@ -37,11 +39,25 @@ public sealed partial class LibraryPage : Page
 
     private async Task LoadLibrary()
     {
-        _statusLabel.Text = "Loading...";
-        var lib = await Task.Run(() => RekordboxParser.Shared.Parse());
-        _allTracks = lib.Tracks.Select(t => new TrackRow(t)).ToList();
-        ApplyFilter(_searchBox.Text);
-        _statusLabel.Text = $"{lib.Tracks.Count} tracks";
+        try
+        {
+            Log.Info("LoadLibrary: starting parse");
+            _statusLabel.Text = "Loading...";
+            var lib = await Task.Run(() => RekordboxParser.Shared.Parse());
+            Log.Info($"LoadLibrary: parse complete, {lib.Tracks.Count} tracks");
+
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                _allTracks = lib.Tracks.Select(t => new TrackRow(t)).ToList();
+                ApplyFilter(_searchBox.Text);
+                _statusLabel.Text = $"{lib.Tracks.Count} tracks";
+            });
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"LoadLibrary failed: {ex}");
+            DispatcherQueue.TryEnqueue(() => _statusLabel.Text = "Failed to load library");
+        }
     }
 
     private void ApplyFilter(string q)

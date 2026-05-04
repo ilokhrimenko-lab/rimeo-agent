@@ -103,7 +103,7 @@ public sealed class ComponentManager
 
         fileOut.Close();
 
-        // Verify SHA256
+        Log.Info($"Download complete for {comp.Id}, verifying checksum…");
         var actual = ComputeSha256(tmp);
         if (!string.Equals(actual, comp.Sha256, StringComparison.OrdinalIgnoreCase))
         {
@@ -111,6 +111,7 @@ public sealed class ComponentManager
             throw new Exception($"Checksum mismatch for {comp.Id}: expected {comp.Sha256}, got {actual}");
         }
 
+        Log.Info($"Checksum OK for {comp.Id}, installing…");
         File.Move(tmp, dest, overwrite: true);
         Log.Info($"Component installed: {comp.Id} → {dest}");
     }
