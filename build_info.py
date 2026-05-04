@@ -1,3 +1,3 @@
 VERSION = "1.0"
-BUILD_NUMBER = "154"
-RELEASE_TAG = "win-v1.0-build154"
+BUILD_NUMBER = "155"
+RELEASE_TAG = "win-v1.0-build155"
