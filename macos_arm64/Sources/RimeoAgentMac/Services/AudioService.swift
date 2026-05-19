@@ -6,6 +6,10 @@ final class AudioService {
     private let convLocks = NSMapTable<NSString, NSLock>(keyOptions: .strongMemory,
                                                          valueOptions: .strongMemory)
     private let lockGuard = NSLock()
+    // Bounds concurrent ffmpeg processes: an iOS list prefetch can fire dozens of
+    // artwork/waveform/stream requests at once, each converting a 60 MB+ AIFF.
+    // Without this cap the burst exhausts CPU/IO and crashes the agent.
+    private let convSemaphore = DispatchSemaphore(value: 2)
 
     private func convLock(for id: String) -> NSLock {
         lockGuard.lock(); defer { lockGuard.unlock() }
@@ -30,6 +34,9 @@ final class AudioService {
             logger.info("AIFF conversion cache hit after lock: track=\(trackID), wav=\(cached.path)")
             return cached.path
         }
+
+        convSemaphore.wait()
+        defer { convSemaphore.signal() }
 
         logger.info("Converting AIFF → WAV: \(trackID)")
         TCCDiagnostics.logPathAccess("convert-aiff", path: path)

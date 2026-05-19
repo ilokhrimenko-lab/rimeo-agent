@@ -34,9 +34,26 @@ printf 'VERSION = "1.0"\nBUILD_NUMBER = "%s"\nRELEASE_TAG = "%s"\n' \
 echo "==> build_info.py updated"
 
 # 3. Commit
+# Stage build_info.py AND every modified tracked file (workflow, Swift sources,
+# etc.) so a release never ships stale code. `git add -u` only touches files git
+# already tracks — untracked junk (._* AppleDouble, build artifacts) is ignored.
+#
+# `-c core.fileMode=false` is a per-command override (NOT a persisted config
+# change): the SanDisk volume flips the executable bit on most files, which would
+# otherwise make `git add -u` sweep ~80 mode-only "changes" into every release
+# commit. With fileMode off, only real content changes get staged.
 COMMIT_MSG="Build ${NEXT}${MESSAGE:+: }${MESSAGE}"
-git add build_info.py
-git commit -m "$COMMIT_MSG"
+GIT_NOMODE="git -c core.fileMode=false"
+$GIT_NOMODE add build_info.py
+$GIT_NOMODE add -u
+STAGED="$($GIT_NOMODE diff --cached --name-only)"
+if [ -z "$STAGED" ]; then
+  echo "ERROR: nothing staged — no real code changes detected. Aborting release."
+  exit 1
+fi
+echo "==> Staged for release:"
+printf '%s\n' "$STAGED" | sed 's/^/    /'
+$GIT_NOMODE commit -m "$COMMIT_MSG"
 echo "==> Committed: $COMMIT_MSG"
 
 # 4. Tag and push

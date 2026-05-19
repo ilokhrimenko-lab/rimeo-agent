@@ -5,13 +5,17 @@ final class TunnelManager {
     private init() {}
 
     private var proc:          Process?
-    private var tunnelURL:     String = ""
+    private var readiness      = TunnelReadinessState()
     private var _shouldRun:    Bool   = false
     private var _loopRunning:  Bool   = false
     private let lock           = NSLock()
+    private let readinessProbeQueue = DispatchQueue(label: "rimeo.tunnel.readiness", qos: .utility)
     private let normalRestartDelay: TimeInterval = 5
     private let maxRestartDelay: TimeInterval = 300
     private let rateLimitRestartDelay: TimeInterval = 15 * 60
+    private let readinessProbeInterval: TimeInterval = 2
+    private let readinessProbeTimeout: TimeInterval = 5
+    private let pendingReadinessTimeout: TimeInterval = 120
 
     // Tracks when the last successful tunnel connection was established
     private var lastTunnelEstablished: Date? = nil
@@ -21,7 +25,7 @@ final class TunnelManager {
     // Stuck-loop detection: kill process if tunnel was established but hasn't reconnected in this interval
     private let stuckDetectionInterval: TimeInterval = 10 * 60
 
-    var activeURL: String { lock.lock(); defer { lock.unlock() }; return tunnelURL }
+    var activeURL: String { lock.lock(); defer { lock.unlock() }; return readiness.activeURL }
     var isRunning: Bool   { lock.lock(); defer { lock.unlock() }; return proc?.isRunning == true }
 
     func autoStartIfAvailable() {
@@ -39,8 +43,11 @@ final class TunnelManager {
         if _loopRunning { lock.unlock(); return }
         _shouldRun   = true
         _loopRunning = true
-        tunnelURL    = ""
+        _ = readiness.invalidateAndClear()
+        lastTunnelEstablished = nil
+        lastKeepaliveSent = nil
         lock.unlock()
+        publishTunnelURL("")
         DispatchQueue.global(qos: .utility).async { self.runTunnel() }
     }
 
@@ -49,10 +56,11 @@ final class TunnelManager {
         _shouldRun = false
         proc?.terminate()
         proc      = nil
-        tunnelURL = ""
+        _ = readiness.invalidateAndClear()
+        lastTunnelEstablished = nil
+        lastKeepaliveSent = nil
         lock.unlock()
-        DataStore.shared.update { $0.tunnel_url = "" }
-        AppState.shared.refreshFromData()
+        publishTunnelURL("")
     }
 
     func findCloudflared() -> String? {
@@ -81,7 +89,8 @@ final class TunnelManager {
             lock.lock()
             let shouldRun        = _shouldRun
             let loopRunning      = _loopRunning
-            let currentURL       = tunnelURL
+            let currentURL       = readiness.activeURL
+            let pendingURL       = readiness.pendingURL
             let established      = lastTunnelEstablished
             let lastKeepalive    = lastKeepaliveSent
             let currentProc      = proc
@@ -102,6 +111,8 @@ final class TunnelManager {
                     } else {
                         logger.debug("Tunnel health check: ok, url=\(currentURL)")
                     }
+                } else if !pendingURL.isEmpty {
+                    logger.debug("Tunnel health check: awaiting readiness, url=\(pendingURL)")
                 } else if let established = established {
                     // Tunnel URL cleared (connection dropped) — check if stuck
                     let minutesSinceEstablished = Date().timeIntervalSince(established) / 60
@@ -121,7 +132,7 @@ final class TunnelManager {
     }
 
     private func sendKeepalivePing(to tunnelURL: String) {
-        guard let url = URL(string: "\(tunnelURL)/api/status") else { return }
+        guard let url = URL(string: "\(tunnelURL)/healthz") else { return }
         var req = URLRequest(url: url)
         req.timeoutInterval = 10
         URLSession.shared.dataTask(with: req) { _, resp, error in
@@ -172,7 +183,12 @@ final class TunnelManager {
                 continue
             }
 
-            lock.lock(); proc = p; lock.unlock()
+            lock.lock()
+            proc = p
+            let generation = readiness.beginAttempt()
+            lastKeepaliveSent = nil
+            lock.unlock()
+            publishTunnelURL("")
             logger.info("cloudflared started (path: \(cmd))")
 
             let urlRegex = try? NSRegularExpression(
@@ -191,36 +207,35 @@ final class TunnelManager {
                 if isRateLimitOutput(line) {
                     sawRateLimit = true
                 }
-                if let regex = urlRegex, tunnelURL.isEmpty {
+                if isArgotunnelDNSTimeoutOutput(line) {
+                    logger.warning("cloudflared DNS timeout while resolving argotunnel host. If this repeats, use stable DNS (1.1.1.1 or 8.8.8.8) instead of the router resolver.")
+                }
+                if let regex = urlRegex {
                     let range = NSRange(line.startIndex ..< line.endIndex, in: line)
                     if let match = regex.firstMatch(in: line, range: range),
                        let swiftRange = Range(match.range, in: line) {
                         let url = String(line[swiftRange])
                         sawTunnelURL = true
                         consecutiveFailures = 0
-                        lock.lock()
-                        tunnelURL = url
-                        lastTunnelEstablished = Date()
-                        lastKeepaliveSent = nil
-                        lock.unlock()
-                        logger.info("Tunnel active: \(url)")
-                        DataStore.shared.update { $0.tunnel_url = url }
-                        DispatchQueue.main.async { AppState.shared.tunnelURL = url; AppState.shared.tunnelActive = true }
-                        CloudRelay.shared.noteTunnelChanged(url)
-                        CloudRelay.shared.pushTunnelUpdate(url)
+                        if noteTunnelCandidate(url, generation: generation) {
+                            scheduleReadinessProbe(for: url, generation: generation, trigger: "url_printed")
+                            schedulePendingReadinessTimeout(for: url, generation: generation)
+                        }
                     }
+                }
+                if isTunnelConnectionRegisteredOutput(line),
+                   let pending = pendingURL(for: generation) {
+                    scheduleReadinessProbe(for: pending, generation: generation, trigger: "connection_registered")
                 }
             }
 
             lock.lock()
-            tunnelURL = ""
             proc = nil
             lastKeepaliveSent = nil
+            _ = readiness.clearForStoppedProcess(generation: generation)
             // Keep lastTunnelEstablished so the stuck-loop watchdog knows when the connection dropped
             lock.unlock()
-            DataStore.shared.update { $0.tunnel_url = "" }
-            DispatchQueue.main.async { AppState.shared.tunnelURL = ""; AppState.shared.tunnelActive = false }
-            CloudRelay.shared.noteTunnelChanged("")
+            publishTunnelURL("")
             logger.info("cloudflared stopped")
 
             guard shouldKeepRunning() else { break }
@@ -246,6 +261,139 @@ final class TunnelManager {
     private func isRateLimitOutput(_ line: String) -> Bool {
         line.localizedCaseInsensitiveContains("429 Too Many Requests")
             || line.localizedCaseInsensitiveContains("error code: 1015")
+    }
+
+    private func isTunnelConnectionRegisteredOutput(_ line: String) -> Bool {
+        TunnelOutputClassifier.isConnectionRegistered(line)
+    }
+
+    private func isArgotunnelDNSTimeoutOutput(_ line: String) -> Bool {
+        line.localizedCaseInsensitiveContains("argotunnel.com")
+            && line.localizedCaseInsensitiveContains("i/o timeout")
+    }
+
+    private func noteTunnelCandidate(_ url: String, generation: Int) -> Bool {
+        lock.lock()
+        let accepted = readiness.noteCandidate(url, generation: generation)
+        lock.unlock()
+        if accepted {
+            logger.info("Tunnel candidate discovered: \(url) (awaiting /healthz readiness)")
+        }
+        return accepted
+    }
+
+    private func pendingURL(for generation: Int) -> String? {
+        lock.lock()
+        let url = readiness.generation == generation ? readiness.pendingURL : ""
+        lock.unlock()
+        return url.isEmpty ? nil : url
+    }
+
+    private func isPendingCandidate(_ url: String, generation: Int) -> Bool {
+        lock.lock()
+        let pending = readiness.isPending(url, generation: generation)
+        lock.unlock()
+        return pending
+    }
+
+    private func scheduleReadinessProbe(for url: String, generation: Int, trigger: String, delay: TimeInterval = 0) {
+        readinessProbeQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self = self, self.shouldKeepRunning(), self.isPendingCandidate(url, generation: generation) else {
+                return
+            }
+
+            let result = self.probeTunnelReadiness(url)
+            if result.ready {
+                self.promoteTunnelCandidate(url, generation: generation, reason: "\(trigger):\(result.reason)")
+            } else {
+                logger.debug("Tunnel readiness probe not ready: url=\(url), reason=\(result.reason), trigger=\(trigger)")
+                self.scheduleReadinessProbe(
+                    for: url,
+                    generation: generation,
+                    trigger: "retry_after_\(result.reason)",
+                    delay: self.readinessProbeInterval
+                )
+            }
+        }
+    }
+
+    private func schedulePendingReadinessTimeout(for url: String, generation: Int) {
+        readinessProbeQueue.asyncAfter(deadline: .now() + pendingReadinessTimeout) { [weak self] in
+            guard let self = self else { return }
+            var processToTerminate: Process?
+            self.lock.lock()
+            let timedOut = self.readiness.clearPendingIfCurrent(url, generation: generation)
+            if timedOut {
+                processToTerminate = self.proc
+            }
+            self.lock.unlock()
+
+            if timedOut {
+                logger.warning("Tunnel candidate did not become ready within \(Int(self.pendingReadinessTimeout))s, restarting cloudflared: \(url)")
+                processToTerminate?.terminate()
+            }
+        }
+    }
+
+    private func probeTunnelReadiness(_ tunnelURL: String) -> (ready: Bool, reason: String) {
+        guard let url = URL(string: "\(tunnelURL)/healthz") else {
+            return (false, "invalid_url")
+        }
+
+        var req = URLRequest(url: url)
+        req.timeoutInterval = readinessProbeTimeout
+
+        let sema = DispatchSemaphore(value: 0)
+        var responseData: Data?
+        var responseStatus = 0
+        var responseError: Error?
+
+        URLSession.shared.dataTask(with: req) { data, resp, error in
+            responseData = data
+            responseStatus = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            responseError = error
+            sema.signal()
+        }.resume()
+
+        if sema.wait(timeout: .now() + readinessProbeTimeout + 1) == .timedOut {
+            return (false, "probe_timeout")
+        }
+        if let responseError {
+            return (false, "error_\(responseError.localizedDescription)")
+        }
+        if let responseData,
+           let body = String(data: responseData, encoding: .utf8),
+           body.localizedCaseInsensitiveContains("1033") {
+            return (false, "cloudflare_1033")
+        }
+        if (200..<300).contains(responseStatus) {
+            return (true, "http_\(responseStatus)")
+        }
+        return (false, "http_\(responseStatus)")
+    }
+
+    private func promoteTunnelCandidate(_ url: String, generation: Int, reason: String) {
+        lock.lock()
+        let promoted = readiness.promoteIfReady(url, generation: generation)
+        if promoted {
+            lastTunnelEstablished = Date()
+            lastKeepaliveSent = nil
+        }
+        lock.unlock()
+
+        guard promoted else { return }
+        logger.info("Tunnel active: \(url) (readiness=\(reason))")
+        publishTunnelURL(url)
+    }
+
+    private func publishTunnelURL(_ url: String) {
+        DataStore.shared.update { $0.tunnel_url = url }
+        DispatchQueue.main.async {
+            AppState.shared.tunnelURL = url
+            AppState.shared.tunnelActive = !url.isEmpty
+        }
+        CloudRelay.shared.noteTunnelChanged(url)
+        CloudRelay.shared.pushTunnelUpdate(url)
     }
 
     private func restartDelay(forFailures failures: Int) -> TimeInterval {

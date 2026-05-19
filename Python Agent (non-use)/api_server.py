@@ -63,6 +63,10 @@ _tunnel_url:  str = ""
 _tunnel_lock  = threading.Lock()
 _convert_locks: dict[str, threading.Lock] = {}
 _convert_locks_guard = threading.Lock()
+# Bounds concurrent ffmpeg processes: an iOS list prefetch can fire dozens of
+# artwork/waveform/stream requests at once, each converting a 60 MB+ AIFF. Without
+# this cap the burst exhausts CPU/IO and crashes the agent.
+_convert_semaphore = threading.BoundedSemaphore(2)
 
 
 def _find_cloudflared() -> Optional[str]:
@@ -165,10 +169,11 @@ def _ensure_aiff_converted(path: str, track_id: str) -> str:
             return str(cached)
 
         logger.info("Converting AIFF → WAV: %s", track_id)
-        r = subprocess.run(
-            ["ffmpeg", "-i", path, "-f", "wav", str(cached), "-y"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-        )
+        with _convert_semaphore:
+            r = subprocess.run(
+                ["ffmpeg", "-i", path, "-f", "wav", str(cached), "-y"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            )
         if r.returncode != 0 or not cached.exists():
             logger.error(
                 "ffmpeg failed for id=%s rc=%d: %s",
@@ -808,7 +813,7 @@ async def _cloud_relay_worker():
                     + f"&tunnel={_uparse.quote(tunnel, safe='/:')}")
 
         try:
-            logger.info("Cloud relay connecting: %s", cloud_url)
+            logger.debug("Cloud relay poll: %s", cloud_url)
             async with httpx.AsyncClient(timeout=30.0, headers=_CLOUD_HEADERS) as client:
                 resp = await client.get(poll_url)
 
@@ -833,6 +838,13 @@ async def _cloud_relay_worker():
             logger.debug("Cloud relay cmd: req_id=%s method=%s path=%s",
                          msg.get("req_id"), msg.get("method"), msg.get("path"))
             asyncio.create_task(_handle_relay_cmd(cloud_url, msg))
+
+        except httpx.TimeoutException:
+            # Benign: long-poll held open with no command to deliver. Re-poll
+            # immediately — backing off here makes the agent deaf to new
+            # requests for up to 30s during quiet periods.
+            backoff = 1
+            continue
 
         except Exception as e:
             logger.warning("Cloud relay error: %s, retry in %ds", e, backoff)

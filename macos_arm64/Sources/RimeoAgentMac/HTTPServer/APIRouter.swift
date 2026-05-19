@@ -12,6 +12,10 @@ final class APIRouter {
         let path = req.path
 
         switch (req.method, path) {
+        // Health
+        case ("GET", "/healthz"):        return healthz(req)
+        case ("HEAD", "/healthz"):       return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: .empty)
+
         // Audio
         case ("GET", "/stream"):         return streamAudio(req)
         case ("GET", "/waveform"):       return getWaveform(req)
@@ -60,6 +64,16 @@ final class APIRouter {
         default:
             return HTTPResponse.error("Not found", status: 404)
         }
+    }
+
+    // MARK: - /healthz
+
+    private func healthz(_ req: HTTPRequest) -> HTTPResponse {
+        return .json([
+            "status": "ok",
+            "agent_id": AppConfig.shared.agentID,
+            "version": AppConfig.shared.displayVersion,
+        ])
     }
 
     // MARK: - /stream
@@ -204,16 +218,51 @@ final class APIRouter {
             }
             return .json(["status": "preloading"])
         }
-        guard let artPath = AudioService.shared.artwork(path: resolvedPath, trackID: id),
-              let data = try? Data(contentsOf: URL(fileURLWithPath: artPath)) else {
-            // Missing artwork is a valid state for many audio files.
-            // Return 204 instead of 404 to avoid "track not found" handling on clients.
-            return HTTPResponse(status: 204, headers: [:], body: .empty)
+        if let artPath = AudioService.shared.artwork(path: resolvedPath, trackID: id),
+           let data = try? Data(contentsOf: URL(fileURLWithPath: artPath)) {
+            return HTTPResponse(status: 200,
+                                headers: ["Content-Type": "image/jpeg",
+                                          "Content-Length": "\(data.count)"],
+                                body: .data(data))
         }
-        return HTTPResponse(status: 200,
-                            headers: ["Content-Type": "image/jpeg",
-                                      "Content-Length": "\(data.count)"],
-                            body: .data(data))
+
+        // No embedded artwork stream in the audio file. Rekordbox keeps cover art
+        // separately (djmdContent.ImagePath under the rekordbox share folder), so
+        // fall back to that before giving up.
+        if let rbArt = rekordboxArtworkFile(forTrackID: id),
+           let data = try? Data(contentsOf: URL(fileURLWithPath: rbArt)) {
+            let ext = (rbArt as NSString).pathExtension.lowercased()
+            let mime = (ext == "png") ? "image/png" : "image/jpeg"
+            return HTTPResponse(status: 200,
+                                headers: ["Content-Type": mime,
+                                          "Content-Length": "\(data.count)"],
+                                body: .data(data))
+        }
+
+        // Missing artwork is a valid state for many audio files.
+        // Return 204 instead of 404 to avoid "track not found" handling on clients.
+        return HTTPResponse(status: 204, headers: [:], body: .empty)
+    }
+
+    // Resolves the Rekordbox-managed cover file for a track id, or nil if the
+    // track has no ImagePath or the file is absent. Rekordbox stores ImagePath
+    // relative to "<rekordbox dir>/share" (dbPath lives at "<rekordbox dir>/master.db").
+    private func rekordboxArtworkFile(forTrackID id: String) -> String? {
+        let lib = RekordboxParser.shared.parse()
+        guard let track = lib.tracks.first(where: { $0.id == id }),
+              let imagePath = track.image_path,
+              !imagePath.isEmpty else { return nil }
+
+        let fm = FileManager.default
+        if imagePath.hasPrefix("/"), fm.fileExists(atPath: imagePath) {
+            return imagePath
+        }
+
+        let rbDir = (AppConfig.shared.dbPath as NSString).deletingLastPathComponent
+        let shareDir = (rbDir as NSString).appendingPathComponent("share")
+        let rel = imagePath.hasPrefix("/") ? String(imagePath.dropFirst()) : imagePath
+        let candidate = (shareDir as NSString).appendingPathComponent(rel)
+        return fm.fileExists(atPath: candidate) ? candidate : nil
     }
 
     // MARK: - /reveal
@@ -303,10 +352,8 @@ final class APIRouter {
 
         let localIP  = AppConfig.shared.getLocalIP()
         let localURL = "http://\(localIP):\(AppConfig.shared.port)"
-        let d        = DataStore.shared.data
-        let url      = TunnelManager.shared.activeURL.isEmpty
-                        ? (d.tunnel_url.isEmpty ? localURL : d.tunnel_url)
-                        : TunnelManager.shared.activeURL
+        let activeTunnel = TunnelManager.shared.activeURL
+        let url      = activeTunnel.isEmpty ? localURL : activeTunnel
         let qrData   = #"{"url":"\#(url)","code":"\#(code)","agent_id":"\#(AppConfig.shared.agentID)"}"#
         let encoded  = qrData.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? qrData
         let qrURL    = "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=\(encoded)"
@@ -646,8 +693,7 @@ final class APIRouter {
 
         let cfg      = AppConfig.shared
         let localURL = cfg.localAgentURL()
-        let d        = DataStore.shared.data
-        let tunnel   = TunnelManager.shared.activeURL.isEmpty ? d.tunnel_url : TunnelManager.shared.activeURL
+        let tunnel   = TunnelManager.shared.activeURL
 
         let payload: [String: Any] = [
             "token":      rawToken,
@@ -812,7 +858,7 @@ final class APIRouter {
         let storedURL = DataStore.shared.data.tunnel_url
         return (
             active: active && !activeURL.isEmpty,
-            url: !activeURL.isEmpty ? activeURL : storedURL,
+            url: activeURL,
             storedURL: storedURL,
             cloudflaredFound: TunnelManager.shared.findCloudflared() != nil
         )

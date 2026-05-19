@@ -21,7 +21,7 @@ final class RekordboxParser: NSObject {
     private func _parse() -> LibraryData {
         let dbPath = AppConfig.shared.dbPath
         if !dbPath.isEmpty, FileManager.default.fileExists(atPath: dbPath) {
-            let mtime = fileMtime(at: dbPath)
+            let mtime = dbMtime(at: dbPath)
             let cacheKey = "db:\(dbPath)"
             if let cached = cachedData, mtime == cachedMtime, cacheKey == cachedSourceKey {
                 return cached
@@ -121,6 +121,7 @@ final class RekordboxParser: NSObject {
                     location:         normalizePath(rawLoc),
                     timestamp:        ts,
                     date_str:         rawDate.count >= 10 ? String(rawDate.prefix(10)) : "0000-00-00",
+                    image_path:       nil,
                     playlists:        [],
                     playlist_indices: [:]
                 ))
@@ -203,6 +204,18 @@ final class RekordboxParser: NSObject {
         } catch {
             return 0
         }
+    }
+
+    // Rekordbox 6 master.db is SQLite in WAL mode: new edits land in master.db-wal
+    // first and the main master.db mtime stays frozen until a checkpoint. Key the
+    // cache on the newest of db / -wal / -shm so WAL writes invalidate the cache.
+    private func dbMtime(at dbPath: String) -> Double {
+        var latest = 0.0
+        for suffix in ["", "-wal", "-shm"] {
+            let m = fileMtime(at: dbPath + suffix)
+            if m > latest { latest = m }
+        }
+        return latest
     }
 
     private func parseMasterDB(dbPath: String, mtime: Double) -> LibraryData? {
@@ -348,7 +361,8 @@ cur.execute(
         COALESCE(c.DJPlayCount, 0),
         COALESCE(c.FolderPath, ''),
         COALESCE(c.DateCreated, ''),
-        COALESCE(c.created_at, '')
+        COALESCE(c.created_at, ''),
+        COALESCE(c.ImagePath, '')
     FROM djmdContent c
     LEFT JOIN djmdArtist a ON c.ArtistID = a.ID
     LEFT JOIN djmdGenre g  ON c.GenreID = g.ID
@@ -378,6 +392,7 @@ for row in cur.fetchall():
         "location": str(row[10] or ""),
         "timestamp": timestamp,
         "date_str": date_str,
+        "image_path": str(row[13] or ""),
         "playlists": [],
         "playlist_indices": {},
     }

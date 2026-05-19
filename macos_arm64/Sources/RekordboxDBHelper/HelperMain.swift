@@ -17,6 +17,7 @@ struct HelperTrack: Codable {
     let location: String
     let timestamp: Double
     let date_str: String
+    let image_path: String
     var playlists: [String]
     var playlist_indices: [String: Int]
 }
@@ -131,24 +132,46 @@ func columnDouble(_ stmt: OpaquePointer, _ index: Int32) -> Double {
     sqlite3_column_double(stmt, index)
 }
 
-func asTimestamp(_ createdAt: String, _ fallbackDate: String) -> Double {
-    let iso = ISO8601DateFormatter()
-    if !createdAt.isEmpty, let d = iso.date(from: createdAt) {
-        return d.timeIntervalSince1970
-    }
+// Rekordbox 6 djmdContent.created_at is "2026-05-15 10:23:45.123 +00:00"
+// (space separator, fractional seconds, optional offset) — ISO8601DateFormatter
+// rejects it, unlike Python's lenient datetime.fromisoformat used by the old
+// prototype. Without tolerant parsing, freshly added tracks get timestamp 0 and
+// sink below the client's date-sorted visible window.
+private let rekordboxDateFormats = [
+    "yyyy-MM-dd HH:mm:ss.SSSSSS xxxxx",
+    "yyyy-MM-dd HH:mm:ss.SSS xxxxx",
+    "yyyy-MM-dd HH:mm:ss xxxxx",
+    "yyyy-MM-dd HH:mm:ss.SSSSSS",
+    "yyyy-MM-dd HH:mm:ss.SSS",
+    "yyyy-MM-dd HH:mm:ss",
+    "yyyy-MM-dd'T'HH:mm:ss.SSSSSS",
+    "yyyy-MM-dd'T'HH:mm:ss",
+    "yyyy-MM-dd",
+]
 
-    if !fallbackDate.isEmpty {
-        if let d = iso.date(from: fallbackDate) {
-            return d.timeIntervalSince1970
-        }
-        let prefix = String(fallbackDate.prefix(10))
-        let fmt = DateFormatter()
-        fmt.dateFormat = "yyyy-MM-dd"
-        fmt.locale = Locale(identifier: "en_US_POSIX")
-        if let d = fmt.date(from: prefix) {
-            return d.timeIntervalSince1970
-        }
+private func parseRekordboxDate(_ raw: String) -> Double? {
+    let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !s.isEmpty else { return nil }
+
+    let isoFrac = ISO8601DateFormatter()
+    isoFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let d = isoFrac.date(from: s) { return d.timeIntervalSince1970 }
+    let iso = ISO8601DateFormatter()
+    if let d = iso.date(from: s) { return d.timeIntervalSince1970 }
+
+    let fmt = DateFormatter()
+    fmt.locale = Locale(identifier: "en_US_POSIX")
+    fmt.timeZone = TimeZone(identifier: "UTC")
+    for pattern in rekordboxDateFormats {
+        fmt.dateFormat = pattern
+        if let d = fmt.date(from: s) { return d.timeIntervalSince1970 }
     }
+    return nil
+}
+
+func asTimestamp(_ createdAt: String, _ fallbackDate: String) -> Double {
+    if let ts = parseRekordboxDate(createdAt) { return ts }
+    if let ts = parseRekordboxDate(fallbackDate) { return ts }
     return 0
 }
 
@@ -185,7 +208,8 @@ func parseMasterDB(dbPath: String, mtime: Double) throws -> HelperLibraryData {
         COALESCE(c.DJPlayCount, 0),
         COALESCE(c.FolderPath, ''),
         COALESCE(c.DateCreated, ''),
-        COALESCE(c.created_at, '')
+        COALESCE(c.created_at, ''),
+        COALESCE(c.ImagePath, '')
     FROM djmdContent c
     LEFT JOIN djmdArtist a ON c.ArtistID = a.ID
     LEFT JOIN djmdGenre g  ON c.GenreID = g.ID
@@ -230,6 +254,7 @@ func parseMasterDB(dbPath: String, mtime: Double) throws -> HelperLibraryData {
                 location: columnText(tracksStmt, 10),
                 timestamp: timestamp,
                 date_str: dateString,
+                image_path: columnText(tracksStmt, 13),
                 playlists: [],
                 playlist_indices: [:]
             )

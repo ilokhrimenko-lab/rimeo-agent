@@ -14,6 +14,7 @@ struct Track: Codable, Identifiable, Equatable {
     let location:         String
     let timestamp:        Double
     let date_str:         String
+    var image_path:       String?
     var playlists:        [String]
     var playlist_indices: [String: Int]
 

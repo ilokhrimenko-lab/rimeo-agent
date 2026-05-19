@@ -16,6 +16,19 @@ _xml_cache_mtime: float = 0.0
 _db_cache: Dict[str, Any] = {}
 _db_cache_mtime: float = 0.0
 
+def _db_mtime(db_path: str) -> float:
+    # Rekordbox 6 uses SQLite WAL: new edits land in master.db-wal first and the
+    # main master.db mtime stays frozen until a checkpoint. Key the cache on the
+    # newest of db / -wal / -shm so WAL writes invalidate the in-memory cache.
+    latest = 0.0
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            latest = max(latest, os.path.getmtime(db_path + suffix))
+        except OSError:
+            pass
+    return latest
+
+
 def normalize_path(loc: str) -> str:
     path = urllib.parse.unquote(loc)
     if path.startswith("file://localhost/"):
@@ -137,10 +150,7 @@ def parse_master_db() -> Dict[str, Any]:
         logger.warning(f"master.db not found at {db_path}")
         return {"tracks": [], "playlists": [], "xml_date": 0, "source": "db"}
 
-    try:
-        mtime = os.path.getmtime(db_path)
-    except OSError:
-        mtime = 0.0
+    mtime = _db_mtime(db_path)
 
     if _db_cache and mtime == _db_cache_mtime:
         return _db_cache

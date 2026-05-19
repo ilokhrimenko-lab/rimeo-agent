@@ -60,10 +60,8 @@ final class CloudRelay {
 
             let tunnel = TunnelManager.shared.activeURL
             var pollURL = "\(cloudURL)/api/relay/poll/\(AppConfig.shared.agentID)?token=\(cloudToken)"
-            if !tunnel.isEmpty,
-               let encodedTunnel = tunnel.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) {
-                pollURL += "&tunnel=\(encodedTunnel)"
-            }
+            let encodedTunnel = tunnel.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+            pollURL += "&tunnel=\(encodedTunnel)"
             logTunnelAdvertisementIfChanged(tunnel)
 
             guard let url = URL(string: pollURL) else {
@@ -71,7 +69,7 @@ final class CloudRelay {
                 continue
             }
 
-            logger.info("Cloud relay connecting: \(cloudURL)")
+            logger.debug("Cloud relay poll: \(cloudURL)")
 
             var req = URLRequest(url: url)
             req.timeoutInterval = 30
@@ -91,6 +89,13 @@ final class CloudRelay {
             sema.wait()
 
             if let requestError {
+                // Benign: the long-poll was held open with no command to deliver
+                // and timed out. Re-poll immediately — backing off here makes the
+                // agent deaf to new requests for up to 30s during quiet periods.
+                if (requestError as? URLError)?.code == .timedOut {
+                    backoff = 1
+                    continue
+                }
                 logger.warning("Cloud relay error: \(requestError.localizedDescription), retry in \(Int(backoff))s")
                 Thread.sleep(forTimeInterval: backoff)
                 backoff = min(backoff * 2, 30)
