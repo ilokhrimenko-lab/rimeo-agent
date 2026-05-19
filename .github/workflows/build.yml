@@ -66,10 +66,49 @@ jobs:
           cp "$ICON_ICNS" "$APP/Contents/Resources/RimeoAgent.icns"
           cp "$GITHUB_WORKSPACE/build_info.py" "$APP/Contents/Resources/build_info.py"
 
+      - name: Sign macOS app
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -e
+          if [ -z "$MACOS_CERT_P12" ]; then
+            echo "::error::MACOS_CERT_P12 secret not set — refusing to ship an adhoc-signed build (FDA would reset on every update)"
+            exit 1
+          fi
+          ID="Rimeo Self-Signed"
+          APP="$GITHUB_WORKSPACE/dist/RimeoAgent.app"
+          CERT_P12="$RUNNER_TEMP/cert.p12"
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$CERT_P12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$CERT_P12" -k "$KEYCHAIN" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed s/\"//g)
+          FW="$APP/Contents/Frameworks/SQLCipher.framework"
+          if [ -d "$FW" ] && [ ! -L "$FW/SQLCipher" ]; then
+            ( cd "$FW"
+              rm -rf Headers Modules Resources SQLCipher Versions/Current
+              ln -s A Versions/Current
+              [ -e Versions/Current/Headers ]   && ln -s Versions/Current/Headers Headers   || true
+              [ -e Versions/Current/Modules ]   && ln -s Versions/Current/Modules Modules   || true
+              [ -e Versions/Current/Resources ] && ln -s Versions/Current/Resources Resources || true
+              ln -s Versions/Current/SQLCipher SQLCipher )
+          fi
+          [ -d "$FW" ] && codesign --force --sign "$ID" "$FW/Versions/A"
+          codesign --force --sign "$ID" "$APP/Contents/MacOS/rbdb-helper"
+          codesign --force --sign "$ID" "$APP/Contents/MacOS/RimeoAgent"
+          codesign --force --sign "$ID" --identifier app.rimeo.agent "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign -dvv "$APP" 2>&1 | grep -E "Identifier|Authority|Sealed"
+
       - name: Package
         run: |
           cd dist
-          zip -r RimeoAgent_mac.zip RimeoAgent.app --quiet
+          ditto -c -k --sequesterRsrc --keepParent RimeoAgent.app RimeoAgent_mac.zip
 
       - uses: actions/upload-artifact@v4
         with:
