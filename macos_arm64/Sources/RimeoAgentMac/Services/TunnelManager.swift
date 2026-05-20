@@ -199,6 +199,34 @@ final class TunnelManager {
         CloudRelay.shared.pushTunnelUpdate(candidateURL)
     }
 
+    private struct NamedTunnelConfig {
+        let uuid: String
+        let hostname: String
+        let configPath: String
+    }
+
+    private func parseNamedTunnelConfig() -> NamedTunnelConfig? {
+        let path = "\(NSHomeDirectory())/.cloudflared/config.yml"
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+        var uuid: String?
+        var hostname: String?
+        for raw in text.components(separatedBy: .newlines) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty || line.hasPrefix("#") { continue }
+            if uuid == nil, line.hasPrefix("tunnel:") {
+                let value = line.dropFirst("tunnel:".count).trimmingCharacters(in: .whitespaces)
+                if !value.isEmpty { uuid = value }
+            }
+            if hostname == nil, let range = line.range(of: "hostname:") {
+                let value = line[range.upperBound...].trimmingCharacters(in: .whitespaces)
+                if !value.isEmpty { hostname = value }
+            }
+            if uuid != nil && hostname != nil { break }
+        }
+        guard let uuid, let hostname else { return nil }
+        return NamedTunnelConfig(uuid: uuid, hostname: hostname, configPath: path)
+    }
+
     private func runTunnel() {
         defer {
             lock.lock(); _loopRunning = false; lock.unlock()
@@ -213,15 +241,28 @@ final class TunnelManager {
                 return
             }
 
+            let namedConfig = parseNamedTunnelConfig()
             let p = Process()
             p.executableURL = URL(fileURLWithPath: cmd)
-            p.arguments = [
-                "tunnel", "--url",
-                "http://127.0.0.1:\(AppConfig.shared.port)",
-                "--metrics", "127.0.0.1:0",
-                "--no-autoupdate",
-                "--protocol", "http2"
-            ]
+            if let named = namedConfig {
+                p.arguments = [
+                    "tunnel",
+                    "--config", named.configPath,
+                    "--metrics", "127.0.0.1:0",
+                    "--no-autoupdate",
+                    "--protocol", "http2",
+                    "run", named.uuid
+                ]
+                logger.info("Tunnel mode: named (uuid=\(named.uuid), hostname=\(named.hostname))")
+            } else {
+                p.arguments = [
+                    "tunnel", "--url",
+                    "http://127.0.0.1:\(AppConfig.shared.port)",
+                    "--metrics", "127.0.0.1:0",
+                    "--no-autoupdate",
+                    "--protocol", "http2"
+                ]
+            }
 
             let pipe = Pipe()
             p.standardOutput = pipe
@@ -246,6 +287,19 @@ final class TunnelManager {
             let fh = pipe.fileHandleForReading
             var sawTunnelURL = false
             var sawRateLimit = false
+
+            if let named = namedConfig {
+                let candidate = "https://\(named.hostname)"
+                sawTunnelURL = true
+                consecutiveFailures = 0
+                lock.lock()
+                pendingTunnelURL = candidate
+                lock.unlock()
+                logger.info("Named tunnel URL pending readiness probe: \(candidate)")
+                DispatchQueue.global(qos: .utility).async { [weak self] in
+                    self?.probeReadinessAndPromote(candidateURL: candidate)
+                }
+            }
             while p.isRunning {
                 let data = fh.availableData
                 guard !data.isEmpty, let line = String(data: data, encoding: .utf8) else {
