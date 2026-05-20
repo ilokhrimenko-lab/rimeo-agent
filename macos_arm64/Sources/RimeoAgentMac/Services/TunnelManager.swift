@@ -21,6 +21,14 @@ final class TunnelManager {
     // Stuck-loop detection: kill process if tunnel was established but hasn't reconnected in this interval
     private let stuckDetectionInterval: TimeInterval = 10 * 60
 
+    // Readiness probe: cloudflared prints the URL ~30-50s before the tunnel
+    // actually proxies. Stage the URL here while probing /api/status through
+    // it; only promote to tunnelURL (and publish to cloud) after a 2xx response.
+    private var pendingTunnelURL: String = ""
+    private let readinessMaxAttempts: Int = 30
+    private let readinessInterval: TimeInterval = 2.0
+    private let readinessProbeTimeout: TimeInterval = 5.0
+
     var activeURL: String { lock.lock(); defer { lock.unlock() }; return tunnelURL }
     var isRunning: Bool   { lock.lock(); defer { lock.unlock() }; return proc?.isRunning == true }
 
@@ -37,19 +45,21 @@ final class TunnelManager {
     func start() {
         lock.lock()
         if _loopRunning { lock.unlock(); return }
-        _shouldRun   = true
-        _loopRunning = true
-        tunnelURL    = ""
+        _shouldRun       = true
+        _loopRunning     = true
+        tunnelURL        = ""
+        pendingTunnelURL = ""
         lock.unlock()
         DispatchQueue.global(qos: .utility).async { self.runTunnel() }
     }
 
     func stop() {
         lock.lock()
-        _shouldRun = false
+        _shouldRun       = false
         proc?.terminate()
-        proc      = nil
-        tunnelURL = ""
+        proc             = nil
+        tunnelURL        = ""
+        pendingTunnelURL = ""
         lock.unlock()
         DataStore.shared.update { $0.tunnel_url = "" }
         AppState.shared.refreshFromData()
@@ -134,6 +144,61 @@ final class TunnelManager {
         }.resume()
     }
 
+    private func probeReadinessAndPromote(candidateURL: String) {
+        for attempt in 1...readinessMaxAttempts {
+            lock.lock()
+            let stillPending = (pendingTunnelURL == candidateURL && tunnelURL.isEmpty && _shouldRun)
+            lock.unlock()
+            guard stillPending else {
+                logger.debug("Tunnel readiness probe abandoned: candidate=\(candidateURL) no longer pending")
+                return
+            }
+            if probeReadinessOnce(candidateURL) {
+                logger.info("Tunnel ready after \(attempt) probe(s): \(candidateURL)")
+                promote(candidateURL: candidateURL)
+                return
+            }
+            Thread.sleep(forTimeInterval: readinessInterval)
+        }
+        logger.warning("Tunnel readiness probe exhausted \(readinessMaxAttempts) attempts; promoting anyway: \(candidateURL)")
+        promote(candidateURL: candidateURL)
+    }
+
+    private func probeReadinessOnce(_ url: String) -> Bool {
+        guard let probeURL = URL(string: "\(url)/api/status") else { return false }
+        var req = URLRequest(url: probeURL)
+        req.httpMethod = "HEAD"
+        req.timeoutInterval = readinessProbeTimeout
+        let sema = DispatchSemaphore(value: 0)
+        var alive = false
+        URLSession.shared.dataTask(with: req) { _, resp, error in
+            if error == nil, let http = resp as? HTTPURLResponse, http.statusCode < 400 {
+                alive = true
+            }
+            sema.signal()
+        }.resume()
+        sema.wait()
+        return alive
+    }
+
+    private func promote(candidateURL: String) {
+        lock.lock()
+        guard pendingTunnelURL == candidateURL && tunnelURL.isEmpty else { lock.unlock(); return }
+        tunnelURL = candidateURL
+        lastTunnelEstablished = Date()
+        lastKeepaliveSent = nil
+        pendingTunnelURL = ""
+        lock.unlock()
+        logger.info("Tunnel active: \(candidateURL)")
+        DataStore.shared.update { $0.tunnel_url = candidateURL }
+        DispatchQueue.main.async {
+            AppState.shared.tunnelURL = candidateURL
+            AppState.shared.tunnelActive = true
+        }
+        CloudRelay.shared.noteTunnelChanged(candidateURL)
+        CloudRelay.shared.pushTunnelUpdate(candidateURL)
+    }
+
     private func runTunnel() {
         defer {
             lock.lock(); _loopRunning = false; lock.unlock()
@@ -191,7 +256,7 @@ final class TunnelManager {
                 if isRateLimitOutput(line) {
                     sawRateLimit = true
                 }
-                if let regex = urlRegex, tunnelURL.isEmpty {
+                if let regex = urlRegex, tunnelURL.isEmpty, pendingTunnelURL.isEmpty {
                     let range = NSRange(line.startIndex ..< line.endIndex, in: line)
                     if let match = regex.firstMatch(in: line, range: range),
                        let swiftRange = Range(match.range, in: line) {
@@ -199,21 +264,19 @@ final class TunnelManager {
                         sawTunnelURL = true
                         consecutiveFailures = 0
                         lock.lock()
-                        tunnelURL = url
-                        lastTunnelEstablished = Date()
-                        lastKeepaliveSent = nil
+                        pendingTunnelURL = url
                         lock.unlock()
-                        logger.info("Tunnel active: \(url)")
-                        DataStore.shared.update { $0.tunnel_url = url }
-                        DispatchQueue.main.async { AppState.shared.tunnelURL = url; AppState.shared.tunnelActive = true }
-                        CloudRelay.shared.noteTunnelChanged(url)
-                        CloudRelay.shared.pushTunnelUpdate(url)
+                        logger.info("Tunnel URL pending readiness probe: \(url)")
+                        DispatchQueue.global(qos: .utility).async { [weak self] in
+                            self?.probeReadinessAndPromote(candidateURL: url)
+                        }
                     }
                 }
             }
 
             lock.lock()
             tunnelURL = ""
+            pendingTunnelURL = ""
             proc = nil
             lastKeepaliveSent = nil
             // Keep lastTunnelEstablished so the stuck-loop watchdog knows when the connection dropped
