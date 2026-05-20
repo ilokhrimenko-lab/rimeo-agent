@@ -12,10 +12,6 @@ final class APIRouter {
         let path = req.path
 
         switch (req.method, path) {
-        // Health
-        case ("GET", "/healthz"):        return healthz(req)
-        case ("HEAD", "/healthz"):       return HTTPResponse(status: 200, headers: ["Content-Type": "application/json"], body: .empty)
-
         // Audio
         case ("GET", "/stream"):         return streamAudio(req)
         case ("GET", "/waveform"):       return getWaveform(req)
@@ -64,16 +60,6 @@ final class APIRouter {
         default:
             return HTTPResponse.error("Not found", status: 404)
         }
-    }
-
-    // MARK: - /healthz
-
-    private func healthz(_ req: HTTPRequest) -> HTTPResponse {
-        return .json([
-            "status": "ok",
-            "agent_id": AppConfig.shared.agentID,
-            "version": AppConfig.shared.displayVersion,
-        ])
     }
 
     // MARK: - /stream
@@ -352,8 +338,10 @@ final class APIRouter {
 
         let localIP  = AppConfig.shared.getLocalIP()
         let localURL = "http://\(localIP):\(AppConfig.shared.port)"
-        let activeTunnel = TunnelManager.shared.activeURL
-        let url      = activeTunnel.isEmpty ? localURL : activeTunnel
+        let d        = DataStore.shared.data
+        let url      = TunnelManager.shared.activeURL.isEmpty
+                        ? (d.tunnel_url.isEmpty ? localURL : d.tunnel_url)
+                        : TunnelManager.shared.activeURL
         let qrData   = #"{"url":"\#(url)","code":"\#(code)","agent_id":"\#(AppConfig.shared.agentID)"}"#
         let encoded  = qrData.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? qrData
         let qrURL    = "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=\(encoded)"
@@ -693,7 +681,8 @@ final class APIRouter {
 
         let cfg      = AppConfig.shared
         let localURL = cfg.localAgentURL()
-        let tunnel   = TunnelManager.shared.activeURL
+        let d        = DataStore.shared.data
+        let tunnel   = TunnelManager.shared.activeURL.isEmpty ? d.tunnel_url : TunnelManager.shared.activeURL
 
         let payload: [String: Any] = [
             "token":      rawToken,
@@ -858,7 +847,7 @@ final class APIRouter {
         let storedURL = DataStore.shared.data.tunnel_url
         return (
             active: active && !activeURL.isEmpty,
-            url: activeURL,
+            url: !activeURL.isEmpty ? activeURL : storedURL,
             storedURL: storedURL,
             cloudflaredFound: TunnelManager.shared.findCloudflared() != nil
         )
