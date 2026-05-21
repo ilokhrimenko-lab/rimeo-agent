@@ -232,7 +232,6 @@ final class APIRouter {
         }
         let resolvedPath = resolveTrackPath(path)
         TCCDiagnostics.logPathAccess("waveform", path: resolvedPath)
-        warmAiffConversionIfNeeded(path: resolvedPath, trackID: id)
         let preload = req.queryParams["preload"] == "1" || req.queryParams["preload"] == "true"
         if preload {
             DispatchQueue.global(qos: .utility).async {
@@ -253,7 +252,6 @@ final class APIRouter {
         }
         let resolvedPath = resolveTrackPath(path)
         TCCDiagnostics.logPathAccess("artwork", path: resolvedPath)
-        warmAiffConversionIfNeeded(path: resolvedPath, trackID: id)
         let preload = req.queryParams["preload"] == "1" || req.queryParams["preload"] == "true"
         if preload {
             DispatchQueue.global(qos: .utility).async {
@@ -355,15 +353,6 @@ final class APIRouter {
         }
 
         return rawPath
-    }
-
-    private func warmAiffConversionIfNeeded(path: String, trackID: String) {
-        let ext = (path as NSString).pathExtension.lowercased()
-        guard ext == "aif" || ext == "aiff" else { return }
-
-        DispatchQueue.global(qos: .utility).async {
-            _ = try? AudioService.shared.ensureWAV(path: path, trackID: trackID)
-        }
     }
 
     // MARK: - /api/data
