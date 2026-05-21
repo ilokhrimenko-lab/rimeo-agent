@@ -9,7 +9,7 @@ final class AudioService {
     // Bounds concurrent ffmpeg processes: an iOS list prefetch can fire dozens of
     // artwork/waveform/stream requests at once, each converting a 60 MB+ AIFF.
     // Without this cap the burst exhausts CPU/IO and crashes the agent.
-    private let convSemaphore = DispatchSemaphore(value: 2)
+    private let convSemaphore = DispatchSemaphore(value: 3)
 
     private func convLock(for id: String) -> NSLock {
         lockGuard.lock(); defer { lockGuard.unlock() }
@@ -251,8 +251,8 @@ func runFFmpeg(_ args: [String], binary: String = "ffmpeg", timeout: TimeInterva
     if finished.wait(timeout: .now() + timeout) == .timedOut {
         proc.terminate()
         _ = finished.wait(timeout: .now() + 5)
-        outPipe.fileHandleForReading.closeFile()
-        errPipe.fileHandleForReading.closeFile()
+        try? outPipe.fileHandleForReading.close()
+        try? errPipe.fileHandleForReading.close()
         _ = outGroup.wait(timeout: .now() + 5)
         return RunResult(success: false, stdout: "", stderr: "\(binary) timed out", rawOutput: [])
     }
@@ -298,10 +298,18 @@ func runFFmpegWithStdin(_ args: [String], inputPath: String, binary: String = "f
     _ = fcntl(writeFD, F_SETNOSIGPIPE, &noSig)
 
     let pumpQueue = DispatchQueue(label: "rimeo.\(binary).stdin-pump", qos: .utility)
+    let stdinWriteFH = stdinPipe.fileHandleForWriting
     pumpQueue.async {
         defer {
-            inputFH.closeFile()
-            close(writeFD)
+            // Use FileHandle.close() (Swift, throwing) instead of Darwin.close(rawFD).
+            // The raw close() leaves FileHandle thinking it still owns the FD, so when
+            // the Pipe later deallocs, NSConcreteFileHandle.dealloc calls close() a
+            // second time — on macOS 26 the FD has been reused+guarded by then, and
+            // the kernel kills the process with EXC_GUARD/GUARD_TYPE_FD (silent crash,
+            // no chance to log). FileHandle.close() marks the handle closed so dealloc
+            // is a no-op. Same applies to inputFH below.
+            try? inputFH.close()
+            try? stdinWriteFH.close()
         }
         let chunkSize = 65536
         while true {
@@ -353,8 +361,8 @@ func runFFmpegWithStdin(_ args: [String], inputPath: String, binary: String = "f
     if finished.wait(timeout: .now() + timeout) == .timedOut {
         proc.terminate()
         _ = finished.wait(timeout: .now() + 5)
-        outPipe.fileHandleForReading.closeFile()
-        errPipe.fileHandleForReading.closeFile()
+        try? outPipe.fileHandleForReading.close()
+        try? errPipe.fileHandleForReading.close()
         _ = outGroup.wait(timeout: .now() + 5)
         return RunResult(success: false, stdout: "", stderr: "\(binary) timed out", rawOutput: [])
     }

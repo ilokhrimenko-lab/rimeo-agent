@@ -111,8 +111,9 @@ final class APIRouter {
         let preload = req.queryParams["preload"] == "1" || req.queryParams["preload"] == "true"
         let ext     = (resolvedPath as NSString).pathExtension.lowercased()
         let rangeHeader = req.headers["range"] ?? "(none)"
+        let src = req.queryParams["src"] ?? "unknown"
 
-        logger.info("Stream request: track=\(trackID), preload=\(preload), range=\(rangeHeader), raw_path=\(filePath), resolved_path=\(resolvedPath)")
+        logger.info("Stream request: src=\(src), track=\(trackID), preload=\(preload), range=\(rangeHeader), raw_path=\(filePath), resolved_path=\(resolvedPath)")
         if filePath != resolvedPath {
             logger.info("Stream path resolved: raw=\(filePath), resolved=\(resolvedPath)")
         }
@@ -130,7 +131,11 @@ final class APIRouter {
         }
 
         var finalPath = resolvedPath
-        if ext == "aif" || ext == "aiff" {
+        // AIFF needs WAV conversion only for the web player (wavesurfer.js can't decode AIFF).
+        // iOS AVPlayer plays AIFF natively, so skip the ffmpeg step entirely for src=ios —
+        // saves ~1-3s per track and removes ffmpeg/Pipe pressure on the agent.
+        let needsAIFFConversion = (ext == "aif" || ext == "aiff") && src != "ios"
+        if needsAIFFConversion {
             if preload {
                 DispatchQueue.global(qos: .utility).async {
                     _ = try? AudioService.shared.ensureWAV(path: resolvedPath, trackID: trackID)
@@ -139,7 +144,7 @@ final class APIRouter {
                                   status: 200, range: rangeHeader, preload: true, note: "preloading_aiff")
                 return .json(["status": "preloading"])
             }
-            logger.info("Stream request: converting AIFF if needed, track=\(trackID), path=\(resolvedPath)")
+            logger.info("Stream request: converting AIFF for web, track=\(trackID), path=\(resolvedPath)")
             do {
                 finalPath = try AudioService.shared.ensureWAV(path: resolvedPath, trackID: trackID)
                 logger.info("Stream request: AIFF ready, track=\(trackID), wav=\(finalPath)")
@@ -953,13 +958,14 @@ final class APIRouter {
     private func mimeType(for path: String) -> String {
         let ext = (path as NSString).pathExtension.lowercased()
         switch ext {
-        case "mp3":  return "audio/mpeg"
-        case "wav":  return "audio/wav"
-        case "m4a":  return "audio/mp4"
-        case "aac":  return "audio/aac"
-        case "ogg":  return "audio/ogg"
-        case "flac": return "audio/flac"
-        default:     return "audio/mpeg"
+        case "mp3":         return "audio/mpeg"
+        case "wav":         return "audio/wav"
+        case "m4a":         return "audio/mp4"
+        case "aac":         return "audio/aac"
+        case "ogg":         return "audio/ogg"
+        case "flac":        return "audio/flac"
+        case "aif", "aiff": return "audio/x-aiff"
+        default:            return "audio/mpeg"
         }
     }
 }
