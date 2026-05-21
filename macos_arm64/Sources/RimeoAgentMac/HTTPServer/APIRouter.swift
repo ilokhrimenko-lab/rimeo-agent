@@ -4,6 +4,41 @@ import Darwin
 // Routes all HTTP requests to the appropriate handler
 // Mirrors api_server.py endpoint-for-endpoint
 
+enum StreamDiag {
+    struct Entry: Codable {
+        let ts: String
+        let track_id: String
+        let path: String
+        let resolved_path: String
+        let status: Int
+        let range: String
+        let preload: Bool
+        let bytes: Int
+        let note: String
+    }
+    private static let lock = NSLock()
+    private static var buffer: [Entry] = []
+    private static let capacity = 20
+
+    static func record(trackID: String, path: String, resolvedPath: String, status: Int,
+                       range: String, preload: Bool, bytes: Int = 0, note: String = "") {
+        let entry = Entry(
+            ts: ISO8601DateFormatter().string(from: Date()),
+            track_id: trackID, path: path, resolved_path: resolvedPath,
+            status: status, range: range, preload: preload, bytes: bytes, note: note
+        )
+        lock.lock()
+        buffer.append(entry)
+        if buffer.count > capacity { buffer.removeFirst(buffer.count - capacity) }
+        lock.unlock()
+    }
+
+    static func snapshot() -> [Entry] {
+        lock.lock(); defer { lock.unlock() }
+        return buffer
+    }
+}
+
 final class APIRouter {
     static let shared = APIRouter()
     private init() {}
@@ -57,6 +92,9 @@ final class APIRouter {
         // Bug report
         case ("POST", "/api/report_bug"):    return reportBug(req)
 
+        // Diagnostics
+        case ("GET", "/api/admin/diag"):     return adminDiag(req)
+
         default:
             return HTTPResponse.error("Not found", status: 404)
         }
@@ -86,6 +124,8 @@ final class APIRouter {
 
         guard exists else {
             logger.warning("Stream request failed: file not found, track=\(trackID), path=\(resolvedPath)")
+            StreamDiag.record(trackID: trackID, path: filePath, resolvedPath: resolvedPath,
+                              status: 404, range: rangeHeader, preload: preload, note: "file_not_found")
             return .error("File not found", status: 404)
         }
 
@@ -95,6 +135,8 @@ final class APIRouter {
                 DispatchQueue.global(qos: .utility).async {
                     _ = try? AudioService.shared.ensureWAV(path: resolvedPath, trackID: trackID)
                 }
+                StreamDiag.record(trackID: trackID, path: filePath, resolvedPath: resolvedPath,
+                                  status: 200, range: rangeHeader, preload: true, note: "preloading_aiff")
                 return .json(["status": "preloading"])
             }
             logger.info("Stream request: converting AIFF if needed, track=\(trackID), path=\(resolvedPath)")
@@ -103,9 +145,13 @@ final class APIRouter {
                 logger.info("Stream request: AIFF ready, track=\(trackID), wav=\(finalPath)")
             } catch {
                 logger.warning("Stream request failed during AIFF conversion: track=\(trackID), error=\(error)")
+                StreamDiag.record(trackID: trackID, path: filePath, resolvedPath: resolvedPath,
+                                  status: 503, range: rangeHeader, preload: preload, note: "aiff_conversion_failed")
                 return .error("Audio conversion failed — retry in a moment", status: 503)
             }
         } else if preload {
+            StreamDiag.record(trackID: trackID, path: filePath, resolvedPath: resolvedPath,
+                              status: 200, range: rangeHeader, preload: true, note: "preloading")
             return .json(["status": "preloading"])
         }
 
@@ -113,6 +159,8 @@ final class APIRouter {
         let size    = (try? FileManager.default.attributesOfItem(atPath: finalPath))?[.size] as? Int ?? 0
         guard size > 0 else {
             logger.warning("Stream request failed: file empty, track=\(trackID), final_path=\(finalPath)")
+            StreamDiag.record(trackID: trackID, path: filePath, resolvedPath: resolvedPath,
+                              status: 404, range: rangeHeader, preload: preload, note: "file_empty")
             return .error("File empty", status: 404)
         }
 
@@ -130,6 +178,8 @@ final class APIRouter {
 
         guard start <= end, start < size else {
             logger.warning("Stream request failed: invalid range=\(rangeHeader), track=\(trackID), size=\(size)")
+            StreamDiag.record(trackID: trackID, path: filePath, resolvedPath: resolvedPath,
+                              status: 416, range: rangeHeader, preload: preload, note: "invalid_range")
             return HTTPResponse(
                 status:  416,
                 headers: ["Content-Range": "bytes */\(size)"],
@@ -141,6 +191,8 @@ final class APIRouter {
         let length    = end - start + 1
         let server    = HTTPServer(port: 0)   // reuse writeAll helper
         logger.info("Stream response: track=\(trackID), status=206, mime=\(mime), bytes=\(start)-\(end)/\(size), length=\(length), final_path=\(finalPath)")
+        StreamDiag.record(trackID: trackID, path: filePath, resolvedPath: resolvedPath,
+                          status: 206, range: rangeHeader, preload: preload, bytes: length, note: "ok")
 
         return HTTPResponse(
             status: 206,
@@ -839,6 +891,51 @@ final class APIRouter {
         let url = (json["url"] as? String ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return (url, t)
+    }
+
+    // MARK: - /api/admin/diag
+
+    private func adminDiag(_ req: HTTPRequest) -> HTTPResponse {
+        let snap = TunnelManager.shared.diagSnapshot()
+        let cfg  = AppConfig.shared
+        let data = DataStore.shared.data
+        let iso  = ISO8601DateFormatter()
+
+        var streamEntries: [[String: Any]] = []
+        for e in StreamDiag.snapshot() {
+            streamEntries.append([
+                "ts": e.ts,
+                "track_id": e.track_id,
+                "path": e.path,
+                "resolved_path": e.resolved_path,
+                "status": e.status,
+                "range": e.range,
+                "preload": e.preload,
+                "bytes": e.bytes,
+                "note": e.note,
+            ])
+        }
+
+        return .json([
+            "agent_id":   cfg.agentID,
+            "version":    cfg.displayVersion,
+            "port":       Int(cfg.port),
+            "stored_tunnel_url": data.tunnel_url,
+            "tunnel": [
+                "mode":             snap.mode,
+                "named_uuid":       snap.namedUUID,
+                "named_hostname":   snap.namedHostname,
+                "active_url":       snap.activeURL,
+                "pending_url":      snap.pendingURL,
+                "last_established": snap.lastEstablished.map { iso.string(from: $0) } as Any,
+                "last_keepalive":   snap.lastKeepalive.map { iso.string(from: $0) } as Any,
+                "cloudflared_found": snap.cloudflaredFound,
+                "process_running":   snap.processRunning,
+                "should_run":        snap.shouldRun,
+            ],
+            "stream_recent": streamEntries,
+            "now": iso.string(from: Date()),
+        ])
     }
 
     private func currentTunnelInfo() -> (active: Bool, url: String, storedURL: String, cloudflaredFound: Bool) {

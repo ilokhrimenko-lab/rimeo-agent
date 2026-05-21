@@ -29,8 +29,42 @@ final class TunnelManager {
     private let readinessInterval: TimeInterval = 2.0
     private let readinessProbeTimeout: TimeInterval = 5.0
 
+    // Diagnostics
+    private var currentMode: String = "unknown"        // "named" | "quick" | "unknown"
+    private var currentNamedUUID: String = ""
+    private var currentNamedHostname: String = ""
+
     var activeURL: String { lock.lock(); defer { lock.unlock() }; return tunnelURL }
     var isRunning: Bool   { lock.lock(); defer { lock.unlock() }; return proc?.isRunning == true }
+
+    struct DiagSnapshot {
+        let mode: String
+        let namedUUID: String
+        let namedHostname: String
+        let activeURL: String
+        let pendingURL: String
+        let lastEstablished: Date?
+        let lastKeepalive: Date?
+        let cloudflaredFound: Bool
+        let processRunning: Bool
+        let shouldRun: Bool
+    }
+
+    func diagSnapshot() -> DiagSnapshot {
+        lock.lock(); defer { lock.unlock() }
+        return DiagSnapshot(
+            mode: currentMode,
+            namedUUID: currentNamedUUID,
+            namedHostname: currentNamedHostname,
+            activeURL: tunnelURL,
+            pendingURL: pendingTunnelURL,
+            lastEstablished: lastTunnelEstablished,
+            lastKeepalive: lastKeepaliveSent,
+            cloudflaredFound: findCloudflared() != nil,
+            processRunning: proc?.isRunning == true,
+            shouldRun: _shouldRun
+        )
+    }
 
     func autoStartIfAvailable() {
         if findCloudflared() != nil {
@@ -253,6 +287,11 @@ final class TunnelManager {
                     "--protocol", "http2",
                     "run", named.uuid
                 ]
+                lock.lock()
+                currentMode = "named"
+                currentNamedUUID = named.uuid
+                currentNamedHostname = named.hostname
+                lock.unlock()
                 logger.info("Tunnel mode: named (uuid=\(named.uuid), hostname=\(named.hostname))")
             } else {
                 p.arguments = [
@@ -262,6 +301,11 @@ final class TunnelManager {
                     "--no-autoupdate",
                     "--protocol", "http2"
                 ]
+                lock.lock()
+                currentMode = "quick"
+                currentNamedUUID = ""
+                currentNamedHostname = ""
+                lock.unlock()
             }
 
             let pipe = Pipe()
