@@ -46,6 +46,12 @@ COMMIT_MSG="Build ${NEXT}${MESSAGE:+: }${MESSAGE}"
 GIT_NOMODE="git -c core.fileMode=false"
 $GIT_NOMODE add build_info.py
 $GIT_NOMODE add -u
+# `git add -u` only stages modifications to ALREADY-tracked files — it silently
+# skips NEW source files. That once shipped a release referencing a brand-new
+# file not in the repo (build failed: "cannot find X in scope"). Sweep in every
+# real Swift source so new files can't be left behind. AppleDouble (._*) files
+# from the SanDisk volume are excluded and .gitignore'd.
+find macos_arm64/Sources -name '*.swift' ! -name '._*' -print0 | xargs -0 $GIT_NOMODE add
 STAGED="$($GIT_NOMODE diff --cached --name-only)"
 if [ -z "$STAGED" ]; then
   echo "ERROR: nothing staged — no real code changes detected. Aborting release."

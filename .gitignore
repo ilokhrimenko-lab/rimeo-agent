@@ -20,4 +20,6 @@ build/RimeoAgent/
 dist/
 *.spec
 .DS_Store
+# AppleDouble files created by the SanDisk/exFAT volume — never commit these
+._*
 .omx/
