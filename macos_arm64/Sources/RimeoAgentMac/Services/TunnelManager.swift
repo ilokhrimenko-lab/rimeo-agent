@@ -36,6 +36,9 @@ final class TunnelManager {
 
     var activeURL: String { lock.lock(); defer { lock.unlock() }; return tunnelURL }
     var isRunning: Bool   { lock.lock(); defer { lock.unlock() }; return proc?.isRunning == true }
+    // Hostname assigned by the named tunnel (e.g. "<hash>.agent.rimeo.app").
+    // Empty when running in quick-tunnel mode. Used as the JWT audience claim.
+    var namedHostname: String { lock.lock(); defer { lock.unlock() }; return currentNamedHostname }
 
     struct DiagSnapshot {
         let mode: String
@@ -97,6 +100,29 @@ final class TunnelManager {
         lock.unlock()
         DataStore.shared.update { $0.tunnel_url = "" }
         AppState.shared.refreshFromData()
+    }
+
+    /// True when a valid named-tunnel config.yml is present (tunnel uuid +
+    /// hostname). Used by TunnelProvisioner to avoid clobbering an existing
+    /// (server- or manually-provisioned) named tunnel.
+    func hasNamedTunnelConfig() -> Bool { parseNamedTunnelConfig() != nil }
+
+    /// Recycle cloudflared so a freshly-written config.yml takes effect. The
+    /// run loop re-reads parseNamedTunnelConfig() on every iteration, so
+    /// terminating the current process is enough to flip quick → named. If the
+    /// loop isn't running yet, start it.
+    func reloadAfterConfigChange() {
+        lock.lock()
+        let running = _loopRunning
+        let p = proc
+        lock.unlock()
+        if running {
+            logger.info("Tunnel config changed — recycling cloudflared to apply named tunnel")
+            p?.terminate()
+        } else {
+            logger.info("Tunnel config changed — starting tunnel to apply named tunnel")
+            start()
+        }
     }
 
     func findCloudflared() -> String? {

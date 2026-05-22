@@ -62,6 +62,10 @@ final class CloudRelay {
             var pollURL = "\(cloudURL)/api/relay/poll/\(AppConfig.shared.agentID)?token=\(cloudToken)"
             let encodedTunnel = tunnel.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
             pollURL += "&tunnel=\(encodedTunnel)"
+            // П7: report build so the server can gate named-tunnel + JWT on
+            // agent_min_build (old agents that omit this stay on quick-tunnel).
+            let encodedBuild = AppConfig.shared.buildNumber.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+            pollURL += "&build=\(encodedBuild)"
             logTunnelAdvertisementIfChanged(tunnel)
 
             guard let url = URL(string: pollURL) else {
@@ -148,7 +152,7 @@ final class CloudRelay {
         let data = DataStore.shared.data
         guard !data.cloud_url.isEmpty, !data.cloud_token.isEmpty,
               let encoded = tunnelURL.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-              let url = URL(string: "\(data.cloud_url)/api/relay/poll/\(AppConfig.shared.agentID)?token=\(data.cloud_token)&tunnel=\(encoded)") else { return }
+              let url = URL(string: "\(data.cloud_url)/api/relay/poll/\(AppConfig.shared.agentID)?token=\(data.cloud_token)&tunnel=\(encoded)&build=\(AppConfig.shared.buildNumber.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")") else { return }
         var req = URLRequest(url: url)
         req.timeoutInterval = 5
         AppConfig.shared.applyCloudHeaders(to: &req)

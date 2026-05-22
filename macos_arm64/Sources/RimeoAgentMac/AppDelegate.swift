@@ -262,6 +262,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             CloudRelay.shared.startIfLinked()
         }
 
+        // П8: ask the server for a per-user named tunnel and migrate off the
+        // shared quick tunnel. No-op when already named / not linked / rollout
+        // gate declines.
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 4) {
+            TunnelProvisioner.shared.provisionIfNeeded()
+        }
+
         // Apply pending update (scheduled via "Update on Next Launch")
         if let pending = UpdateChecker.shared.pendingUpdate {
             UpdateChecker.shared.clearPending()

@@ -43,8 +43,20 @@ final class APIRouter {
     static let shared = APIRouter()
     private init() {}
 
+    // Endpoints reachable through the public named tunnel that expose user data
+    // (audio bytes, waveform pre-computes, cover art, the full library JSON).
+    // All other routes are either local-network only or are authenticated by
+    // their own pairing/account flow.
+    private static let jwtProtectedPaths: Set<String> = [
+        "/stream", "/waveform", "/artwork", "/api/data"
+    ]
+
     func route(_ req: HTTPRequest) -> HTTPResponse {
         let path = req.path
+
+        if APIRouter.jwtProtectedPaths.contains(path) {
+            if let failure = jwtGate(req) { return failure }
+        }
 
         switch (req.method, path) {
         // Audio
@@ -771,6 +783,13 @@ final class APIRouter {
         DispatchQueue.main.async { AppState.shared.refreshFromData() }
         CloudRelay.shared.start(cloudURL: cloudURL, token: DataStore.shared.data.cloud_token)
 
+        // П8: a freshly linked agent should migrate to its named tunnel right
+        // away rather than waiting for the next launch. No-op when the rollout
+        // gate declines.
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+            TunnelProvisioner.shared.provisionIfNeeded()
+        }
+
         return .json(["status": "linked", "cloud_url": cloudURL, "result": result])
     }
 
@@ -863,6 +882,34 @@ final class APIRouter {
 
         guard code == 200 else { return .error("Cloud returned \(code)", status: 502) }
         return .json(["status": "ok"])
+    }
+
+    // MARK: - JWT middleware
+
+    private func jwtGate(_ req: HTTPRequest) -> HTTPResponse? {
+        let aud = TunnelManager.shared.namedHostname
+        // П8 safety: enforce JWT only once migrated onto the named tunnel.
+        // While still on a quick tunnel (namedHostname empty) the server does
+        // not sign tokens for this binding, so enforcing here would lock the
+        // agent out of its own /stream before provisioning completes.
+        guard !aud.isEmpty else { return nil }
+        let token = JWTValidator.extractToken(from: req)
+        guard let failure = JWTValidator.validate(token: token, expectedAudience: aud) else {
+            return nil
+        }
+        let reason = failure.rawValue
+        logger.warning("JWT rejected: path=\(req.path), reason=\(reason), aud=\(aud), token_present=\(token != nil)")
+        return HTTPResponse(
+            status: failure.status,
+            headers: [
+                "Content-Type": "application/json",
+                "WWW-Authenticate": "Bearer realm=\"rimeo-agent\", error=\"\(reason)\"",
+            ],
+            body: .data((try? JSONSerialization.data(withJSONObject: [
+                "error": "unauthorized",
+                "reason": reason,
+            ])) ?? Data())
+        )
     }
 
     // MARK: - Helpers
