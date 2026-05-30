@@ -362,7 +362,10 @@ cur.execute(
         COALESCE(c.FolderPath, ''),
         COALESCE(c.DateCreated, ''),
         COALESCE(c.created_at, ''),
-        COALESCE(c.ImagePath, '')
+        COALESCE(c.ImagePath, ''),
+        COALESCE(c.Commnt, ''),
+        COALESCE(c.FileNameL, ''),
+        COALESCE(c.StockDate, '')
     FROM djmdContent c
     LEFT JOIN djmdArtist a ON c.ArtistID = a.ID
     LEFT JOIN djmdGenre g  ON c.GenreID = g.ID
@@ -373,11 +376,13 @@ cur.execute(
 )
 
 tracks = []
+eval_rows = []   # parallel to tracks; fields needed to evaluate smart playlists
 track_index = {}
 for row in cur.fetchall():
     track_id = str(row[0])
     date_str = str(row[11] or '')[:10] if row[11] else "0000-00-00"
     timestamp = as_timestamp(row[12], row[11])
+    bpm = round(float(row[7] or 0) / 100.0, 2) if row[7] else 0.0
     track = {
         "id": track_id,
         "artist": str(row[1] or "Unknown Artist"),
@@ -386,7 +391,7 @@ for row in cur.fetchall():
         "label": str(row[4] or ""),
         "rel_date": str(row[5] or ""),
         "key": str(row[6] or "—"),
-        "bpm": round(float(row[7] or 0) / 100.0, 2) if row[7] else 0.0,
+        "bpm": bpm,
         "bitrate": int(row[8] or 0),
         "play_count": int(row[9] or 0),
         "location": str(row[10] or ""),
@@ -398,10 +403,25 @@ for row in cur.fetchall():
     }
     track_index[track_id] = len(tracks)
     tracks.append(track)
+    eval_rows.append({
+        "artist": str(row[1] or ""),
+        "title": str(row[2] or ""),
+        "genre": str(row[3] or ""),
+        "label": str(row[4] or ""),
+        "key": str(row[6] or ""),   # raw Camelot key for matching
+        "comments": str(row[14] or ""),
+        "fileName": str(row[15] or ""),
+        "bpm": bpm,
+        "bitrate": int(row[8] or 0),
+        "playCount": int(row[9] or 0),
+        "year": str(row[5] or ""),
+        "dateAdded": timestamp,
+        "stockDate": str(row[16] or "")[:10],
+    })
 
 cur.execute(
     """
-    SELECT ID, Name, ParentID, Attribute
+    SELECT ID, Name, ParentID, Attribute, SmartList
     FROM djmdPlaylist
     WHERE rb_local_deleted = 0
     """
@@ -413,6 +433,7 @@ playlists = {
         "name": str(row[1] or ""),
         "parent": str(row[2] or "root"),
         "attribute": int(row[3] or 0),
+        "smart_list": str(row[4] or ""),
     }
     for row in playlist_rows
 }
@@ -455,6 +476,125 @@ for playlist_id, content_id, track_no in cur.fetchall():
         track["playlists"].append(ppath)
     if track["timestamp"] > playlist_latest.get(ppath, 0):
         playlist_latest[ppath] = track["timestamp"]
+
+# Smart playlists (Attribute == 4): membership is computed from the SmartList
+# filter rules. Operator codes (pyrekordbox): 1 equal, 2 not-equal, 3 greater,
+# 4 less, 5 in-range, 6 in-last, 7 not-in-last, 8 contains, 9 not-contains,
+# 10 starts-with, 11 ends-with. LogicalOperator: 1 = ALL (AND), 2 = ANY (OR).
+import xml.etree.ElementTree as _ET
+
+_TEXT_PROPS = {"artist", "name", "title", "genre", "label", "key", "comments", "fileName"}
+_NUM_PROPS = {"bpm", "bitRate", "bitrate", "dj_play_count", "playCount", "year"}
+_DATE_PROPS = {"stockDate", "dateReleased", "dateAdded", "dateCreated"}
+_PROP_FIELD = {
+    "artist": "artist", "name": "title", "title": "title", "genre": "genre",
+    "label": "label", "key": "key", "comments": "comments", "fileName": "fileName",
+    "bpm": "bpm", "bitRate": "bitrate", "bitrate": "bitrate",
+    "dj_play_count": "playCount", "playCount": "playCount", "year": "year",
+    "stockDate": "stockDate", "dateReleased": "stockDate",
+    "dateAdded": "dateAdded", "dateCreated": "dateAdded",
+}
+
+def _parse_date_only(s):
+    try:
+        return dt.date.fromisoformat(str(s)[:10])
+    except Exception:
+        return None
+
+def _smart_match(prop, op, vl, vr, unit, row):
+    field = _PROP_FIELD.get(prop)
+    if field is None:
+        return False
+    if prop in _TEXT_PROPS:
+        s = str(row.get(field, "")).lower()
+        v = str(vl or "").lower()
+        if op == 1:  return s == v
+        if op == 2:  return s != v
+        if op == 8:  return v in s
+        if op == 9:  return v not in s
+        if op == 10: return s.startswith(v)
+        if op == 11: return s.endswith(v)
+        return False
+    if prop in _NUM_PROPS:
+        try:
+            x = float(row.get(field, 0) or 0)
+            a = float(vl or 0)
+            b = float(vr or 0)
+        except Exception:
+            return False
+        if op == 1: return x == a
+        if op == 2: return x != a
+        if op == 3: return x > a
+        if op == 4: return x < a
+        if op == 5: return a <= x <= b
+        return False
+    if prop in _DATE_PROPS:
+        if field == "dateAdded":
+            try:
+                d = dt.datetime.fromtimestamp(float(row.get(field, 0) or 0)).date()
+            except Exception:
+                d = None
+        else:
+            d = _parse_date_only(row.get(field, ""))
+        if d is None:
+            return False
+        if op == 5:
+            a, b = _parse_date_only(vl), _parse_date_only(vr)
+            return bool(a and b and a <= d <= b)
+        if op in (6, 7):
+            try:
+                n = int(vl or 0)
+            except Exception:
+                n = 0
+            mult = {"month": 30, "week": 7, "year": 365}.get(unit, 1)
+            threshold = dt.date.today() - dt.timedelta(days=n * mult)
+            within = d >= threshold
+            return within if op == 6 else (not within)
+        return False
+    return False
+
+for node in playlists.values():
+    if node.get("attribute") != 4:
+        continue
+    smart = node.get("smart_list") or ""
+    if not smart:
+        continue
+    try:
+        root = _ET.fromstring(smart)
+    except Exception:
+        continue
+    try:
+        logical = int(root.get("LogicalOperator") or "1")
+    except Exception:
+        logical = 1
+    conds = [
+        (
+            cc.get("PropertyName") or "",
+            int(cc.get("Operator") or "0"),
+            cc.get("ValueLeft") or "",
+            cc.get("ValueRight") or "",
+            cc.get("ValueUnit") or "",
+        )
+        for cc in root.findall("CONDITION")
+    ]
+    if not conds:
+        continue
+    ppath = playlist_path(node["id"])
+    if not ppath:
+        continue
+    order = 0
+    for idx, erow in enumerate(eval_rows):
+        results = [_smart_match(p, o, vl, vr, u, erow) for (p, o, vl, vr, u) in conds]
+        ok = all(results) if logical == 1 else any(results)
+        if not ok:
+            continue
+        order += 1
+        track = tracks[idx]
+        track["playlist_indices"][ppath] = order
+        if ppath not in track["playlists"]:
+            track["playlists"].append(ppath)
+        if track["timestamp"] > playlist_latest.get(ppath, 0):
+            playlist_latest[ppath] = track["timestamp"]
 
 tracks.sort(key=lambda item: item["timestamp"], reverse=True)
 playlists_list = [{"path": path, "date": playlist_latest[path]} for path in playlist_latest]

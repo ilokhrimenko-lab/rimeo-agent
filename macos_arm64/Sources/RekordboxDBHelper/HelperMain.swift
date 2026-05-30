@@ -38,6 +38,34 @@ struct PlaylistNode {
     let id: String
     let name: String
     let parent: String
+    let attribute: Int
+    let smartList: String
+}
+
+// Fields needed to evaluate Rekordbox smart-playlist conditions, kept parallel to
+// `tracks` (same index, populated in the same pass before sorting).
+struct SmartEvalRow {
+    let artist: String
+    let title: String
+    let genre: String
+    let label: String
+    let key: String
+    let comments: String
+    let fileName: String
+    let bpm: Double
+    let bitrate: Int
+    let playCount: Int
+    let year: String
+    let dateAdded: Double   // epoch seconds (DateCreated/created_at)
+    let stockDate: String   // "YYYY-MM-DD"
+}
+
+struct SmartCondition {
+    let property: String
+    let op: Int
+    let valueLeft: String
+    let valueRight: String
+    let unit: String
 }
 
 enum HelperError: LocalizedError {
@@ -190,6 +218,139 @@ func playlistPath(for playlistID: String, playlists: [String: PlaylistNode]) -> 
     return parts.reversed().filter { !$0.isEmpty }.joined(separator: " / ")
 }
 
+// MARK: - Smart playlist evaluation
+//
+// Rekordbox stores smart playlists as `djmdPlaylist.Attribute == 4` with a
+// `SmartList` XML column describing filter rules. Unlike regular playlists, their
+// membership is NOT in djmdSongPlaylist — it must be computed from the rules.
+// Operator codes (match pyrekordbox): 1 equal, 2 not-equal, 3 greater, 4 less,
+// 5 in-range, 6 in-last, 7 not-in-last, 8 contains, 9 not-contains,
+// 10 starts-with, 11 ends-with. LogicalOperator: 1 = ALL (AND), 2 = ANY (OR).
+
+private let smartDateOnlyFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.timeZone = TimeZone(identifier: "UTC")
+    f.dateFormat = "yyyy-MM-dd"
+    return f
+}()
+
+private func smartParseDateOnly(_ s: String) -> Date? {
+    let trimmed = String(s.prefix(10))
+    guard trimmed.count == 10 else { return nil }
+    return smartDateOnlyFormatter.date(from: trimmed)
+}
+
+func parseSmartConditions(_ xml: String) -> (logical: Int, conditions: [SmartCondition])? {
+    guard let data = xml.data(using: .utf8),
+          let doc = try? XMLDocument(data: data, options: []),
+          let root = doc.rootElement() else { return nil }
+    let logical = Int(root.attribute(forName: "LogicalOperator")?.stringValue ?? "1") ?? 1
+    var conds: [SmartCondition] = []
+    for node in root.elements(forName: "CONDITION") {
+        conds.append(SmartCondition(
+            property: node.attribute(forName: "PropertyName")?.stringValue ?? "",
+            op: Int(node.attribute(forName: "Operator")?.stringValue ?? "0") ?? 0,
+            valueLeft: node.attribute(forName: "ValueLeft")?.stringValue ?? "",
+            valueRight: node.attribute(forName: "ValueRight")?.stringValue ?? "",
+            unit: node.attribute(forName: "ValueUnit")?.stringValue ?? ""
+        ))
+    }
+    return conds.isEmpty ? nil : (logical, conds)
+}
+
+private enum SmartFieldValue {
+    case text(String)
+    case number(Double)
+    case date(Date?)
+}
+
+private func smartFieldValue(_ property: String, _ row: SmartEvalRow) -> SmartFieldValue? {
+    switch property {
+    case "artist":                 return .text(row.artist)
+    case "name", "title":          return .text(row.title)
+    case "genre":                  return .text(row.genre)
+    case "label":                  return .text(row.label)
+    case "key":                    return .text(row.key)
+    case "comments":               return .text(row.comments)
+    case "fileName":               return .text(row.fileName)
+    case "bpm":                    return .number(row.bpm)
+    case "bitRate", "bitrate":     return .number(Double(row.bitrate))
+    case "dj_play_count", "playCount": return .number(Double(row.playCount))
+    case "year":                   return .number(Double(row.year) ?? 0)
+    case "stockDate", "dateReleased": return .date(smartParseDateOnly(row.stockDate))
+    case "dateAdded", "dateCreated":  return .date(Date(timeIntervalSince1970: row.dateAdded))
+    default:                       return nil
+    }
+}
+
+private func smartEvalText(_ op: Int, _ field: String, _ vl: String) -> Bool {
+    let s = field.lowercased(); let v = vl.lowercased()
+    switch op {
+    case 1:  return s == v
+    case 2:  return s != v
+    case 8:  return s.contains(v)
+    case 9:  return !s.contains(v)
+    case 10: return s.hasPrefix(v)
+    case 11: return s.hasSuffix(v)
+    default: return false
+    }
+}
+
+private func smartEvalNumber(_ op: Int, _ x: Double, _ vl: String, _ vr: String) -> Bool {
+    let a = Double(vl) ?? 0; let b = Double(vr) ?? 0
+    switch op {
+    case 1:  return x == a
+    case 2:  return x != a
+    case 3:  return x > a
+    case 4:  return x < a
+    case 5:  return x >= a && x <= b
+    default: return false
+    }
+}
+
+private func smartEvalDate(_ op: Int, _ d: Date?, _ vl: String, _ vr: String, _ unit: String) -> Bool {
+    guard let d = d else { return false }
+    switch op {
+    case 5:
+        guard let a = smartParseDateOnly(vl), let b = smartParseDateOnly(vr) else { return false }
+        return d >= a && d <= b
+    case 6, 7:
+        let n = Int(vl) ?? 0
+        let comp: Calendar.Component
+        switch unit {
+        case "month": comp = .month
+        case "week":  comp = .weekOfYear
+        case "year":  comp = .year
+        default:      comp = .day
+        }
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC") ?? .current
+        guard let threshold = cal.date(byAdding: comp, value: -n, to: Date()) else { return false }
+        let within = d >= threshold
+        return op == 6 ? within : !within
+    default:
+        return false
+    }
+}
+
+private func smartEvalCondition(_ cond: SmartCondition, _ row: SmartEvalRow) -> Bool {
+    guard let fv = smartFieldValue(cond.property, row) else { return false }
+    switch fv {
+    case .text(let s):   return smartEvalText(cond.op, s, cond.valueLeft)
+    case .number(let x): return smartEvalNumber(cond.op, x, cond.valueLeft, cond.valueRight)
+    case .date(let d):   return smartEvalDate(cond.op, d, cond.valueLeft, cond.valueRight, cond.unit)
+    }
+}
+
+func smartRowMatches(_ row: SmartEvalRow, logical: Int, conditions: [SmartCondition]) -> Bool {
+    if conditions.isEmpty { return false }
+    if logical == 2 {
+        return conditions.contains { smartEvalCondition($0, row) }
+    }
+    return conditions.allSatisfy { smartEvalCondition($0, row) }
+}
+
 func parseMasterDB(dbPath: String, mtime: Double) throws -> HelperLibraryData {
     let db = try DatabaseHandle(path: dbPath)
     try db.applyKey()
@@ -209,7 +370,10 @@ func parseMasterDB(dbPath: String, mtime: Double) throws -> HelperLibraryData {
         COALESCE(c.FolderPath, ''),
         COALESCE(c.DateCreated, ''),
         COALESCE(c.created_at, ''),
-        COALESCE(c.ImagePath, '')
+        COALESCE(c.ImagePath, ''),
+        COALESCE(c.Commnt, ''),
+        COALESCE(c.FileNameL, ''),
+        COALESCE(c.StockDate, '')
     FROM djmdContent c
     LEFT JOIN djmdArtist a ON c.ArtistID = a.ID
     LEFT JOIN djmdGenre g  ON c.GenreID = g.ID
@@ -223,6 +387,7 @@ func parseMasterDB(dbPath: String, mtime: Double) throws -> HelperLibraryData {
 
     var tracks: [HelperTrack] = []
     var trackIndex: [String: Int] = [:]
+    var evalRows: [SmartEvalRow] = []   // parallel to `tracks`, used for smart playlists
 
     while true {
         let rc = sqlite3_step(tracksStmt)
@@ -237,20 +402,29 @@ func parseMasterDB(dbPath: String, mtime: Double) throws -> HelperLibraryData {
         let timestamp = asTimestamp(createdAt, fallbackDate)
         let dateString = fallbackDate.isEmpty ? "0000-00-00" : String(fallbackDate.prefix(10))
         let bpmRaw = columnDouble(tracksStmt, 7)
+        let bpm = bpmRaw == 0 ? 0 : (bpmRaw / 100.0)
+        let artist = columnText(tracksStmt, 1).isEmpty ? "Unknown Artist" : columnText(tracksStmt, 1)
+        let title = columnText(tracksStmt, 2).isEmpty ? "Unknown Title" : columnText(tracksStmt, 2)
+        let genre = columnText(tracksStmt, 3)
+        let label = columnText(tracksStmt, 4)
+        let relDate = columnText(tracksStmt, 5)
+        let key = columnText(tracksStmt, 6).isEmpty ? "—" : columnText(tracksStmt, 6)
+        let bitrate = columnInt(tracksStmt, 8)
+        let playCount = columnInt(tracksStmt, 9)
 
         trackIndex[id] = tracks.count
         tracks.append(
             HelperTrack(
                 id: id,
-                artist: columnText(tracksStmt, 1).isEmpty ? "Unknown Artist" : columnText(tracksStmt, 1),
-                title: columnText(tracksStmt, 2).isEmpty ? "Unknown Title" : columnText(tracksStmt, 2),
-                genre: columnText(tracksStmt, 3),
-                label: columnText(tracksStmt, 4),
-                rel_date: columnText(tracksStmt, 5),
-                key: columnText(tracksStmt, 6).isEmpty ? "—" : columnText(tracksStmt, 6),
-                bpm: bpmRaw == 0 ? 0 : (bpmRaw / 100.0),
-                bitrate: columnInt(tracksStmt, 8),
-                play_count: columnInt(tracksStmt, 9),
+                artist: artist,
+                title: title,
+                genre: genre,
+                label: label,
+                rel_date: relDate,
+                key: key,
+                bpm: bpm,
+                bitrate: bitrate,
+                play_count: playCount,
                 location: columnText(tracksStmt, 10),
                 timestamp: timestamp,
                 date_str: dateString,
@@ -259,11 +433,28 @@ func parseMasterDB(dbPath: String, mtime: Double) throws -> HelperLibraryData {
                 playlist_indices: [:]
             )
         )
+        evalRows.append(
+            SmartEvalRow(
+                artist: artist,
+                title: title,
+                genre: genre,
+                label: label,
+                key: columnText(tracksStmt, 6),   // raw key (Camelot) for matching
+                comments: columnText(tracksStmt, 14),
+                fileName: columnText(tracksStmt, 15),
+                bpm: bpm,
+                bitrate: bitrate,
+                playCount: playCount,
+                year: relDate,
+                dateAdded: timestamp,
+                stockDate: columnText(tracksStmt, 16)
+            )
+        )
     }
 
     let playlistsStmt = try db.prepare(
         """
-        SELECT ID, Name, ParentID
+        SELECT ID, Name, ParentID, COALESCE(Attribute, 0), COALESCE(SmartList, '')
         FROM djmdPlaylist
         WHERE rb_local_deleted = 0
         """
@@ -282,7 +473,9 @@ func parseMasterDB(dbPath: String, mtime: Double) throws -> HelperLibraryData {
         playlistsByID[id] = PlaylistNode(
             id: id,
             name: columnText(playlistsStmt, 1),
-            parent: columnText(playlistsStmt, 2)
+            parent: columnText(playlistsStmt, 2),
+            attribute: columnInt(playlistsStmt, 3),
+            smartList: columnText(playlistsStmt, 4)
         )
     }
 
@@ -319,6 +512,28 @@ func parseMasterDB(dbPath: String, mtime: Double) throws -> HelperLibraryData {
 
         if tracks[idx].timestamp > (playlistLatest[path] ?? 0) {
             playlistLatest[path] = tracks[idx].timestamp
+        }
+    }
+
+    // Smart playlists (Attribute == 4): membership is computed from the SmartList
+    // filter rules rather than read from djmdSongPlaylist.
+    for node in playlistsByID.values where node.attribute == 4 {
+        guard !node.smartList.isEmpty,
+              let parsed = parseSmartConditions(node.smartList) else { continue }
+        let path = playlistPath(for: node.id, playlists: playlistsByID)
+        guard !path.isEmpty else { continue }
+
+        var order = 0
+        for idx in tracks.indices
+        where smartRowMatches(evalRows[idx], logical: parsed.logical, conditions: parsed.conditions) {
+            order += 1
+            tracks[idx].playlist_indices[path] = order
+            if !tracks[idx].playlists.contains(path) {
+                tracks[idx].playlists.append(path)
+            }
+            if tracks[idx].timestamp > (playlistLatest[path] ?? 0) {
+                playlistLatest[path] = tracks[idx].timestamp
+            }
         }
     }
 
