@@ -172,7 +172,7 @@ final class RekordboxParser: NSObject {
 
         tracksDB.sort { $0.timestamp > $1.timestamp }
 
-        let playlists = allPlaylists.map { Playlist(path: $0.key, date: $0.value) }
+        let playlists = allPlaylists.map { Playlist(path: $0.key, date: $0.value, smart: false) }
         return LibraryData(tracks: tracksDB, playlists: playlists, xml_date: mtime, source: "xml")
     }
 
@@ -553,6 +553,7 @@ def _smart_match(prop, op, vl, vr, unit, row):
         return False
     return False
 
+smart_paths = set()
 for node in playlists.values():
     if node.get("attribute") != 4:
         continue
@@ -582,6 +583,7 @@ for node in playlists.values():
     ppath = playlist_path(node["id"])
     if not ppath:
         continue
+    smart_paths.add(ppath)
     order = 0
     for idx, erow in enumerate(eval_rows):
         results = [_smart_match(p, o, vl, vr, u, erow) for (p, o, vl, vr, u) in conds]
@@ -597,7 +599,7 @@ for node in playlists.values():
             playlist_latest[ppath] = track["timestamp"]
 
 tracks.sort(key=lambda item: item["timestamp"], reverse=True)
-playlists_list = [{"path": path, "date": playlist_latest[path]} for path in playlist_latest]
+playlists_list = [{"path": path, "date": playlist_latest[path], "smart": path in smart_paths} for path in playlist_latest]
 
 with open(out_path, "w", encoding="utf-8") as fh:
     json.dump({

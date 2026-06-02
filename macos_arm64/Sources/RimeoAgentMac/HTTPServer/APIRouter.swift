@@ -375,7 +375,7 @@ final class APIRouter {
         logger.info("GET /api/data -> \(lib.tracks.count) tracks, \(lib.playlists.count) playlists, source=\(lib.source ?? "unknown")")
         let obj: [String: Any] = [
             "tracks":            lib.tracks.map { encodableTrack($0) },
-            "playlists":         lib.playlists.map { ["path": $0.path, "date": $0.date] },
+            "playlists":         lib.playlists.map { ["path": $0.path, "date": $0.date, "smart": $0.smart ?? false] },
             "notes":             data.notes,
             "global_exclusions": data.global_exclusions,
             // Return both keys during parity migration:

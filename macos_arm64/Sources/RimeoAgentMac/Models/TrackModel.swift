@@ -25,6 +25,7 @@ struct Playlist: Codable, Identifiable, Equatable {
     var id: String { path }
     let path: String
     let date: Double
+    let smart: Bool?
 
     static func == (lhs: Playlist, rhs: Playlist) -> Bool { lhs.path == rhs.path }
 }

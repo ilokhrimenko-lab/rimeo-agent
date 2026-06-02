@@ -25,6 +25,7 @@ struct HelperTrack: Codable {
 struct HelperPlaylist: Codable {
     let path: String
     let date: Double
+    let smart: Bool
 }
 
 struct HelperLibraryData: Codable {
@@ -517,11 +518,13 @@ func parseMasterDB(dbPath: String, mtime: Double) throws -> HelperLibraryData {
 
     // Smart playlists (Attribute == 4): membership is computed from the SmartList
     // filter rules rather than read from djmdSongPlaylist.
+    var smartPaths = Set<String>()
     for node in playlistsByID.values where node.attribute == 4 {
         guard !node.smartList.isEmpty,
               let parsed = parseSmartConditions(node.smartList) else { continue }
         let path = playlistPath(for: node.id, playlists: playlistsByID)
         guard !path.isEmpty else { continue }
+        smartPaths.insert(path)
 
         var order = 0
         for idx in tracks.indices
@@ -540,7 +543,7 @@ func parseMasterDB(dbPath: String, mtime: Double) throws -> HelperLibraryData {
     tracks.sort { $0.timestamp > $1.timestamp }
 
     let playlists = playlistLatest.keys.sorted().map {
-        HelperPlaylist(path: $0, date: playlistLatest[$0] ?? 0)
+        HelperPlaylist(path: $0, date: playlistLatest[$0] ?? 0, smart: smartPaths.contains($0))
     }
 
     return HelperLibraryData(
