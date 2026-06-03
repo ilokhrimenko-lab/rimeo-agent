@@ -645,17 +645,12 @@ final class APIRouter {
 
     private func getSimilar(_ req: HTTPRequest) -> HTTPResponse {
         guard let id = req.queryParams["id"] else { return .error("id required", status: 400) }
-        let limit  = Int(req.queryParams["limit"] ?? "10") ?? 10
+        let limit  = Int(req.queryParams["limit"] ?? "20") ?? 20
         let useKey = (req.queryParams["use_key"] ?? "1") != "0"
 
-        guard AnalysisEngine.shared.getFeatures(id) != nil else {
-            return .error("Track not analysed — run /api/analysis/start first", status: 404)
-        }
-
-        let lib       = RekordboxParser.shared.parse()
-        let store     = AnalysisEngine.shared.storeSnapshot()
-        let results   = SimilarityEngine.shared.findSimilar(
-            trackID: id, allTracks: lib.tracks, analysisData: store,
+        let lib     = RekordboxParser.shared.parse()
+        let results = SimilarityEngine.shared.findSimilar(
+            trackID: id, allTracks: lib.tracks,
             topN: min(limit, 50), useKey: useKey
         )
 
@@ -663,15 +658,7 @@ final class APIRouter {
               let resultsJSON = try? JSONSerialization.jsonObject(with: resultsData)
         else { return .error("Encode error", status: 500) }
 
-        let srcFeat = store[id]
-        let srcData = srcFeat.flatMap { try? JSONEncoder().encode($0) }
-        let srcJSON = srcData.flatMap { try? JSONSerialization.jsonObject(with: $0) }
-
-        return .json([
-            "results":         resultsJSON,
-            "source_features": srcJSON as Any,
-            "analyzed_count":  store.count,
-        ])
+        return .json(["results": resultsJSON])
     }
 
     // MARK: - /api/status

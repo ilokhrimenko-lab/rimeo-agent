@@ -112,6 +112,9 @@ public sealed class ComponentManager
         }
 
         Log.Info($"Checksum OK for {comp.Id}, installing…");
+        // If "About to move" appears in the log but "Component installed" never does,
+        // the process was killed writing the final exe → Windows Defender (ClickUp 4003, hyp. C).
+        Log.Info($"About to move {tmp} -> {dest}");
         File.Move(tmp, dest, overwrite: true);
         Log.Info($"Component installed: {comp.Id} → {dest}");
     }

@@ -1,19 +1,43 @@
 import Foundation
 
-// Port of similarity.py — pure Swift, no external dependencies
+// Metadata-based similar-tracks scoring — pure Swift, no audio analysis.
+// Candidate pool = hard filter on BPM tolerance + harmonic key compatibility.
+// Ranking inside the pool = weighted bonuses for matching label / genre / artist.
+// All numeric parameters live in similarity_config.json (bundled at build time).
+
+struct SimilarityConfig: Codable {
+    var bpm_tolerance_pct: Double
+    var key_max_steps:     Int
+    var result_limit:      Int
+    var weights:           Weights
+
+    struct Weights: Codable {
+        var label:  Double
+        var genre:  Double
+        var artist: Double
+    }
+
+    static let `default` = SimilarityConfig(
+        bpm_tolerance_pct: 1.6,
+        key_max_steps:     2,
+        result_limit:      20,
+        weights:           Weights(label: 2.0, genre: 1.0, artist: 0.5)
+    )
+}
 
 final class SimilarityEngine {
     static let shared = SimilarityEngine()
-    private init() {}
+    private init() { self.config = SimilarityEngine.loadConfig() }
+
+    let config: SimilarityConfig
 
     struct MatchScore: Codable {
-        let total:    Double
-        let vibe:     Double
-        let key:      Double
-        let harmony:  Double   // alias for iOS client
-        let tempo:    Double
-        let metadata: Double
-        let clap:     Bool
+        let total:        Double   // sum of weighted bonuses (label/genre/artist)
+        let bpm_delta:    Double   // |bpmA - bpmB|
+        let key_relation: String   // "exact" | "relative" | "compatible" | "—"
+        let label_match:  Bool
+        let genre_match:  Bool
+        let artist_match: Bool
     }
 
     struct SimilarResult: Codable {
@@ -21,155 +45,136 @@ final class SimilarityEngine {
         let score: MatchScore
     }
 
+    // MARK: - Config loading
+
+    private static func loadConfig() -> SimilarityConfig {
+        if let url = Bundle.main.url(forResource: "similarity_config", withExtension: "json"),
+           let data = try? Data(contentsOf: url),
+           let cfg  = try? JSONDecoder().decode(SimilarityConfig.self, from: data) {
+            return cfg
+        }
+        return .default
+    }
+
+    // MARK: - Public API
+
     func findSimilar(trackID: String, allTracks: [Track],
-                     analysisData: [String: TrackFeatures],
-                     topN: Int = 10, useKey: Bool = true) -> [SimilarResult] {
-        guard let featA  = analysisData[trackID],
-              let trackA = allTracks.first(where: { $0.id == trackID }) else { return [] }
+                     topN: Int? = nil, useKey: Bool = true) -> [SimilarResult] {
+        guard let trackA = allTracks.first(where: { $0.id == trackID }) else { return [] }
 
         var results = [SimilarResult]()
         for trackB in allTracks {
-            guard trackB.id != trackID,
-                  let featB = analysisData[trackB.id] else { continue }
-            guard let score = computeMatch(trackA: trackA, trackB: trackB,
-                                           featA: featA, featB: featB,
-                                           useKey: useKey) else { continue }
-            results.append(SimilarResult(track: trackB, score: score))
+            guard trackB.id != trackID else { continue }
+
+            // Hard filter 1: BPM tolerance
+            guard bpmWithinTolerance(trackA.bpm, trackB.bpm) else { continue }
+
+            // Hard filter 2: harmonic key compatibility (only when useKey)
+            let rel = keyRelation(trackA.key, trackB.key)
+            if useKey && rel == .incompatible { continue }
+
+            results.append(SimilarResult(
+                track: trackB,
+                score: buildScore(trackA: trackA, trackB: trackB, rel: rel)
+            ))
         }
-        results.sort { $0.score.total > $1.score.total }
-        return Array(results.prefix(topN))
+
+        results.sort { a, b in
+            if a.score.total != b.score.total { return a.score.total > b.score.total }
+            if a.score.bpm_delta != b.score.bpm_delta { return a.score.bpm_delta < b.score.bpm_delta }
+            return keyRank(a.score.key_relation) > keyRank(b.score.key_relation)
+        }
+
+        let limit = topN ?? config.result_limit
+        return Array(results.prefix(limit))
     }
 
-    func computeMatch(trackA: Track, trackB: Track,
-                      featA: TrackFeatures, featB: TrackFeatures,
-                      useKey: Bool) -> MatchScore? {
-        guard let ts = tempoScore(bpmA: trackA.bpm, bpmB: trackB.bpm) else { return nil }
+    // MARK: - Scoring
 
-        let cs = clapScore(featA: featA, featB: featB)
-        let vs = cs ?? vibeScore(featA: featA, featB: featB)
-        let ks = camelotScore(keyA: trackA.key, keyB: trackB.key)
-        let ms = metadataScore(trackA: trackA, trackB: trackB)
+    private func buildScore(trackA: Track, trackB: Track, rel: KeyRel) -> MatchScore {
+        let labelMatch  = matches(trackA.label,  trackB.label)
+        let genreMatch  = matches(trackA.genre,  trackB.genre)
+        let artistMatch = matches(trackA.artist, trackB.artist)
 
-        let total: Double
-        if cs != nil {
-            // CLAP mode — embedding dominates, key/tempo as minor anchors
-            total = useKey
-                ? (vs * 0.80 + ks * 0.12 + ts * 0.08) * 100
-                : (vs * 0.90 + ts * 0.10) * 100
-        } else {
-            // MFCC fallback
-            total = useKey
-                ? (vs * 0.45 + ks * 0.25 + ts * 0.20 + ms * 0.10) * 100
-                : (vs * 0.60 + ts * 0.25 + ms * 0.15) * 100
-        }
+        var total = 0.0
+        if labelMatch  { total += config.weights.label  }
+        if genreMatch  { total += config.weights.genre  }
+        if artistMatch { total += config.weights.artist }
 
-        let keyVal = round(ks * 100 * 10) / 10
         return MatchScore(
-            total:    round(total * 10) / 10,
-            vibe:     round(vs * 100 * 10) / 10,
-            key:      keyVal,
-            harmony:  keyVal,
-            tempo:    round(ts * 100 * 10) / 10,
-            metadata: round(ms * 100 * 10) / 10,
-            clap:     cs != nil
+            total:        round(total * 100) / 100,
+            bpm_delta:    round(abs(trackA.bpm - trackB.bpm) * 10) / 10,
+            key_relation: rel.label,
+            label_match:  labelMatch,
+            genre_match:  genreMatch,
+            artist_match: artistMatch
         )
     }
 
-    // Cosine similarity between pre-normalised 512-dim CLAP embeddings → 0–1
-    private func clapScore(featA: TrackFeatures, featB: TrackFeatures) -> Double? {
-        guard let a = featA.clap, let b = featB.clap, !a.isEmpty, a.count == b.count else { return nil }
-        let dot = zip(a, b).map(*).reduce(0, +)
-        return round((dot + 1.0) / 2.0 * 10000) / 10000
+    private func matches(_ a: String, _ b: String) -> Bool {
+        let x = a.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let y = b.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return !x.isEmpty && x == y
     }
 
-    // BPM delta filter: >8 → nil (hard exclude), 0–8 → 0.25–1.0
-    private func tempoScore(bpmA: Double, bpmB: Double) -> Double? {
-        guard bpmA > 0, bpmB > 0 else { return 0.5 }
-        let delta = abs(bpmA - bpmB)
-        if delta > 8   { return nil }
-        if delta <= 2  { return 1.0 }
-        return round((1.0 - (delta - 2.0) / 6.0 * 0.75) * 10000) / 10000
+    // MARK: - BPM filter
+
+    // Candidate passes when |bpmB - bpmA| / bpmA <= tolerance%. Missing BPM → excluded.
+    private func bpmWithinTolerance(_ a: Double, _ b: Double) -> Bool {
+        guard a > 0, b > 0 else { return false }
+        return abs(a - b) / a <= config.bpm_tolerance_pct / 100.0
     }
 
-    // Camelot wheel harmonic compatibility
-    private func camelotScore(keyA: String, keyB: String) -> Double {
+    // MARK: - Camelot key relation
+
+    enum KeyRel {
+        case exact        // same number + letter
+        case relative     // same number, different letter (relative major/minor)
+        case compatible   // same letter, within key_max_steps on the wheel
+        case incompatible // valid keys but outside the harmonic window
+        case unknown      // one or both keys unparseable — not a hard exclude
+
+        var label: String {
+            switch self {
+            case .exact:        return "exact"
+            case .relative:     return "relative"
+            case .compatible:   return "compatible"
+            case .incompatible: return "incompatible"
+            case .unknown:      return "—"
+            }
+        }
+    }
+
+    private func keyRelation(_ keyA: String, _ keyB: String) -> KeyRel {
         guard let (numA, letA) = parseCamelot(keyA),
-              let (numB, letB) = parseCamelot(keyB) else { return 0.5 }
+              let (numB, letB) = parseCamelot(keyB) else { return .unknown }
 
-        let diff    = abs(numA - numB)
-        let numDiff = min(diff, 12 - diff)
-        let sameNum = (numA == numB)
-        let sameLet = (letA == letB)
+        let diff  = abs(numA - numB)
+        let steps = min(diff, 12 - diff)
 
-        if sameNum && sameLet  { return 1.0  }
-        if sameNum && !sameLet { return 0.85 }
-        if numDiff == 1 && sameLet  { return 0.85 }
-        if numDiff == 2 && sameLet  { return 0.50 }
-        if numDiff == 1 && !sameLet { return 0.35 }
-        return 0.0
+        if numA == numB && letA == letB { return .exact }
+        if numA == numB && letA != letB { return .relative }
+        if letA == letB && steps <= config.key_max_steps { return .compatible }
+        return .incompatible
+    }
+
+    private func keyRank(_ relation: String) -> Int {
+        switch relation {
+        case "exact":      return 4
+        case "relative":   return 3
+        case "compatible": return 2
+        case "—":          return 1
+        default:           return 0
+        }
     }
 
     private func parseCamelot(_ key: String) -> (Int, Character)? {
         let k = key.trimmingCharacters(in: .whitespaces)
         guard !k.isEmpty, k != "—" else { return nil }
-        let letters = k.prefix(while: { $0.isNumber })
-        let rest    = k.dropFirst(letters.count)
-        guard let num = Int(letters), num >= 1, num <= 12,
+        let digits = k.prefix(while: { $0.isNumber })
+        let rest   = k.dropFirst(digits.count)
+        guard let num = Int(digits), num >= 1, num <= 12,
               let letter = rest.first, letter == "A" || letter == "B" else { return nil }
         return (num, letter)
-    }
-
-    // Acoustic similarity: timbre (MFCC cosine) + energy + happiness + groove
-    private func vibeScore(featA: TrackFeatures, featB: TrackFeatures) -> Double {
-        var score  = 0.0
-        var weight = 0.0
-
-        // Timbre (MFCC cosine, skip coeff-0)
-        let a = Array(featA.timbre.dropFirst())
-        let b = Array(featB.timbre.dropFirst())
-        if !a.isEmpty, a.count == b.count {
-            let dot = zip(a, b).map(*).reduce(0, +)
-            let na  = sqrt(a.map { $0 * $0 }.reduce(0, +))
-            let nb  = sqrt(b.map { $0 * $0 }.reduce(0, +))
-            if na > 0, nb > 0 {
-                let cos = dot / (na * nb)
-                score  += ((cos + 1.0) / 2.0) * 0.50
-                weight += 0.50
-            }
-        }
-
-        // Energy (RMS)
-        let eDiff = abs(featA.energy - featB.energy)
-        score  += (1.0 - min(1.0, eDiff * 3.5)) * 0.25
-        weight += 0.25
-
-        // Happiness
-        let hDiff = abs(featA.happiness - featB.happiness)
-        score  += (1.0 - min(1.0, hDiff * 2.5)) * 0.15
-        weight += 0.15
-
-        // Groove
-        let gDiff = abs(featA.groove - featB.groove)
-        score  += (1.0 - min(1.0, gDiff * 3.0)) * 0.10
-        weight += 0.10
-
-        return weight > 0 ? (round(score / weight * 10000) / 10000) : 0.0
-    }
-
-    // Metadata: same label + playlist Jaccard
-    private func metadataScore(trackA: Track, trackB: Track) -> Double {
-        var score = 0.0
-        let la = trackA.label.trimmingCharacters(in: .whitespaces).lowercased()
-        let lb = trackB.label.trimmingCharacters(in: .whitespaces).lowercased()
-        if !la.isEmpty, !lb.isEmpty, la == lb { score += 0.6 }
-
-        let pa = Set(trackA.playlist_indices.keys)
-        let pb = Set(trackB.playlist_indices.keys)
-        if !pa.isEmpty, !pb.isEmpty {
-            let union = Double(pa.union(pb).count)
-            if union > 0 { score += (Double(pa.intersection(pb).count) / union) * 0.4 }
-        }
-
-        return min(1.0, round(score * 10000) / 10000)
     }
 }

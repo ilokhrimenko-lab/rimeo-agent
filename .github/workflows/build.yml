@@ -65,6 +65,7 @@ jobs:
           cp build/Info.plist "$APP/Contents/Info.plist"
           cp "$ICON_ICNS" "$APP/Contents/Resources/RimeoAgent.icns"
           cp "$GITHUB_WORKSPACE/build_info.py" "$APP/Contents/Resources/build_info.py"
+          cp "$GITHUB_WORKSPACE/similarity_config.json" "$APP/Contents/Resources/similarity_config.json"
 
       - name: Sign macOS app
         env:

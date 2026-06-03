@@ -47,6 +47,32 @@ public sealed class AgentLogger
             return string.Join("\n", lines);
         }
     }
+
+    /// <summary>
+    /// Dumps host/runtime context at startup. Helps tell apart a missing Windows App
+    /// Runtime (self-contained issue) from a Defender-kill or a UI-thread crash when
+    /// diagnosing the early native exit (ClickUp 4003).
+    /// </summary>
+    public void LogStartupDiagnostics()
+    {
+        try
+        {
+            var exePath = Environment.ProcessPath ?? AppContext.BaseDirectory;
+            var baseDir = AppContext.BaseDirectory;
+            // Self-contained WindowsAppSDK ships this bootstrap dll next to the exe.
+            var bootstrap = Path.Combine(baseDir, "Microsoft.WindowsAppRuntime.Bootstrap.dll");
+            Info($"[diag] exe={exePath}");
+            Info($"[diag] baseDir={baseDir}");
+            Info($"[diag] cwd={Environment.CurrentDirectory}");
+            Info($"[diag] .NET={Environment.Version}, OS={Environment.OSVersion}, 64bit={Environment.Is64BitProcess}");
+            Info($"[diag] WindowsAppRuntime bootstrap present={File.Exists(bootstrap)}");
+            Info($"[diag] log={AppConfig.Shared.LogFile}");
+        }
+        catch (Exception ex)
+        {
+            Error($"[diag] startup diagnostics failed: {ex.Message}");
+        }
+    }
 }
 
 public static class Log

@@ -49,6 +49,23 @@ if (Test-Path $BuildInfoPath) {
     Copy-Item $BuildInfoPath (Join-Path $Dist "RimeoAgent\build_info.py")
 }
 
+# Emit a diagnostic launcher that enables .NET native mini-dumps (ClickUp 4003).
+# Use this to run the agent on a test VM when chasing the early native crash.
+$RunDiag = @'
+@echo off
+setlocal
+set DOTNET_DbgEnableMiniDump=1
+set DOTNET_DbgMiniDumpType=4
+set DOTNET_CreateDumpDiagnostics=1
+set DOTNET_EnableCrashReport=1
+echo Launching RimeoAgent with native crash dumps enabled...
+echo Dumps (if any) land next to this exe or in %%LOCALAPPDATA%%\Rimeo\dumps
+"%~dp0RimeoAgent.exe"
+endlocal
+'@
+Set-Content -Path (Join-Path $Dist "RimeoAgent\run_diag.cmd") -Value $RunDiag -Encoding ASCII
+Write-Host "Wrote run_diag.cmd (native crash-dump launcher)"
+
 # Optional: bundle cloudflared.exe
 $CloudflaredSrc = Join-Path $PSScriptRoot "cloudflared.exe"
 if (Test-Path $CloudflaredSrc) {

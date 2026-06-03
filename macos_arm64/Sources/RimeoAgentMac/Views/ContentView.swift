@@ -87,7 +87,6 @@ struct MainLayout: View {
     var tabContent: some View {
         switch appState.selectedTab {
         case 0:  LibraryTabView()
-        case 1:  AnalysisTabView()
         case 2:  PairingTabView()
         case 3:  AccountTabView()
         case 4:  LogsTabView()
@@ -101,7 +100,6 @@ struct RailSidebarView: View {
 
     private let items: [(String, String, Int)] = [
         ("folder",    "Library",  0),
-        ("waveform",  "Analysis", 1),
         ("qrcode",    "Pairing",  2),
         ("cloud",     "Account",  3),
         ("gearshape", "Settings", 4),
