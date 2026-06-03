@@ -446,7 +446,11 @@ final class APIRouter {
         guard let list = try? JSONSerialization.jsonObject(with: req.body) as? [String] else {
             return .error("Expected array of strings", status: 400)
         }
-        DataStore.shared.update { $0.global_exclusions = list }
+        // The "All collection" playlist holds the entire library; excluding it
+        // orphans freshly-added tracks (they only live in auto playlists) and
+        // hides them from All Collection. Never allow it into the exclusion set.
+        let cleaned = list.filter { $0.trimmingCharacters(in: .whitespaces).lowercased() != "all collection" }
+        DataStore.shared.update { $0.global_exclusions = cleaned }
         return .json(["status": "ok"])
     }
 
