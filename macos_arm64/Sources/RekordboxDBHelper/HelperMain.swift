@@ -12,6 +12,7 @@ struct HelperTrack: Codable {
     let rel_date: String
     let key: String
     let bpm: Double
+    let duration: Double?
     let bitrate: Int
     let play_count: Int
     let location: String
@@ -374,7 +375,8 @@ func parseMasterDB(dbPath: String, mtime: Double) throws -> HelperLibraryData {
         COALESCE(c.ImagePath, ''),
         COALESCE(c.Commnt, ''),
         COALESCE(c.FileNameL, ''),
-        COALESCE(c.StockDate, '')
+        COALESCE(c.StockDate, ''),
+        COALESCE(c.Length, 0)
     FROM djmdContent c
     LEFT JOIN djmdArtist a ON c.ArtistID = a.ID
     LEFT JOIN djmdGenre g  ON c.GenreID = g.ID
@@ -412,6 +414,7 @@ func parseMasterDB(dbPath: String, mtime: Double) throws -> HelperLibraryData {
         let key = columnText(tracksStmt, 6).isEmpty ? "—" : columnText(tracksStmt, 6)
         let bitrate = columnInt(tracksStmt, 8)
         let playCount = columnInt(tracksStmt, 9)
+        let lengthSec = columnDouble(tracksStmt, 17)
 
         trackIndex[id] = tracks.count
         tracks.append(
@@ -424,6 +427,7 @@ func parseMasterDB(dbPath: String, mtime: Double) throws -> HelperLibraryData {
                 rel_date: relDate,
                 key: key,
                 bpm: bpm,
+                duration: lengthSec > 0 ? lengthSec : nil,
                 bitrate: bitrate,
                 play_count: playCount,
                 location: columnText(tracksStmt, 10),

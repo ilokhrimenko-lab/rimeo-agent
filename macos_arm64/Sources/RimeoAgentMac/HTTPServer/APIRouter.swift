@@ -906,7 +906,7 @@ final class APIRouter {
     // MARK: - Helpers
 
     private func encodableTrack(_ t: Track) -> [String: Any] {
-        [
+        var dict: [String: Any] = [
             "id": t.id, "artist": t.artist, "title": t.title,
             "genre": t.genre, "label": t.label, "rel_date": t.rel_date,
             "key": t.key, "bpm": t.bpm, "bitrate": t.bitrate,
@@ -914,6 +914,8 @@ final class APIRouter {
             "timestamp": t.timestamp, "date_str": t.date_str,
             "playlists": t.playlists, "playlist_indices": t.playlist_indices,
         ]
+        if let d = t.duration { dict["duration"] = d }
+        return dict
     }
 
     private func decodeCompoundToken(_ token: String) -> (url: String, token: String)? {

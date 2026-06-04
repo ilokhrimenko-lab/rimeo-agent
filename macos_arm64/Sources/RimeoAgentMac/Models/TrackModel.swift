@@ -9,6 +9,7 @@ struct Track: Codable, Identifiable, Equatable {
     let rel_date:         String
     let key:              String
     let bpm:              Double
+    var duration:         Double?   // track length in seconds (Rekordbox TotalTime)
     let bitrate:          Int
     let play_count:       Int
     let location:         String

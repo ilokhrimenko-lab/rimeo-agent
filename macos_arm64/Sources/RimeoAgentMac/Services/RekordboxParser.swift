@@ -103,6 +103,7 @@ final class RekordboxParser: NSObject {
                 }
 
                 let bpm    = Double(el.attribute(forName: "AverageBpm")?.stringValue ?? "0") ?? 0
+                let dur    = Double(el.attribute(forName: "TotalTime")?.stringValue ?? "0") ?? 0
                 let br     = Int(el.attribute(forName: "BitRate")?.stringValue ?? "0") ?? 0
                 let pc     = Int(el.attribute(forName: "PlayCount")?.stringValue ?? "0") ?? 0
                 let rawLoc = el.attribute(forName: "Location")?.stringValue ?? ""
@@ -116,6 +117,7 @@ final class RekordboxParser: NSObject {
                     rel_date:         el.attribute(forName: "Year")?.stringValue ?? "",
                     key:              el.attribute(forName: "Tonality")?.stringValue ?? "—",
                     bpm:              bpm,
+                    duration:         dur > 0 ? dur : nil,
                     bitrate:          br,
                     play_count:       pc,
                     location:         normalizePath(rawLoc),

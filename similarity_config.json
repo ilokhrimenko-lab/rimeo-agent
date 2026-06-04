@@ -1,10 +1,12 @@
 {
   "bpm_tolerance_pct": 1.6,
-  "key_max_steps": 2,
-  "result_limit": 20,
+  "key_max_steps": 1,
+  "duration_tolerance_pct": 10.0,
+  "result_limit": 50,
   "weights": {
     "label": 2.0,
     "genre": 1.0,
-    "artist": 0.5
+    "artist": 0.5,
+    "duration": 1.5
   }
 }
