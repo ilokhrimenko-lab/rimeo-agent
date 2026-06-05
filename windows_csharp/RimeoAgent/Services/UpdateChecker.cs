@@ -89,13 +89,29 @@ public sealed class UpdateChecker
             http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent",
                 $"RimeoAgentWin/{AppConfig.Shared.Version}");
             using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
-            var bytes = http.GetByteArrayAsync(info.DownloadUrl, cts.Token).GetAwaiter().GetResult();
-            File.WriteAllBytes(zipPath, bytes);
-            progress(0.7);
+
+            // Stream the download so the UI can show real progress (0 .. 0.85).
+            using (var resp = http.GetAsync(info.DownloadUrl, HttpCompletionOption.ResponseHeadersRead, cts.Token).GetAwaiter().GetResult())
+            {
+                resp.EnsureSuccessStatusCode();
+                var total = resp.Content.Headers.ContentLength ?? -1L;
+                using var src = resp.Content.ReadAsStreamAsync(cts.Token).GetAwaiter().GetResult();
+                using var fileOut = File.Create(zipPath);
+                var buf = new byte[81920];
+                long received = 0;
+                int read;
+                while ((read = src.Read(buf, 0, buf.Length)) > 0)
+                {
+                    fileOut.Write(buf, 0, read);
+                    received += read;
+                    if (total > 0) progress(Math.Min(0.85, received / (double)total * 0.85));
+                }
+            }
+            progress(0.9);
 
             var extDir = Path.Combine(tmp, "ext");
             ZipFile.ExtractToDirectory(zipPath, extDir);
-            progress(0.9);
+            progress(0.97);
 
             // Find the new executable
             var exeFiles = Directory.GetFiles(extDir, "RimeoAgent.exe", SearchOption.AllDirectories);
@@ -114,13 +130,20 @@ xcopy /E /Y /I ""{newDirEsc}\*"" ""{current}\""
 start """" ""{Path.Combine(current, "RimeoAgent.exe")}""
 ");
             progress(1.0);
+            // Launch the updater hidden — no console window flashes for the user.
             Process.Start(new ProcessStartInfo("cmd.exe", $"/c \"{script}\"")
             {
-                UseShellExecute = true, CreateNoWindow = false
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
             });
             Environment.Exit(0);
         }
-        finally { try { Directory.Delete(tmp, true); } catch { } }
+        catch
+        {
+            try { Directory.Delete(tmp, true); } catch { }
+            throw;
+        }
     }
 
     private bool IsDue

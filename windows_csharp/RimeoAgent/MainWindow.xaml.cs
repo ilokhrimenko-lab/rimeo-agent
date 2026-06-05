@@ -99,7 +99,16 @@ public sealed partial class MainWindow : Window
                 presenter.IsResizable = true;
             }
 
-            AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(60, 40, 1280, 860));
+            // Open at a comfortable size, centred on the work area (first launch).
+            const int targetW = 1280, targetH = 860;
+            var area = Microsoft.UI.Windowing.DisplayArea.GetFromWindowId(
+                AppWindow.Id, Microsoft.UI.Windowing.DisplayAreaFallback.Primary);
+            var work = area.WorkArea;
+            int w = Math.Min(targetW, work.Width  - 40);
+            int h = Math.Min(targetH, work.Height - 40);
+            int x = work.X + (work.Width  - w) / 2;
+            int y = work.Y + (work.Height - h) / 2;
+            AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(x, y, w, h));
             AppWindow.Closing += OnAppWindowClosing;
         }
 
