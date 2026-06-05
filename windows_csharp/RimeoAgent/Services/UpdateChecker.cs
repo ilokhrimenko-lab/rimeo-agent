@@ -34,10 +34,23 @@ public sealed class UpdateChecker
         return QueryLatest();
     }
 
+    // Trailing run of digits: "win-v1.0-build183" -> 183, "183" -> 183, "dev" -> 0.
+    private static int ParseBuild(string? s)
+    {
+        if (string.IsNullOrEmpty(s)) return 0;
+        int i = s.Length;
+        while (i > 0 && char.IsDigit(s[i - 1])) i--;
+        return int.TryParse(s[i..], out var n) ? n : 0;
+    }
+
     private UpdateInfo? QueryLatest()
     {
         var repo = AppConfig.GithubRepo;
-        var url  = $"https://api.github.com/repos/{repo}/releases/latest";
+        // Iterate ALL releases and pick the highest BUILD NUMBER that ships a
+        // Windows asset. GitHub's /releases/latest is ordered by publish date and
+        // is unreliable when mac/win release tags interleave — it once advertised
+        // an OLDER build (lower number) as "latest" and prompted a downgrade.
+        var url = $"https://api.github.com/repos/{repo}/releases?per_page=50";
         try
         {
             using var http = new HttpClient();
@@ -45,35 +58,51 @@ public sealed class UpdateChecker
                 $"RimeoAgentWin/{AppConfig.Shared.Version}");
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             var json = http.GetStringAsync(url, cts.Token).GetAwaiter().GetResult();
-            var obj  = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json);
-            if (obj == null) return null;
-
-            var tag = obj.TryGetValue("tag_name", out var t) ? t.GetString() ?? "" : "";
-            if (string.IsNullOrEmpty(tag) || tag == AppConfig.Shared.ReleaseTag) return null;
+            var releases = JsonSerializer.Deserialize<List<Dictionary<string, JsonElement>>>(json);
+            if (releases == null) return null;
 
             // arm64 build ships its own zip; x64 keeps the historical name.
             var assetName = RuntimeInformation.ProcessArchitecture == Architecture.Arm64
                 ? "RimeoAgent_win-arm64.zip"
                 : "RimeoAgent_win.zip";
-            string dlUrl = "";
-            if (obj.TryGetValue("assets", out var assets))
+
+            int currentBuild = ParseBuild(AppConfig.Shared.BuildNumber);
+            int bestBuild = currentBuild;
+            string bestTag = "", bestUrl = "", bestNotes = "";
+
+            foreach (var rel in releases)
             {
-                foreach (var asset in assets.EnumerateArray())
+                if (rel.TryGetValue("draft", out var d) && d.ValueKind == JsonValueKind.True) continue;
+                if (rel.TryGetValue("prerelease", out var p) && p.ValueKind == JsonValueKind.True) continue;
+                var tag = rel.TryGetValue("tag_name", out var t) ? t.GetString() ?? "" : "";
+                int b = ParseBuild(tag);
+                if (b <= bestBuild) continue;   // only ever offer a strictly newer build
+
+                string dlUrl = "";
+                if (rel.TryGetValue("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
                 {
-                    var name = asset.TryGetProperty("name", out var n) ? n.GetString() : null;
-                    if (name == assetName)
+                    foreach (var asset in assets.EnumerateArray())
                     {
-                        dlUrl = asset.TryGetProperty("browser_download_url", out var u) ? u.GetString() ?? "" : "";
-                        break;
+                        var name = asset.TryGetProperty("name", out var n) ? n.GetString() : null;
+                        if (name == assetName)
+                        {
+                            dlUrl = asset.TryGetProperty("browser_download_url", out var u) ? u.GetString() ?? "" : "";
+                            break;
+                        }
                     }
                 }
-            }
-            if (string.IsNullOrEmpty(dlUrl)) return null;
+                if (string.IsNullOrEmpty(dlUrl)) continue;   // mac releases lack a win asset → skip
 
-            var notes = obj.TryGetValue("body", out var bodyEl) ? bodyEl.GetString() ?? "" : "";
-            if (notes.Length > 400) notes = notes[..400];
-            Log.Info($"Update available: {AppConfig.Shared.ReleaseTag} → {tag}");
-            return new UpdateInfo(tag, dlUrl, notes);
+                bestBuild = b;
+                bestTag = tag;
+                bestUrl = dlUrl;
+                bestNotes = rel.TryGetValue("body", out var bodyEl) ? bodyEl.GetString() ?? "" : "";
+            }
+
+            if (string.IsNullOrEmpty(bestTag) || bestBuild <= currentBuild) return null;
+            if (bestNotes.Length > 400) bestNotes = bestNotes[..400];
+            Log.Info($"Update available: build{currentBuild} → build{bestBuild} ({bestTag})");
+            return new UpdateInfo(bestTag, bestUrl, bestNotes);
         }
         catch { return null; }
     }

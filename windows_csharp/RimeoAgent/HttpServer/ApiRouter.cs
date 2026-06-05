@@ -619,7 +619,7 @@ public sealed class ApiRouter
             os            = System.Runtime.InteropServices.RuntimeInformation.OSDescription,
             agent_version = AppConfig.Shared.DisplayVersion,
             agent_id      = AppConfig.Shared.AgentId,
-            log           = AgentLogger.Shared.LastLines(3000),
+            log           = AgentLogger.Shared.LastLines(800),
         });
     }
 

@@ -679,7 +679,7 @@ final class APIRouter {
             "os":            ProcessInfo.processInfo.operatingSystemVersionString,
             "agent_version": cfg.displayVersion,
             "agent_id":      cfg.agentID,
-            "log":           logger.lastLines(3000),
+            "log":           logger.lastLines(800),
         ])
     }
 
