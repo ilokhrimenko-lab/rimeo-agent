@@ -19,6 +19,7 @@ public sealed class AppConfig
 
     public string BaseDir      { get; }
     public string CacheDir     { get; }
+    public string CloudflaredDir { get; }
     public string DataFile     { get; }
     public string LogFile      { get; }
     public string AnalysisFile { get; }
@@ -40,12 +41,14 @@ public sealed class AppConfig
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         BaseDir      = Path.Combine(appData, "RimeoAgent");
         CacheDir     = Path.Combine(BaseDir, "cache");
+        CloudflaredDir = Path.Combine(BaseDir, "cloudflared");
         DataFile     = Path.Combine(BaseDir, "rimo_data.json");
         LogFile      = Path.Combine(BaseDir, "agent.log");
         AnalysisFile = Path.Combine(BaseDir, "analysis_data.json");
 
         Directory.CreateDirectory(BaseDir);
         Directory.CreateDirectory(CacheDir);
+        Directory.CreateDirectory(CloudflaredDir);
 
         // Persistent agent ID
         var idFile = Path.Combine(BaseDir, "agent_id");

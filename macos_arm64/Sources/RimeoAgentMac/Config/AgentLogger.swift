@@ -4,7 +4,9 @@ final class AgentLogger {
     static let shared = AgentLogger()
 
     private let queue     = DispatchQueue(label: "rimeo.logger", qos: .utility)
-    private var handle:    FileHandle?
+    private let maxLines  = 500
+    private var lines:     [String] = []
+    private let logURL:    URL
     private let formatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd HH:mm:ss"
@@ -12,22 +14,27 @@ final class AgentLogger {
     }()
 
     private init() {
-        let url = AppConfig.shared.logFile
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
+        logURL = AppConfig.shared.logFile
+        // Seed the in-memory ring from the existing file's tail, then the file is
+        // rewritten on every log line so it never exceeds `maxLines` (keeps the
+        // macOS Console from choking on a multi-MB file).
+        if let data = try? Data(contentsOf: logURL),
+           let text = String(data: data, encoding: .utf8) {
+            lines = Array(text.components(separatedBy: "\n").filter { !$0.isEmpty }.suffix(maxLines))
         }
-        handle = FileHandle(forWritingAtPath: url.path)
-        handle?.seekToEndOfFile()
     }
 
     func log(_ level: String, _ msg: String) {
         let ts   = formatter.string(from: Date())
-        let line = "\(ts) [\(level)] \(msg)\n"
+        let line = "\(ts) [\(level)] \(msg)"
         queue.async {
-            print(line, terminator: "")
-            if let data = line.data(using: .utf8) {
-                self.handle?.write(data)
+            print(line)
+            self.lines.append(line)
+            if self.lines.count > self.maxLines {
+                self.lines.removeFirst(self.lines.count - self.maxLines)
             }
+            let text = self.lines.joined(separator: "\n") + "\n"
+            try? text.write(to: self.logURL, atomically: true, encoding: .utf8)
         }
     }
 
@@ -37,10 +44,7 @@ final class AgentLogger {
     func debug(_ msg: String)   { log("DEBUG", msg) }
 
     func lastLines(_ n: Int) -> String {
-        guard let data = try? Data(contentsOf: AppConfig.shared.logFile),
-              let text = String(data: data, encoding: .utf8) else { return "" }
-        let lines = text.components(separatedBy: .newlines)
-        return lines.suffix(n).joined(separator: "\n")
+        queue.sync { lines.suffix(n).joined(separator: "\n") }
     }
 }
 

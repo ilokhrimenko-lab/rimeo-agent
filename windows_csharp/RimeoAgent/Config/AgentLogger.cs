@@ -7,16 +7,17 @@ public sealed class AgentLogger
     private readonly object _lock = new();
     private readonly Queue<string> _buffer = new();
     private const int BufferSize = 500;
-    private StreamWriter? _writer;
 
     private AgentLogger()
     {
+        // Seed the ring from the existing file's tail; the file is then rewritten
+        // (capped to BufferSize) on every line so it never grows unbounded.
         try
         {
-            _writer = new StreamWriter(AppConfig.Shared.LogFile, append: true, System.Text.Encoding.UTF8)
-            {
-                AutoFlush = true
-            };
+            var path = AppConfig.Shared.LogFile;
+            if (File.Exists(path))
+                foreach (var l in File.ReadLines(path).Where(l => l.Length > 0).TakeLast(BufferSize))
+                    _buffer.Enqueue(l);
         }
         catch { }
     }
@@ -33,7 +34,7 @@ public sealed class AgentLogger
         {
             _buffer.Enqueue(line);
             while (_buffer.Count > BufferSize) _buffer.Dequeue();
-            try { _writer?.WriteLine(line); }
+            try { File.WriteAllText(AppConfig.Shared.LogFile, string.Join("\n", _buffer) + "\n"); }
             catch { }
         }
         System.Diagnostics.Debug.WriteLine(line);

@@ -93,13 +93,12 @@ public partial class App : Application
             _server.Start();
         });
 
-        // Ensure ffmpeg, ffprobe, cloudflared are present (bundled or downloaded)
-        SafeStart("component manager", () =>
-            _ = ComponentManager.Shared.EnsureAllAsync(msg => Log.Info($"[components] {msg}")));
-
         SafeStart("cloud relay", () => CloudRelay.Shared.StartIfLinked());
 
-        SafeStart("tunnel", () => TunnelManager.Shared.AutoStartIfAvailable());
+        // Ensure cloudflared/ffmpeg are present, THEN bring up the tunnel and
+        // provision the per-user named tunnel — the server only accepts named
+        // tunnels for audio streaming (quick trycloudflare tunnels are rejected).
+        SafeStart("components + tunnel", () => _ = EnsureComponentsThenTunnel());
 
         SafeStart("update check", () => UpdateChecker.Shared.CheckAsync(info =>
         {
@@ -109,6 +108,13 @@ public partial class App : Application
         SafeStart("system tray", SetupTray);
 
         Log.Info("Background services started");
+    }
+
+    private static async Task EnsureComponentsThenTunnel()
+    {
+        await ComponentManager.Shared.EnsureAllAsync(msg => Log.Info($"[components] {msg}"));
+        TunnelManager.Shared.AutoStartIfAvailable();
+        TunnelProvisioner.Shared.ProvisionIfNeeded();
     }
 
     private static void SafeStart(string name, Action start)
