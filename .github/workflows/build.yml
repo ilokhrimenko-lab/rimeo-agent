@@ -239,6 +239,20 @@ jobs:
           }
           Write-Host "Self-contained WinUI runtime present for ${{ matrix.rid }}"
 
+      - name: Bundle cloudflared
+        shell: pwsh
+        run: |
+          # The server's component manifest (/api/agent/runtime) can 400, leaving the
+          # agent without cloudflared and therefore without a named tunnel (no cloud
+          # audio). Bundle cloudflared next to the exe so it's always available;
+          # TunnelManager.FindCloudflared() looks here first. The amd64 build also
+          # runs on Windows-on-ARM under emulation, so it covers both RIDs.
+          $url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+          Invoke-WebRequest $url -OutFile "dist\RimeoAgent\cloudflared.exe" -UseBasicParsing
+          $sz = (Get-Item "dist\RimeoAgent\cloudflared.exe").Length
+          Write-Host "Bundled cloudflared.exe ($sz bytes)"
+          if ($sz -lt 1000000) { Write-Error "cloudflared.exe looks too small ($sz bytes)"; exit 1 }
+
       - name: Copy build_info
         shell: pwsh
         run: Copy-Item build_info.py dist\RimeoAgent\build_info.py
