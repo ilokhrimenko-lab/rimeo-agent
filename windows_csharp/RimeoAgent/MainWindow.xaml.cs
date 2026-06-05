@@ -15,6 +15,7 @@ public sealed partial class MainWindow : Window
     private readonly Frame _contentFrame;
     private bool _defaultPageRequested;
     private bool _navigatingProgrammatically;
+    private bool _didInitialSetup;
 
     /// <summary>HWND of the main window — used by pages to host file pickers.</summary>
     internal static IntPtr Hwnd { get; private set; }
@@ -41,7 +42,7 @@ public sealed partial class MainWindow : Window
         _navView.MenuItems.Add(CreateNavItem("Pairing", "Pairing"));
         _navView.MenuItems.Add(CreateNavItem("Account", "Account"));
         _navView.MenuItems.Add(CreateNavItem("Settings", "Logs"));
-        _navView.FooterMenuItems.Add(CreateNavItem("Quit", "Quit"));
+        _navView.IsSettingsVisible = false;   // hide the built-in gear (we have our own Settings)
         _navView.SelectionChanged += NavView_SelectionChanged;
         _navView.RequestedTheme = ElementTheme.Dark;
         _navView.Background = UI.Bg;
@@ -61,9 +62,6 @@ public sealed partial class MainWindow : Window
             case "Pairing":  NavigateSafely(typeof(PairingPage), "Pairing");   break;
             case "Account":  NavigateSafely(typeof(AccountPage), "Account");   break;
             case "Logs":     NavigateSafely(typeof(LogsPage), "Logs");         break;
-            case "Quit":
-                ((App)Application.Current).TrayQuit_Click(sender, new RoutedEventArgs());
-                break;
         }
     }
 
@@ -86,17 +84,25 @@ public sealed partial class MainWindow : Window
 
     public void ShowAndFocus()
     {
-        Title = $"Rimeo Agent — {AppConfig.Shared.DisplayVersion}";
-        AppWindow.SetIcon("Assets/rimeo.ico");
+        AppWindow.Show();  // restore if the window was hidden to the tray
 
-        if (AppWindow.Presenter is OverlappedPresenter presenter)
+        if (!_didInitialSetup)
         {
-            presenter.IsMinimizable = true;
-            presenter.IsMaximizable = true;
-            presenter.IsResizable = true;
+            _didInitialSetup = true;
+            Title = $"Rimeo Agent — {AppConfig.Shared.DisplayVersion}";
+            AppWindow.SetIcon("Assets/rimeo.ico");
+
+            if (AppWindow.Presenter is OverlappedPresenter presenter)
+            {
+                presenter.IsMinimizable = true;
+                presenter.IsMaximizable = true;
+                presenter.IsResizable = true;
+            }
+
+            AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(60, 40, 1280, 860));
+            AppWindow.Closing += OnAppWindowClosing;
         }
 
-        AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(80, 80, 900, 680));
         Activate();
 
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
@@ -104,6 +110,14 @@ public sealed partial class MainWindow : Window
         Log.Info($"Main window HWND: 0x{hwnd.ToInt64():X}");
         if (hwnd != IntPtr.Zero)
             SetForegroundWindow(hwnd);
+    }
+
+    // Closing the window hides it to the system tray instead of quitting — the agent
+    // keeps serving in the background. Real quit is via the tray context menu.
+    private void OnAppWindowClosing(Microsoft.UI.Windowing.AppWindow sender, Microsoft.UI.Windowing.AppWindowClosingEventArgs args)
+    {
+        args.Cancel = true;
+        AppWindow.Hide();
     }
 
     private static NavigationViewItem CreateNavItem(string content, string tag) =>

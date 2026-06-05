@@ -1,4 +1,7 @@
+using H.NotifyIcon;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media.Imaging;
 using RimeoAgent.Config;
 using RimeoAgent.HttpServer;
 using RimeoAgent.Services;
@@ -13,6 +16,7 @@ public partial class App : Application
     private AgentHttpServer? _server;
     private Mutex?           _singleInstanceMutex;
     private bool            _backgroundStarted;
+    private TaskbarIcon?    _trayIcon;
 
     public App()
     {
@@ -102,6 +106,8 @@ public partial class App : Application
             if (info != null) Log.Info($"Update available: {info.Version}");
         }));
 
+        SafeStart("system tray", SetupTray);
+
         Log.Info("Background services started");
     }
 
@@ -118,6 +124,29 @@ public partial class App : Application
         _window.NavigateToDefaultPage();
     }
 
+    // System-tray icon: the agent keeps running when the window is closed; the tray
+    // icon brings it back (left-click) or quits it (right-click → Quit).
+    private void SetupTray()
+    {
+        if (_trayIcon != null) return;
+
+        var open = new MenuFlyoutItem { Text = "Open Rimeo Agent", Command = new RelayCommand(ShowWindow) };
+        var quit = new MenuFlyoutItem { Text = "Quit",            Command = new RelayCommand(Quit) };
+        var menu = new MenuFlyout();
+        menu.Items.Add(open);
+        menu.Items.Add(quit);
+
+        _trayIcon = new TaskbarIcon
+        {
+            ToolTipText      = "Rimeo Agent",
+            IconSource       = new BitmapImage(new Uri("ms-appx:///Assets/rimeo.ico")),
+            ContextFlyout    = menu,
+            LeftClickCommand = new RelayCommand(ShowWindow),
+        };
+        _trayIcon.ForceCreate();
+        Log.Info("System tray icon created");
+    }
+
     internal void TrayOpen_Click(object sender, RoutedEventArgs e) => ShowWindow();
 
     internal void TrayQuit_Click(object sender, RoutedEventArgs e) => Quit();
@@ -125,6 +154,7 @@ public partial class App : Application
     private void Quit()
     {
         Log.Info("Rimeo Agent shutting down");
+        _trayIcon?.Dispose();
         _server?.Stop();
         TunnelManager.Shared.Stop();
         CloudRelay.Shared.Stop();
@@ -132,4 +162,15 @@ public partial class App : Application
         _singleInstanceMutex?.Dispose();
         Environment.Exit(0);
     }
+}
+
+// Minimal ICommand so tray-menu items (which H.NotifyIcon invokes as Commands, not
+// Click handlers) can run plain actions.
+internal sealed class RelayCommand : System.Windows.Input.ICommand
+{
+    private readonly Action _execute;
+    public RelayCommand(Action execute) => _execute = execute;
+    public event EventHandler? CanExecuteChanged;
+    public bool CanExecute(object? parameter) => true;
+    public void Execute(object? parameter) => _execute();
 }
