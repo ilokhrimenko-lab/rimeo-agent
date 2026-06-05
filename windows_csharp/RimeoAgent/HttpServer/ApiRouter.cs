@@ -20,6 +20,7 @@ public sealed class ApiRouter
                 case ("GET",  "/artwork"):                 await Artwork(req, resp); break;
                 case ("GET",  "/reveal"):                  await Reveal(req, resp); break;
                 case ("GET",  "/api/data"):                await GetData(req, resp); break;
+                case ("GET",  "/api/logs"):                await GetLogs(req, resp); break;
                 case ("GET",  "/api/pairing_info"):        await PairingInfo(req, resp); break;
                 case ("GET",  "/api/check_pairing"):       await CheckPairing(req, resp); break;
                 case ("POST", "/api/save_note"):           await SaveNote(req, resp); break;
@@ -604,6 +605,22 @@ public sealed class ApiRouter
     {
         TunnelManager.Shared.Stop();
         await WriteJson(resp, 200, new { status = "stopped" });
+    }
+
+    // ── /api/logs ──────────────────────────────────────────────────────────────
+
+    /// Tail of the agent log + host/OS/version, pulled by the cloud relay when a
+    /// user submits "Report a problem" from iOS/web.
+    private static async Task GetLogs(AgentRequest req, HttpListenerResponse resp)
+    {
+        await WriteJson(resp, 200, new
+        {
+            platform      = "windows",
+            os            = System.Runtime.InteropServices.RuntimeInformation.OSDescription,
+            agent_version = AppConfig.Shared.DisplayVersion,
+            agent_id      = AppConfig.Shared.AgentId,
+            log           = AgentLogger.Shared.LastLines(3000),
+        });
     }
 
     // ── /api/report_bug ──────────────────────────────────────────────────────
