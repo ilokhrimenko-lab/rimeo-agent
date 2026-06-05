@@ -93,7 +93,7 @@ internal static class UI
     {
         Text = text.ToUpperInvariant(),
         FontSize = 10,
-        FontWeight = FontWeights.Heavy,
+        FontWeight = FontWeights.Black,
         Foreground = Dim,
         Margin = new Thickness(0, 4, 0, 0)
     };
