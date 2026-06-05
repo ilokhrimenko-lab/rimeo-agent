@@ -11,12 +11,13 @@
     <UseWinUI>true</UseWinUI>
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <!-- Default RID for plain `dotnet build`; overridden by `-r win-arm64` on the CLI/CI. -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     <SelfContained>true</SelfContained>
     <UseRidGraph>true</UseRidGraph>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Platforms>x64</Platforms>
+    <Platforms>x64;ARM64</Platforms>
     <!-- WinUI UI thread is single-threaded; workstation GC is more stable than server GC -->
     <ServerGarbageCollection>false</ServerGarbageCollection>
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
@@ -27,8 +28,13 @@
     <PackageReference Include="H.NotifyIcon.WinUI" Version="2.1.0" />
     <PackageReference Include="NAudio" Version="2.2.1" />
     <PackageReference Include="MathNet.Numerics" Version="5.0.0" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.0" />
-    <PackageReference Include="SQLitePCLRaw.bundle_sqlcipher" Version="1.1.14" />
+    <!-- .Core (not the full Microsoft.Data.Sqlite) so it does NOT pull bundle_e_sqlite3:
+         rekordbox master.db needs the sqlcipher provider, and two registered providers
+         leave the wrong one active (PRAGMA key fails / native AV in the parser). -->
+    <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="8.0.0" />
+    <!-- 2.1.10 ships native win-arm64 sqlcipher and aligns with Microsoft.Data.Sqlite 8.x
+         (the old 1.1.14 had no arm64 native lib and conflicted with the 2.x graph). -->
+    <PackageReference Include="SQLitePCLRaw.bundle_sqlcipher" Version="2.1.10" />
   </ItemGroup>
 
   <ItemGroup>

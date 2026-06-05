@@ -1,4 +1,5 @@
 using System.Net.Http;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using RimeoAgent.Config;
@@ -124,7 +125,11 @@ public sealed class ComponentManager
         using var http = new HttpClient();
         http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent",
             $"RimeoAgentWin/{AppConfig.Shared.Version}");
-        var url  = $"{AppConfig.RimeoAppUrl}/api/agent/runtime?platform=win-x64";
+        // Serve native components per CPU arch; on Windows-on-ARM x64 binaries still
+        // run under emulation, so win-x64 is a safe fallback if arm64 isn't published.
+        var platform = RuntimeInformation.ProcessArchitecture == Architecture.Arm64
+            ? "win-arm64" : "win-x64";
+        var url  = $"{AppConfig.RimeoAppUrl}/api/agent/runtime?platform={platform}";
         var json = await http.GetStringAsync(url);
         return JsonSerializer.Deserialize<RuntimeManifest>(json,
             new JsonSerializerOptions { PropertyNameCaseInsensitive = true })

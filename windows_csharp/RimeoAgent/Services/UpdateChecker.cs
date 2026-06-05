@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO.Compression;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using RimeoAgent.Config;
 
@@ -36,7 +37,10 @@ public sealed class UpdateChecker
             var tag = obj.TryGetValue("tag_name", out var t) ? t.GetString() ?? "" : "";
             if (string.IsNullOrEmpty(tag) || tag == AppConfig.Shared.ReleaseTag) return null;
 
-            const string assetName = "RimeoAgent_win.zip";
+            // arm64 build ships its own zip; x64 keeps the historical name.
+            var assetName = RuntimeInformation.ProcessArchitecture == Architecture.Arm64
+                ? "RimeoAgent_win-arm64.zip"
+                : "RimeoAgent_win.zip";
             string dlUrl = "";
             if (obj.TryGetValue("assets", out var assets))
             {

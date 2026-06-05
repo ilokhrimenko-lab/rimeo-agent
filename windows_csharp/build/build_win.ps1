@@ -1,5 +1,7 @@
 param(
-    [string]$BuildNumber = "dev"
+    [string]$BuildNumber = "dev",
+    [ValidateSet("win-x64", "win-arm64")]
+    [string]$Rid = "win-x64"
 )
 
 Set-StrictMode -Version Latest
@@ -8,11 +10,18 @@ $ErrorActionPreference = "Stop"
 $Root    = Split-Path $PSScriptRoot -Parent
 $Project = Join-Path $Root "RimeoAgent\RimeoAgent.csproj"
 $Dist    = Join-Path $Root "dist"
-$ZipName = "RimeoAgent_win.zip"
-$InstallerName = "RimeoAgentSetup_win.exe"
+# x64 keeps the historical artifact names; arm64 gets an explicit suffix.
+if ($Rid -eq "win-arm64") {
+    $ZipName       = "RimeoAgent_win-arm64.zip"
+    $InstallerName = "RimeoAgentSetup_win-arm64.exe"
+} else {
+    $ZipName       = "RimeoAgent_win.zip"
+    $InstallerName = "RimeoAgentSetup_win.exe"
+}
 
 Write-Host "=== Rimeo Agent Windows Build ===" -ForegroundColor Cyan
 Write-Host "Build number: $BuildNumber"
+Write-Host "Runtime:      $Rid"
 Write-Host "Project: $Project"
 
 # Update build_info.py
@@ -34,7 +43,7 @@ New-Item -ItemType Directory -Path $Dist | Out-Null
 Write-Host "Running dotnet publish..." -ForegroundColor Cyan
 dotnet publish $Project `
     -c Release `
-    -r win-x64 `
+    -r $Rid `
     --self-contained `
     -p:PublishSingleFile=false `
     -o (Join-Path $Dist "RimeoAgent")

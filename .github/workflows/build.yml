@@ -117,9 +117,21 @@ jobs:
           path: dist/RimeoAgent_mac.zip
 
   build-windows:
-    name: Windows (x86_64)
+    name: Windows (${{ matrix.arch }})
     runs-on: windows-2022
     if: "!startsWith(github.ref_name, 'mac-')"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: win-x64
+            arch: x64
+            zip: RimeoAgent_win.zip
+            setup: RimeoAgentSetup_win.exe
+          - rid: win-arm64
+            arch: arm64
+            zip: RimeoAgent_win-arm64.zip
+            setup: RimeoAgentSetup_win-arm64.exe
     steps:
       - uses: actions/checkout@v4
 
@@ -155,7 +167,7 @@ jobs:
         working-directory: windows_csharp
         run: |
           dotnet restore RimeoAgent/RimeoAgent.csproj `
-            -r win-x64
+            -r ${{ matrix.rid }}
 
       - name: Publish
         shell: pwsh
@@ -163,7 +175,7 @@ jobs:
         run: |
           dotnet publish RimeoAgent/RimeoAgent.csproj `
             -c Release `
-            -r win-x64 `
+            -r ${{ matrix.rid }} `
             --no-restore `
             --self-contained true `
             -o ..\dist\RimeoAgent
@@ -179,6 +191,22 @@ jobs:
               Get-Content $_.FullName -ErrorAction SilentlyContinue
             }
 
+      - name: Verify self-contained WinUI native DLLs
+        shell: pwsh
+        run: |
+          $dist = "dist\RimeoAgent"
+          $required = @(
+            "Microsoft.ui.xaml.dll",
+            "Microsoft.WindowsAppRuntime.Bootstrap.dll",
+            "Microsoft.WindowsAppRuntime.dll"
+          )
+          $missing = $required | Where-Object { -not (Test-Path (Join-Path $dist $_)) }
+          if ($missing) {
+            Write-Error "Self-contained WinUI runtime DLLs missing (WindowsAppSDKSelfContained did not take effect): $($missing -join ', ')"
+            exit 1
+          }
+          Write-Host "Self-contained WinUI runtime present for ${{ matrix.rid }}"
+
       - name: Copy build_info
         shell: pwsh
         run: Copy-Item build_info.py dist\RimeoAgent\build_info.py
@@ -186,7 +214,7 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          Compress-Archive -Path dist\RimeoAgent\* -DestinationPath dist\RimeoAgent_win.zip -Force
+          Compress-Archive -Path dist\RimeoAgent\* -DestinationPath "dist\${{ matrix.zip }}" -Force
 
       - name: Install NSIS
         shell: pwsh
@@ -197,15 +225,15 @@ jobs:
         run: |
           makensis `
             "/DSOURCE_DIR=$PWD\dist\RimeoAgent" `
-            "/DOUT_FILE=$PWD\dist\RimeoAgentSetup_win.exe" `
+            "/DOUT_FILE=$PWD\dist\${{ matrix.setup }}" `
             windows_csharp\build\RimeoAgentInstaller.nsi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: windows
+          name: windows-${{ matrix.arch }}
           path: |
-            dist\RimeoAgentSetup_win.exe
-            dist\RimeoAgent_win.zip
+            dist\${{ matrix.setup }}
+            dist\${{ matrix.zip }}
 
   release:
     name: Attach to Release
@@ -237,8 +265,10 @@ jobs:
           name: ${{ env.RELEASE_NAME }}
           files: |
             artifacts/mac/RimeoAgent_mac.zip
-            artifacts/windows/RimeoAgentSetup_win.exe
-            artifacts/windows/RimeoAgent_win.zip
+            artifacts/windows-x64/RimeoAgentSetup_win.exe
+            artifacts/windows-x64/RimeoAgent_win.zip
+            artifacts/windows-arm64/RimeoAgentSetup_win-arm64.exe
+            artifacts/windows-arm64/RimeoAgent_win-arm64.zip
 
       - name: Upload to release (macOS only)
         if: env.MAC_ONLY == 'true'
@@ -254,5 +284,7 @@ jobs:
         with:
           name: ${{ env.RELEASE_NAME }}
           files: |
-            artifacts/windows/RimeoAgentSetup_win.exe
-            artifacts/windows/RimeoAgent_win.zip
+            artifacts/windows-x64/RimeoAgentSetup_win.exe
+            artifacts/windows-x64/RimeoAgent_win.zip
+            artifacts/windows-arm64/RimeoAgentSetup_win-arm64.exe
+            artifacts/windows-arm64/RimeoAgent_win-arm64.zip
