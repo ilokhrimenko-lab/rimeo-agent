@@ -48,7 +48,7 @@ final class APIRouter {
     // All other routes are either local-network only or are authenticated by
     // their own pairing/account flow.
     private static let jwtProtectedPaths: Set<String> = [
-        "/stream", "/waveform", "/artwork", "/api/data"
+        "/stream", "/waveform", "/artwork", "/api/data", "/api/logs"
     ]
 
     func route(_ req: HTTPRequest) -> HTTPResponse {
@@ -67,6 +67,9 @@ final class APIRouter {
 
         // Library
         case ("GET", "/api/data"):       return getLibraryData(req)
+
+        // Diagnostic logs (pulled by iOS/web "Report a problem" via the cloud relay)
+        case ("GET", "/api/logs"):       return getLogs(req)
 
         // Pairing
         case ("GET", "/api/pairing_info"):   return getPairingInfo(req)
@@ -663,6 +666,21 @@ final class APIRouter {
         else { return .error("Encode error", status: 500) }
 
         return .json(["results": resultsJSON])
+    }
+
+    // MARK: - /api/logs
+
+    /// Tail of the agent log + host/OS/version, pulled by the cloud relay when a
+    /// user submits "Report a problem" from iOS/web. JWT-protected like /api/data.
+    private func getLogs(_ req: HTTPRequest) -> HTTPResponse {
+        let cfg = AppConfig.shared
+        return .json([
+            "platform":      "macos",
+            "os":            ProcessInfo.processInfo.operatingSystemVersionString,
+            "agent_version": cfg.displayVersion,
+            "agent_id":      cfg.agentID,
+            "log":           logger.lastLines(3000),
+        ])
     }
 
     // MARK: - /api/status
