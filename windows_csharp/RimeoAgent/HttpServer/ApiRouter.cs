@@ -9,6 +9,52 @@ namespace RimeoAgent.HttpServer;
 
 public sealed class ApiRouter
 {
+    // Endpoints reachable over the public named tunnel that must carry a valid
+    // ES256 token. Mirrors macOS APIRouter.jwtProtectedPaths.
+    private static readonly HashSet<string> JwtProtectedPaths = new()
+    {
+        "/stream", "/waveform", "/artwork", "/api/data", "/api/logs",
+    };
+
+    // Enforce JWT only once migrated onto the named tunnel: while on a quick /
+    // local tunnel (NamedHostname empty) the server does not sign tokens, so
+    // enforcing here would lock the agent out of its own /stream. Returns true
+    // when the request was rejected (a 401 has already been written to resp).
+    private static async Task<bool> JwtGate(AgentRequest req, HttpListenerResponse resp)
+    {
+        var aud = TunnelManager.Shared.NamedHostname;
+        if (string.IsNullOrEmpty(aud)) return false;
+
+        var token = JwtValidator.ExtractToken(req);
+        JwtValidator.Failure? failure;
+        try
+        {
+            failure = JwtValidator.Validate(token, aud);
+        }
+        catch (Exception ex)
+        {
+            // Fail OPEN on an unexpected validator bug — never break audio because
+            // of a crypto/parse exception. Genuinely invalid tokens come back as a
+            // Failure (handled below); only truly unexpected exceptions land here.
+            Log.Warn($"JWT validator exception on {req.Path}: {ex.Message} — allowing request");
+            return false;
+        }
+        if (failure == null) return false;
+
+        var reason = JwtValidator.FailureReason(failure.Value);
+        Log.Warn($"JWT rejected: path={req.Path}, reason={reason}, aud={aud}, token_present={token != null}");
+
+        var bytes = Encoding.UTF8.GetBytes(
+            JsonSerializer.Serialize(new { error = "unauthorized", reason }));
+        resp.StatusCode      = 401;
+        resp.ContentType     = "application/json";
+        resp.Headers["WWW-Authenticate"] = $"Bearer realm=\"rimeo-agent\", error=\"{reason}\"";
+        resp.ContentLength64 = bytes.Length;
+        await resp.OutputStream.WriteAsync(bytes);
+        resp.Close();
+        return true;
+    }
+
     public async Task RouteAsync(AgentRequest req, HttpListenerResponse resp)
     {
         try
@@ -29,6 +75,12 @@ public sealed class ApiRouter
                 resp.Close();
                 return;
             }
+
+            // JWT gate for endpoints reachable over the public named tunnel.
+            // Enforced only once on a named tunnel (NamedHostname non-empty) —
+            // see JwtGate. Returns true (and writes 401) when rejected.
+            if (JwtProtectedPaths.Contains(req.Path) && await JwtGate(req, resp))
+                return;
 
             switch ((req.Method, req.Path))
             {
