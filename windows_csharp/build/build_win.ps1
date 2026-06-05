@@ -53,20 +53,23 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-# WinUI 3 unpackaged: publish -o often drops the app's merged resources.pri, without
-# which ms-appx:///Views/*.xaml fail to load (FileNotFoundException -> UI crash). Copy it.
+# WinUI 3 unpackaged WITHOUT <EnableMsixTooling>: the app's merged PRI is emitted as
+# RimeoAgent.pri (= ProjectName.pri), but the runtime wants resources.pri. Without it
+# ms-appx:///Views/*.xaml fail to load (FileNotFoundException -> UI crash). Copy it over.
 $priTarget = Join-Path $Dist "RimeoAgent\resources.pri"
 if (-not (Test-Path $priTarget)) {
-    $priSrc = Get-ChildItem -Path (Join-Path $Root "RimeoAgent\bin"), (Join-Path $Root "RimeoAgent\obj") `
-        -Recurse -Filter resources.pri -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $cands = Get-ChildItem -Path (Join-Path $Dist "RimeoAgent"), (Join-Path $Root "RimeoAgent\bin"), (Join-Path $Root "RimeoAgent\obj") `
+        -Recurse -Filter *.pri -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notmatch '^Microsoft\.' } | Sort-Object LastWriteTime -Descending
+    $priSrc = $cands | Where-Object { $_.Name -ieq 'RimeoAgent.pri' } | Select-Object -First 1
+    if (-not $priSrc) { $priSrc = $cands | Select-Object -First 1 }
     if ($priSrc) {
         Copy-Item $priSrc.FullName $priTarget -Force
-        Write-Host "Copied resources.pri from $($priSrc.FullName)"
+        Write-Host "Copied $($priSrc.FullName) -> resources.pri"
     }
 }
 if (-not (Test-Path $priTarget)) {
-    Write-Host "ERROR: resources.pri not found — XAML pages will fail to load" -ForegroundColor Red
+    Write-Host "ERROR: app resources.pri / RimeoAgent.pri not found — XAML pages will fail to load" -ForegroundColor Red
     exit 1
 }
 
