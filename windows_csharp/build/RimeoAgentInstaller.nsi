@@ -34,6 +34,15 @@ InstallDirRegKey HKCU "Software\RimeoAgent" "InstallDir"
 !insertmacro MUI_LANGUAGE "English"
 
 Section "Install"
+  ; Stop a running agent (and its cloudflared child) before overwriting files.
+  ; A live agent holds write-locks on RimeoAgent.exe / *.dll / cloudflared.exe,
+  ; which made NSIS abort with "Error opening file for writing" on reinstall.
+  ; /T kills the process tree; the Sleep lets Windows release the file handles.
+  DetailPrint "Stopping any running Rimeo Agent…"
+  nsExec::ExecToLog 'taskkill /F /T /IM RimeoAgent.exe'
+  nsExec::ExecToLog 'taskkill /F /T /IM cloudflared.exe'
+  Sleep 1500
+
   SetOutPath "$INSTDIR"
   File /r "${SOURCE_DIR}\*.*"
 

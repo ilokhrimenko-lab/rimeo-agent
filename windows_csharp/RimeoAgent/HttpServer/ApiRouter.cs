@@ -13,6 +13,23 @@ public sealed class ApiRouter
     {
         try
         {
+            // HEAD probes (cloudflared health checks, the cloud relay, and tunnel
+            // readiness checks all hit /api/status) must NOT run a body-writing
+            // handler: HttpListener throws "Bytes to be written to the stream
+            // exceed the Content-Length bytes size specified" the moment you write
+            // a body to a HEAD response, which spammed agent.log every ~2s and
+            // then cascaded into "operation cannot be performed after the response
+            // has been submitted" from the 500 fallback. A probe only checks the
+            // status code, so answer HEAD with headers-only 200.
+            if (req.Method == "HEAD")
+            {
+                resp.StatusCode      = 200;
+                resp.ContentType     = "application/json";
+                resp.ContentLength64 = 0;
+                resp.Close();
+                return;
+            }
+
             switch ((req.Method, req.Path))
             {
                 case ("GET",  "/stream"):                  await StreamAudio(req, resp); break;
@@ -47,7 +64,12 @@ public sealed class ApiRouter
         catch (Exception ex)
         {
             Log.Error($"Router error {req.Path}: {ex.Message}");
-            await WriteJson(resp, 500, new { error = ex.Message });
+            // The handler may have already started/submitted the response (e.g. a
+            // partial stream write). Writing a 500 on top of that throws "operation
+            // cannot be performed after the response has been submitted" — swallow
+            // it so one failure doesn't produce a second cascaded error line.
+            try { await WriteJson(resp, 500, new { error = ex.Message }); }
+            catch (Exception inner) { Log.Warn($"Could not write 500 for {req.Path}: {inner.Message}"); }
         }
     }
 

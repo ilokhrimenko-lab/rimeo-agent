@@ -112,7 +112,23 @@ public partial class App : Application
 
     private static async Task EnsureComponentsThenTunnel()
     {
-        await ComponentManager.Shared.EnsureAllAsync(msg => Log.Info($"[components] {msg}"));
+        // First-run download: cloudflared/ffmpeg/ffprobe are no longer bundled in
+        // the installer, so they're fetched here on first launch. A transient
+        // network failure must NOT leave the agent permanently tunnel-less (and
+        // AIFF-silent) until the next restart — retry with backoff until all
+        // components are present, then bring the tunnel up.
+        int attempt = 0;
+        while (true)
+        {
+            await ComponentManager.Shared.EnsureAllAsync(msg => Log.Info($"[components] {msg}"));
+            if (ComponentManager.Shared.AllPresent()) break;
+
+            attempt++;
+            int delaySec = Math.Min(300, 15 * attempt); // 15s, 30s, … capped at 5 min
+            Log.Warn($"[components] not all present (attempt {attempt}) — retrying in {delaySec}s");
+            await Task.Delay(TimeSpan.FromSeconds(delaySec));
+        }
+
         TunnelManager.Shared.AutoStartIfAvailable();
         TunnelProvisioner.Shared.ProvisionIfNeeded();
     }
