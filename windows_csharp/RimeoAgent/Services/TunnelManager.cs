@@ -295,8 +295,9 @@ public sealed class TunnelManager
         try
         {
             using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-            using var req  = new HttpRequestMessage(HttpMethod.Head, $"{url}/api/status");
-            using var resp = await http.SendAsync(req);
+            // GET (not HEAD): the agent's own HttpListener can't serve HEAD without
+            // tripping a Content-Length error, and players use GET anyway.
+            using var resp = await http.GetAsync($"{url}/api/status", HttpCompletionOption.ResponseHeadersRead);
             return (int)resp.StatusCode < 400;
         }
         catch { return false; }
