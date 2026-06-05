@@ -1,47 +1,94 @@
+using System.Diagnostics;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media.Imaging;
-using System.Net.Http;
-using System.Text.Json;
 using RimeoAgent.Config;
+using RimeoAgent.Models;
+using RimeoAgent.Services;
 
 namespace RimeoAgent.Views;
 
+// 1:1 mirror of macOS PairingTabView: web-browser steps + iOS-app steps.
 public sealed partial class PairingPage : Page
 {
     public PairingPage()
     {
         InitializeComponent();
-        _ = LoadPairingInfo();
+        Content = Build();
     }
 
-    private async Task LoadPairingInfo()
+    private ScrollViewer Build()
     {
-        try
-        {
-            using var http = new HttpClient();
-            var json = await http.GetStringAsync($"http://127.0.0.1:{AppConfig.Port}/api/pairing_info");
-            var obj  = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json);
-            if (obj == null) return;
+        var (scroll, stack) = UI.Page();
 
-            var code   = obj.TryGetValue("code",   out var c) ? c.GetString() ?? "—" : "—";
-            var qrUrl  = obj.TryGetValue("qr_url", out var q) ? q.GetString() ?? "" : "";
-            var locUrl = obj.TryGetValue("local_url", out var l) ? l.GetString() ?? "" : "";
+        stack.Children.Add(UI.Heading("Pairing"));
 
-            PairingCodeLabel.Text = code;
-            QrUrlLabel.Text       = locUrl;
+        // WEB BROWSER
+        stack.Children.Add(UI.SectionLabel("Web browser"));
+        stack.Children.Add(UI.Card(UI.VStack(10,
+            UI.Body("To listen to your music from any web browser:"),
+            UI.StepsBox(
+                UI.StepRow("1", "Open rimeo.app and log in to your account."),
+                UI.StepRow("2", "Go to Account → click «Generate Link Token»."),
+                UI.StepRow("3", "Enter the token in the Agent's Account tab and press Link.")
+            ),
+            BrowserStatus()
+        )));
 
-            if (!string.IsNullOrEmpty(qrUrl))
-            {
-                var imgBytes = await http.GetByteArrayAsync(qrUrl);
-                using var ms = new MemoryStream(imgBytes);
-                var bmp = new BitmapImage();
-                await bmp.SetSourceAsync(ms.AsRandomAccessStream());
-                QrImage.Source = bmp;
-            }
-        }
-        catch (Exception ex) { Log.Error($"PairingPage load failed: {ex.Message}"); }
+        // iOS APP
+        stack.Children.Add(UI.SectionLabel("iOS app"));
+        stack.Children.Add(UI.Card(UI.VStack(10,
+            UI.Body("To use the Rimeo iOS app on your iPhone:"),
+            UI.StepsBox(
+                UI.StepRow("1", "Open the Rimeo iOS app on your iPhone."),
+                UI.StepRow("2", "Tap «Pair» and scan the QR code shown on rimeo.app."),
+                UI.StepRow("3", "Log in to your account — your library will sync automatically.")
+            ),
+            UI.SecondaryButton("Open rimeo.app", OpenRimeoApp_Click, fg: UI.Acc)
+        )));
+
+        return scroll;
     }
 
-    private void GenCode_Click(object sender, RoutedEventArgs e) => _ = LoadPairingInfo();
+    private Border BrowserStatus()
+    {
+        var linked = AppState.Shared.CloudLinked;
+        var who = !string.IsNullOrEmpty(AppState.Shared.CloudEmail)
+            ? AppState.Shared.CloudEmail
+            : DataStore.Shared.Data.CloudUrl;
+
+        var dot = new Microsoft.UI.Xaml.Shapes.Ellipse
+        {
+            Width = 10, Height = 10,
+            Fill = linked ? UI.Green : UI.Dim,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        var label = new TextBlock
+        {
+            Text = linked ? $"Connected as {who}" : "Not connected — link your agent in the Account tab",
+            FontSize = 12,
+            Foreground = linked ? UI.Green : UI.Dim,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextWrapping = TextWrapping.Wrap
+        };
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, VerticalAlignment = VerticalAlignment.Center };
+        row.Children.Add(dot);
+        row.Children.Add(label);
+
+        return new Border
+        {
+            Background = linked ? new Microsoft.UI.Xaml.Media.SolidColorBrush(UI.Hex("#052e16")) : new Microsoft.UI.Xaml.Media.SolidColorBrush(UI.Hex("#1c1917")),
+            BorderBrush = linked ? new Microsoft.UI.Xaml.Media.SolidColorBrush(UI.Hex("#166534")) : UI.Brd,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(12),
+            Padding = new Thickness(12, 6, 12, 6),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Child = row
+        };
+    }
+
+    private void OpenRimeoApp_Click(object sender, RoutedEventArgs e)
+    {
+        try { Process.Start(new ProcessStartInfo(AppConfig.RimeoAppUrl) { UseShellExecute = true }); }
+        catch (Exception ex) { Log.Error($"Open rimeo.app failed: {ex.Message}"); }
+    }
 }

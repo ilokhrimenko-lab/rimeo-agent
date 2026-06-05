@@ -16,6 +16,9 @@ public sealed partial class MainWindow : Window
     private bool _defaultPageRequested;
     private bool _navigatingProgrammatically;
 
+    /// <summary>HWND of the main window — used by pages to host file pickers.</summary>
+    internal static IntPtr Hwnd { get; private set; }
+
     public MainWindow()
     {
         AppState.Shared.SetDispatcherQueue(Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
@@ -33,13 +36,15 @@ public sealed partial class MainWindow : Window
             OpenPaneLength = 200,
             Content = _contentFrame
         };
+        // Mirror the macOS rail: Library / Pairing / Account / Settings (no Analysis).
         _navView.MenuItems.Add(CreateNavItem("Library", "Library"));
-        _navView.MenuItems.Add(CreateNavItem("Analysis", "Analysis"));
         _navView.MenuItems.Add(CreateNavItem("Pairing", "Pairing"));
         _navView.MenuItems.Add(CreateNavItem("Account", "Account"));
-        _navView.MenuItems.Add(CreateNavItem("Logs", "Logs"));
+        _navView.MenuItems.Add(CreateNavItem("Settings", "Logs"));
         _navView.FooterMenuItems.Add(CreateNavItem("Quit", "Quit"));
         _navView.SelectionChanged += NavView_SelectionChanged;
+        _navView.RequestedTheme = ElementTheme.Dark;
+        _navView.Background = UI.Bg;
 
         Content = _navView;
     }
@@ -53,7 +58,6 @@ public sealed partial class MainWindow : Window
         switch (tag)
         {
             case "Library":  NavigateSafely(typeof(LibraryPage), "Library");   break;
-            case "Analysis": NavigateSafely(typeof(AnalysisPage), "Analysis"); break;
             case "Pairing":  NavigateSafely(typeof(PairingPage), "Pairing");   break;
             case "Account":  NavigateSafely(typeof(AccountPage), "Account");   break;
             case "Logs":     NavigateSafely(typeof(LogsPage), "Logs");         break;
@@ -96,6 +100,7 @@ public sealed partial class MainWindow : Window
         Activate();
 
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        Hwnd = hwnd;
         Log.Info($"Main window HWND: 0x{hwnd.ToInt64():X}");
         if (hwnd != IntPtr.Zero)
             SetForegroundWindow(hwnd);

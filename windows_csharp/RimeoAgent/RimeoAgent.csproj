@@ -6,6 +6,7 @@
     <RootNamespace>RimeoAgent</RootNamespace>
     <AssemblyName>RimeoAgent</AssemblyName>
     <ApplicationIcon>Assets\rimeo.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWinUI>true</UseWinUI>

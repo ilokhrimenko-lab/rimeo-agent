@@ -1,176 +1,127 @@
-using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Controls;
 using RimeoAgent.Config;
-using RimeoAgent.Models;
 using RimeoAgent.Services;
+using Windows.Storage.Pickers;
 
 namespace RimeoAgent.Views;
 
+// 1:1 mirror of macOS LibraryTabView: Rekordbox database status + XML alternative.
 public sealed partial class LibraryPage : Page
 {
-    private List<TrackRow> _allTracks = new();
-    private readonly TextBox _searchBox;
-    private readonly TextBlock _statusLabel;
-    private readonly ListView _trackList;
+    private readonly TextBlock _dbAge      = new() { FontSize = 12, Foreground = UI.Dim, Visibility = Visibility.Collapsed };
+    private readonly TextBlock _statusMsg  = new() { FontSize = 13, Foreground = UI.Dim, Visibility = Visibility.Collapsed, TextWrapping = TextWrapping.Wrap };
+    private readonly StackPanel _xmlCardHost = new() { Orientation = Orientation.Vertical, Spacing = 10 };
 
     public LibraryPage()
     {
         InitializeComponent();
-
-        _searchBox = new TextBox { PlaceholderText = "Search...", Width = 320 };
-        _searchBox.TextChanged += SearchBox_TextChanged;
-
-        _statusLabel = new TextBlock
-        {
-            VerticalAlignment = VerticalAlignment.Center,
-            Foreground = new SolidColorBrush(Microsoft.UI.Colors.Gray),
-            FontSize = 12
-        };
-
-        _trackList = new ListView
-        {
-            SelectionMode = ListViewSelectionMode.Single,
-            IsItemClickEnabled = true
-        };
-
-        Content = BuildLayout();
-        _ = LoadLibrary();
+        Content = Build();
+        RefreshDatabaseAge();
     }
 
-    private async Task LoadLibrary()
+    private ScrollViewer Build()
     {
-        try
-        {
-            Log.Info("LoadLibrary: starting parse");
-            _statusLabel.Text = "Loading...";
-            var lib = await Task.Run(() => RekordboxParser.Shared.Parse());
-            Log.Info($"LoadLibrary: parse complete, {lib.Tracks.Count} tracks");
+        var (scroll, stack) = UI.Page();
 
-            DispatcherQueue.TryEnqueue(() =>
+        stack.Children.Add(UI.Heading("Library"));
+        stack.Children.Add(UI.Subtitle("Reads your Rekordbox library automatically and serves tracks to rimeo.app."));
+
+        stack.Children.Add(UI.SectionLabel("Rekordbox database"));
+
+        var dbExists = AppConfig.Shared.DbExists;
+        var dbInner = UI.VStack(10,
+            UI.StatusRow(dbExists, dbExists ? "Connected" : "Not found"),
+            new TextBlock
             {
-                _allTracks = lib.Tracks.Select(t => new TrackRow(t)).ToList();
-                ApplyFilter(_searchBox.Text);
-                _statusLabel.Text = $"{lib.Tracks.Count} tracks";
+                Text = string.IsNullOrEmpty(AppConfig.Shared.DbPath) ? "—" : AppConfig.Shared.DbPath,
+                FontSize = 11, Foreground = UI.Dim, TextTrimming = TextTrimming.CharacterEllipsis
+            },
+            _dbAge,
+            _statusMsg,
+            UI.PrimaryButton("Reload Library", Reload_Click)
+        );
+        stack.Children.Add(UI.Card(dbInner));
+
+        stack.Children.Add(UI.SectionLabel("Rekordbox XML (alternative)"));
+        BuildXmlCardInner();
+        stack.Children.Add(UI.Card(_xmlCardHost));
+
+        return scroll;
+    }
+
+    private void BuildXmlCardInner()
+    {
+        _xmlCardHost.Children.Clear();
+
+        var xmlPath = AppConfig.Shared.XmlPath;
+        var xmlExists = !string.IsNullOrEmpty(xmlPath) && File.Exists(xmlPath);
+
+        string statusText = xmlExists ? "XML configured" : (string.IsNullOrEmpty(xmlPath) ? "Not configured" : "File not found");
+        var row = UI.StatusRow(xmlExists, statusText, okColor: UI.Green, badColor: UI.Dim);
+        _xmlCardHost.Children.Add(row);
+
+        if (!string.IsNullOrEmpty(xmlPath))
+        {
+            _xmlCardHost.Children.Add(new TextBlock
+            {
+                Text = xmlPath, FontSize = 11, Foreground = UI.Dim, TextTrimming = TextTrimming.CharacterEllipsis
             });
         }
-        catch (Exception ex)
-        {
-            Log.Error($"LoadLibrary failed: {ex}");
-            DispatcherQueue.TryEnqueue(() => _statusLabel.Text = "Failed to load library");
-        }
+
+        _xmlCardHost.Children.Add(UI.PrimaryButton(
+            string.IsNullOrEmpty(xmlPath) ? "Select rekordbox.xml" : "Change XML Path",
+            PickXml_Click));
     }
 
-    private void ApplyFilter(string q)
+    private void RefreshDatabaseAge()
     {
-        var filtered = string.IsNullOrWhiteSpace(q)
-            ? _allTracks
-            : _allTracks.Where(t =>
-                t.Title.Contains(q, StringComparison.OrdinalIgnoreCase) ||
-                t.Artist.Contains(q, StringComparison.OrdinalIgnoreCase) ||
-                t.Genre.Contains(q, StringComparison.OrdinalIgnoreCase)).ToList();
-        _trackList.Items.Clear();
-        foreach (var track in filtered)
-            _trackList.Items.Add(BuildTrackRow(track));
-    }
+        var path = AppConfig.Shared.DbPath;
+        if (string.IsNullOrEmpty(path) || !File.Exists(path)) { _dbAge.Visibility = Visibility.Collapsed; return; }
 
-    private void SearchBox_TextChanged(object sender, TextChangedEventArgs e) =>
-        ApplyFilter(_searchBox.Text);
+        var mdate = File.GetLastWriteTime(path);
+        var age = DateTime.Now - mdate;
+        string ageLabel = age.TotalHours < 1 ? $"{(int)age.TotalMinutes} min ago"
+            : age.TotalDays < 1 ? $"{(int)age.TotalHours} h ago"
+            : $"{(int)age.TotalDays} days ago";
+        _dbAge.Text = $"Last modified: {mdate:dd MMM yyyy, HH:mm}  ·  {ageLabel}";
+        _dbAge.Visibility = Visibility.Visible;
+    }
 
     private void Reload_Click(object sender, RoutedEventArgs e)
     {
+        _statusMsg.Visibility = Visibility.Visible;
+        _statusMsg.Text = "Loading…";
+        _ = Task.Run(() =>
+        {
+            RekordboxParser.Shared.InvalidateCache();
+            var result = RekordboxParser.Shared.Parse();
+            var source = result.Source ?? (AppConfig.Shared.DbExists ? "db" : "xml");
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                if (result.Tracks.Count > 0)
+                    _statusMsg.Text = $"✓ {result.Tracks.Count} tracks, {result.Playlists.Count} playlists  ({source})";
+                else
+                    _statusMsg.Text = "0 tracks — library source could not be read";
+                RefreshDatabaseAge();
+            });
+        });
+    }
+
+    private async void PickXml_Click(object sender, RoutedEventArgs e)
+    {
+        var picker = new FileOpenPicker();
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, MainWindow.Hwnd);
+        picker.FileTypeFilter.Add(".xml");
+        picker.SuggestedStartLocation = PickerLocationId.DocumentsLibrary;
+
+        var file = await picker.PickSingleFileAsync();
+        if (file == null) return;
+
+        AppConfig.Shared.SetXmlPath(file.Path);
         RekordboxParser.Shared.InvalidateCache();
-        _ = LoadLibrary();
+        BuildXmlCardInner();
+        Reload_Click(sender, e);
     }
-
-    private Grid BuildLayout()
-    {
-        var root = new Grid { Margin = new Thickness(16) };
-        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-
-        var title = new TextBlock
-        {
-            Text = "Library",
-            FontSize = 28,
-            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-            Margin = new Thickness(0, 0, 0, 8)
-        };
-        Grid.SetRow(title, 0);
-        root.Children.Add(title);
-
-        var reloadBtn = new Button { Content = "Reload" };
-        reloadBtn.Click += Reload_Click;
-
-        var toolbar = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            Spacing = 8,
-            Margin = new Thickness(0, 0, 0, 8)
-        };
-        toolbar.Children.Add(_searchBox);
-        toolbar.Children.Add(reloadBtn);
-        toolbar.Children.Add(_statusLabel);
-        Grid.SetRow(toolbar, 1);
-        root.Children.Add(toolbar);
-
-        Grid.SetRow(_trackList, 2);
-        root.Children.Add(_trackList);
-
-        return root;
-    }
-
-    private static Grid BuildTrackRow(TrackRow t)
-    {
-        var grid = new Grid { Padding = new Thickness(4, 2, 4, 2) };
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(200) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(80) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(60) });
-
-        var titleStack = new StackPanel();
-        titleStack.Children.Add(new TextBlock
-        {
-            Text = t.Title,
-            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-            TextTrimming = TextTrimming.CharacterEllipsis
-        });
-        titleStack.Children.Add(new TextBlock
-        {
-            Text = t.Artist,
-            Foreground = new SolidColorBrush(Microsoft.UI.Colors.Gray),
-            FontSize = 12,
-            TextTrimming = TextTrimming.CharacterEllipsis
-        });
-        Grid.SetColumn(titleStack, 0);
-        grid.Children.Add(titleStack);
-
-        Grid.SetColumn(MakeCell(t.Genre), 1); grid.Children.Add(MakeCell(t.Genre));
-        Grid.SetColumn(MakeCell(t.Key, center: true), 2); grid.Children.Add(MakeCell(t.Key, center: true));
-        Grid.SetColumn(MakeCell(t.BpmDisplay, right: true), 3); grid.Children.Add(MakeCell(t.BpmDisplay, right: true));
-
-        return grid;
-    }
-
-    private static TextBlock MakeCell(string text, bool center = false, bool right = false) => new()
-    {
-        Text = text,
-        Foreground = new SolidColorBrush(Microsoft.UI.Colors.Gray),
-        FontSize = 12,
-        TextTrimming = TextTrimming.CharacterEllipsis,
-        VerticalAlignment = VerticalAlignment.Center,
-        HorizontalAlignment = center ? HorizontalAlignment.Center : right ? HorizontalAlignment.Right : HorizontalAlignment.Left
-    };
-}
-
-public class TrackRow(Track t)
-{
-    public string Title      { get; } = t.Title;
-    public string Artist     { get; } = t.Artist;
-    public string Genre      { get; } = t.Genre;
-    public string Key        { get; } = t.Key;
-    public string BpmDisplay { get; } = t.Bpm > 0 ? t.Bpm.ToString("F0") : "—";
-    public string Location   { get; } = t.Location;
-    public string Id         { get; } = t.Id;
 }

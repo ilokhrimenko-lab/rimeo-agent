@@ -17,11 +17,25 @@ public sealed class UpdateChecker
     public void CheckAsync(Action<UpdateInfo?> callback) =>
         Task.Run(() => callback(Check()));
 
+    // Manual "Check for Updates" from the Settings UI — bypasses the 24h throttle.
+    public void ForceCheckAsync(Action<UpdateInfo?> callback) =>
+        Task.Run(() => callback(ForceCheck()));
+
+    public UpdateInfo? ForceCheck()
+    {
+        Stamp();
+        return QueryLatest();
+    }
+
     public UpdateInfo? Check()
     {
         if (!IsDue) return null;
         Stamp();
+        return QueryLatest();
+    }
 
+    private UpdateInfo? QueryLatest()
+    {
         var repo = AppConfig.GithubRepo;
         var url  = $"https://api.github.com/repos/{repo}/releases/latest";
         try
