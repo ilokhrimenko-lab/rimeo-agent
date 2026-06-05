@@ -74,6 +74,7 @@ public sealed partial class MainWindow : Window
         {
             _navigatingProgrammatically = true;
             try { _navView.SelectedItem = libraryItem; }
+            catch (Exception ex) { Log.Error($"Selecting default nav item failed: {ex}"); }
             finally { _navigatingProgrammatically = false; }
         }
         NavigateSafely(typeof(LibraryPage), "Library");

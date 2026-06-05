@@ -53,6 +53,23 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
+# WinUI 3 unpackaged: publish -o often drops the app's merged resources.pri, without
+# which ms-appx:///Views/*.xaml fail to load (FileNotFoundException -> UI crash). Copy it.
+$priTarget = Join-Path $Dist "RimeoAgent\resources.pri"
+if (-not (Test-Path $priTarget)) {
+    $priSrc = Get-ChildItem -Path (Join-Path $Root "RimeoAgent\bin"), (Join-Path $Root "RimeoAgent\obj") `
+        -Recurse -Filter resources.pri -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($priSrc) {
+        Copy-Item $priSrc.FullName $priTarget -Force
+        Write-Host "Copied resources.pri from $($priSrc.FullName)"
+    }
+}
+if (-not (Test-Path $priTarget)) {
+    Write-Host "ERROR: resources.pri not found — XAML pages will fail to load" -ForegroundColor Red
+    exit 1
+}
+
 # Copy build_info.py into output
 if (Test-Path $BuildInfoPath) {
     Copy-Item $BuildInfoPath (Join-Path $Dist "RimeoAgent\build_info.py")

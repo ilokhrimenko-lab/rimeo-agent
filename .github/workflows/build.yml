@@ -180,6 +180,30 @@ jobs:
             --self-contained true `
             -o ..\dist\RimeoAgent
 
+      - name: Ensure resources.pri in publish output
+        shell: pwsh
+        working-directory: windows_csharp
+        run: |
+          # WinUI 3 unpackaged: `dotnet publish -o <dir>` often does NOT copy the app's
+          # merged resources.pri, even though it is generated under bin/. Without it,
+          # ms-appx:///Views/*.xaml cannot be resolved and every XAML page load throws
+          # FileNotFoundException (the whole UI crashes). Copy it in if it's missing.
+          $target = "..\dist\RimeoAgent\resources.pri"
+          if (-not (Test-Path $target)) {
+            Write-Host "resources.pri missing from publish output — searching build intermediates..."
+            $src = Get-ChildItem -Path RimeoAgent\bin, RimeoAgent\obj -Recurse -Filter resources.pri -ErrorAction SilentlyContinue |
+                   Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($src) {
+              Copy-Item $src.FullName $target -Force
+              Write-Host "Copied resources.pri from $($src.FullName)"
+            }
+          }
+          if (-not (Test-Path $target)) {
+            Write-Error "resources.pri not found in publish output OR build intermediates — XAML pages would fail to load (FileNotFoundException). Failing the build."
+            exit 1
+          }
+          Write-Host "resources.pri present ($((Get-Item $target).Length) bytes)"
+
       - name: Dump XAML compiler diagnostics
         if: failure()
         shell: pwsh
