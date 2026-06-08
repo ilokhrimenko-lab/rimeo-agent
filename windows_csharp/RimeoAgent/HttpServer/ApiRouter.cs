@@ -127,6 +127,18 @@ public sealed class ApiRouter
 
     // ── /stream ─────────────────────────────────────────────────────────────
 
+    // Returns the drive/volume root (e.g. "D:\" or "\\server\share\") for a path, or "" when
+    // it can't be determined. Used to tell "drive disconnected" (410) apart from "file deleted" (404).
+    private static string RemovableVolumeRoot(string path)
+    {
+        try
+        {
+            var root = Path.GetPathRoot(Path.GetFullPath(path));
+            return root ?? "";
+        }
+        catch { return ""; }
+    }
+
     private static async Task StreamAudio(AgentRequest req, HttpListenerResponse resp)
     {
         if (!req.QueryParams.TryGetValue("path", out var rawPath) || string.IsNullOrEmpty(rawPath))
@@ -139,7 +151,21 @@ public sealed class ApiRouter
 
         Log.Info($"Stream request: track={trackId}, preload={preload}, path={path}");
 
-        if (!File.Exists(path)) { await WriteJson(resp, 404, new { error = "File not found" }); return; }
+        if (!File.Exists(path))
+        {
+            // Drive unmounted vs file genuinely missing — distinct codes so the web
+            // client can show a specific message instead of blaming the tunnel.
+            var volRoot = RemovableVolumeRoot(path);
+            if (!string.IsNullOrEmpty(volRoot) && !Directory.Exists(volRoot))
+            { await WriteJson(resp, 410, new { error = "Music drive is not connected" }); return; }
+            await WriteJson(resp, 404, new { error = "File not found" }); return;
+        }
+
+        // File present but the OS denies reads (permissions) — 403, not 404.
+        try { using var _probe = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read); }
+        catch (UnauthorizedAccessException)
+        { await WriteJson(resp, 403, new { error = "File access denied" }); return; }
+        catch (IOException) { /* sharing/transient lock — let the normal flow handle it */ }
 
         string finalPath = path;
         if (ext is "aif" or "aiff")

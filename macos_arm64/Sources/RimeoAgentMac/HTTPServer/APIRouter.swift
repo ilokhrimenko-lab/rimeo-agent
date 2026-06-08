@@ -117,6 +117,18 @@ final class APIRouter {
 
     // MARK: - /stream
 
+    /// Returns the `/Volumes/<name>` mount point for an external-volume path, or nil for
+    /// internal-disk paths (where a missing file is a genuine 404, not an unmounted drive).
+    private func removableVolumeRoot(for path: String) -> String? {
+        let prefix = "/Volumes/"
+        guard path.hasPrefix(prefix) else { return nil }
+        let rest = path.dropFirst(prefix.count)
+        if let slash = rest.firstIndex(of: "/") {
+            return prefix + rest[..<slash]
+        }
+        return prefix + rest
+    }
+
     private func streamAudio(_ req: HTTPRequest) -> HTTPResponse {
         guard let filePath = req.queryParams["path"], !filePath.isEmpty else {
             return .error("path required", status: 400)
@@ -139,10 +151,27 @@ final class APIRouter {
         TCCDiagnostics.logPathResult("stream", path: resolvedPath, exists: exists, readable: readable)
 
         guard exists else {
+            // Drive unmounted vs file genuinely missing — distinct causes, distinct codes,
+            // so the web client can show a specific message instead of blaming the tunnel.
+            if let volRoot = removableVolumeRoot(for: resolvedPath),
+               !FileManager.default.fileExists(atPath: volRoot) {
+                logger.warning("Stream request failed: volume not mounted, track=\(trackID), volume=\(volRoot), path=\(resolvedPath)")
+                StreamDiag.record(trackID: trackID, path: filePath, resolvedPath: resolvedPath,
+                                  status: 410, range: rangeHeader, preload: preload, note: "volume_not_mounted")
+                return .error("Music drive is not connected", status: 410)
+            }
             logger.warning("Stream request failed: file not found, track=\(trackID), path=\(resolvedPath)")
             StreamDiag.record(trackID: trackID, path: filePath, resolvedPath: resolvedPath,
                               status: 404, range: rangeHeader, preload: preload, note: "file_not_found")
             return .error("File not found", status: 404)
+        }
+
+        guard readable else {
+            // File is present but the OS denies reads (TCC / permissions) — 403, not 404.
+            logger.warning("Stream request failed: permission denied, track=\(trackID), path=\(resolvedPath)")
+            StreamDiag.record(trackID: trackID, path: filePath, resolvedPath: resolvedPath,
+                              status: 403, range: rangeHeader, preload: preload, note: "permission_denied")
+            return .error("File access denied", status: 403)
         }
 
         var finalPath = resolvedPath
