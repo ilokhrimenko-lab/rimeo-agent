@@ -20,7 +20,7 @@ final class RekordboxParser: NSObject {
 
     private func _parse() -> LibraryData {
         let dbPath = AppConfig.shared.dbPath
-        if !dbPath.isEmpty, FileManager.default.fileExists(atPath: dbPath) {
+        if AppConfig.shared.dbSourceEnabled, !dbPath.isEmpty, FileManager.default.fileExists(atPath: dbPath) {
             let mtime = dbMtime(at: dbPath)
             let cacheKey = "db:\(dbPath)"
             if let cached = cachedData, mtime == cachedMtime, cacheKey == cachedSourceKey {
@@ -46,7 +46,7 @@ final class RekordboxParser: NSObject {
         }
 
         let xmlPath = AppConfig.shared.xmlPath
-        guard !xmlPath.isEmpty, FileManager.default.fileExists(atPath: xmlPath) else {
+        guard AppConfig.shared.xmlSourceEnabled, !xmlPath.isEmpty, FileManager.default.fileExists(atPath: xmlPath) else {
             return LibraryData(tracks: [], playlists: [], xml_date: 0, source: nil)
         }
 

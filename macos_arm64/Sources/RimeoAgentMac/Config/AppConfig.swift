@@ -4,12 +4,25 @@ import Darwin
 final class AppConfig {
     static let shared = AppConfig()
 
+    #if REVIEW
+    let appName = "Rimeo Agent (Review)"
+    #else
     let appName = "Rimeo Desktop Agent"
+    #endif
     let version: String
     let buildNumber: String
     let releaseTag: String
     let displayVersion: String
+    #if REVIEW
+    let port: UInt16 = 8042
+    // Separate cloudflared config dir so the review agent provisions its OWN
+    // named tunnel and runs concurrently with the main agent (shared
+    // ~/.cloudflared would make the two fight over one tunnel).
+    let cloudflaredDir = "\(NSHomeDirectory())/.cloudflared-review"
+    #else
     let port: UInt16 = 8000
+    let cloudflaredDir = "\(NSHomeDirectory())/.cloudflared"
+    #endif
     let rimeoAppURL = "https://rimeo.app"
     let githubRepo  = "ilokhrimenko-lab/rimeo-agent"
 
@@ -22,6 +35,10 @@ final class AppConfig {
     private(set) var agentID:  String
     private(set) var xmlPath:  String = ""
     private(set) var dbPath:   String
+    /// Whether the Rekordbox master.db source is enabled (Library toggle). Default on.
+    private(set) var dbSourceEnabled:  Bool = true
+    /// Whether the exported XML source is enabled (Library toggle). Default on.
+    private(set) var xmlSourceEnabled: Bool = true
 
     private let queue = DispatchQueue(label: "rimeo.config", qos: .utility)
 
@@ -34,12 +51,22 @@ final class AppConfig {
 
         let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        #if REVIEW
+        baseDir      = appSupport.appendingPathComponent("RimeoAgentReview")
+        #else
         baseDir      = appSupport.appendingPathComponent("RimeoAgent")
+        #endif
         cacheDir     = baseDir.appendingPathComponent("cache")
         dataFile     = baseDir.appendingPathComponent("rimo_data.json")
         logFile      = baseDir.appendingPathComponent("agent.log")
         analysisFile = baseDir.appendingPathComponent("analysis_data.json")
+        #if REVIEW
+        // Review build never touches the real Rekordbox master.db — XML-only
+        // (royalty-free demo library via RIMEO_XML_PATH).
+        dbPath       = ""
+        #else
         dbPath       = Self.detectDBPath()
+        #endif
 
         try? FileManager.default.createDirectory(at: baseDir,  withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
@@ -66,7 +93,14 @@ final class AppConfig {
                 if key == "RIMEO_XML_PATH" {
                     xmlPath = value
                 } else if key == "RIMEO_DB_PATH", !value.isEmpty {
+                    // Review build is XML-only and ignores any DB path.
+                    #if !REVIEW
                     dbPath = value
+                    #endif
+                } else if key == "RIMEO_DB_ENABLED", !value.isEmpty {
+                    dbSourceEnabled = (value as NSString).boolValue
+                } else if key == "RIMEO_XML_ENABLED", !value.isEmpty {
+                    xmlSourceEnabled = (value as NSString).boolValue
                 }
             }
         }
@@ -80,6 +114,16 @@ final class AppConfig {
     func setDBPath(_ path: String) {
         queue.sync { dbPath = path }
         updateEnvVar(key: "RIMEO_DB_PATH", value: path)
+    }
+
+    func setDBSourceEnabled(_ on: Bool) {
+        queue.sync { dbSourceEnabled = on }
+        updateEnvVar(key: "RIMEO_DB_ENABLED", value: on ? "1" : "0")
+    }
+
+    func setXMLSourceEnabled(_ on: Bool) {
+        queue.sync { xmlSourceEnabled = on }
+        updateEnvVar(key: "RIMEO_XML_ENABLED", value: on ? "1" : "0")
     }
 
     func localAgentURL() -> String {

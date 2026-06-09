@@ -19,161 +19,22 @@ struct LogsTabView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("Settings")
-                        .font(.system(size: 24, weight: .bold))
-                        .foregroundColor(C.text)
-                    Spacer()
-                    Text(AppConfig.shared.displayVersion)
-                        .font(.system(size: 12))
-                        .foregroundColor(C.dim)
-                }
+            VStack(alignment: .leading, spacing: 26) {
+                ScreenHeader(
+                    title: "Settings",
+                    subtitle: "Manage how the Rimeo agent runs on this Mac.",
+                    trailing: AnyView(versionPill)
+                )
 
-                Spacer().frame(height: 4)
-
-                SectionLabel(text: "AGENT SETTINGS")
-                SurfaceCard {
-                    VStack(alignment: .leading, spacing: 12) {
-                        settingToggleRow(
-                            title: "Open RimeoAgent at system startup",
-                            binding: $launchAtLoginEnabled,
-                            action: applyLaunchAtLogin
-                        )
-                        settingToggleRow(
-                            title: "Always show RimeoAgent icon in Dock",
-                            binding: $showInDockEnabled,
-                            action: applyShowInDock
-                        )
-                        settingToggleRow(
-                            title: "Allow RimeoAgent to keep disk access alive for 24/7 work",
-                            binding: $keepAlive247Enabled,
-                            action: applyKeepAlive
-                        )
-
-                        if !settingsStatus.isEmpty {
-                            Text(settingsStatus)
-                                .font(.system(size: 12))
-                                .foregroundColor(settingsStatus.hasPrefix("✓") ? C.green : C.red)
-                        }
-                    }
-                    .padding(20)
-                }
-
-                SectionLabel(text: "CHECK FOR UPDATES")
-                SurfaceCard {
-                    updateCheckContent
-                        .padding(20)
-                }
-
-                SectionLabel(text: "REPORT A BUG")
-                SurfaceCard {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("The last 200 log lines will be attached automatically.")
-                            .font(.system(size: 12))
-                            .foregroundColor(C.dim)
-
-                        TextEditor(text: $bugDesc)
-                            .font(.system(size: 13))
-                            .foregroundColor(C.text)
-                            .frame(minHeight: 90, maxHeight: 140)
-                            .padding(6)
-                            .background(C.surf)
-                            .overlay(RoundedRectangle(cornerRadius: 16).stroke(C.brd, lineWidth: 1))
-                            .clipShape(RoundedRectangle(cornerRadius: 16))
-
-                        HStack(spacing: 10) {
-                            if isSending {
-                                ProgressView().scaleEffect(0.7)
-                                Text("Sending…")
-                                    .font(.system(size: 13))
-                                    .foregroundColor(C.dim)
-                            } else {
-                                RimeoButton(title: "Send Report", icon: "ladybug", color: C.acc, action: sendBugReport)
-                            }
-                            Spacer()
-                            compactActionButton(title: "Copy Log", icon: "doc.on.doc", action: copyLogs)
-                            compactActionButton(title: "Open Log", icon: "doc.text", action: openLogFile)
-                        }
-                        if !bugStatus.isEmpty {
-                            Text(bugStatus)
-                                .font(.system(size: 13))
-                                .foregroundColor(bugStatus.hasPrefix("✓") ? C.green : C.red)
-                        }
-                    }
-                    .padding(20)
-                }
-
-                SectionLabel(text: "CACHE")
-                SurfaceCard {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("The cache stores converted audio (WAV), waveform data and artwork so tracks load faster on repeat plays.")
-                            .font(.system(size: 12))
-                            .foregroundColor(C.dim)
-
-                        Spacer().frame(height: 4)
-
-                        HStack(alignment: .center, spacing: 16) {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text(String(format: "%.2f GB used", cacheSize))
-                                    .font(.system(size: 22, weight: .bold))
-                                    .foregroundColor(C.text)
-
-                                ProgressView(value: cacheProgress)
-                                    .progressViewStyle(.linear)
-                                    .accentColor(cacheProgress > 0.9 ? C.red : (cacheProgress > 0.7 ? C.amber : C.acc))
-                                    .frame(width: 280)
-
-                                Text("of \(Int(Double(maxCacheGB) ?? 3)) GB max")
-                                    .font(.system(size: 12))
-                                    .foregroundColor(C.dim)
-                            }
-
-                            Spacer()
-
-                            VStack(alignment: .trailing, spacing: 4) {
-                                Text("Max cache (GB)")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(C.dim)
-
-                                HStack(spacing: 8) {
-                                    TextField("3", text: $maxCacheGB)
-                                        .frame(width: 72)
-                                        .textFieldStyle(.roundedBorder)
-                                        .multilineTextAlignment(.center)
-
-                                    RimeoButton(title: "Save", icon: nil, color: C.acc, action: saveMaxCache)
-                                }
-                            }
-                        }
-
-                        HStack(spacing: 12) {
-                            Button(action: clearCache) {
-                                HStack(spacing: 8) {
-                                    Image(systemName: "trash")
-                                    Text("Clear Cache")
-                                        .font(.system(size: 13, weight: .medium))
-                                }
-                                .foregroundColor(C.red)
-                                .padding(.horizontal, 20)
-                                .padding(.vertical, 10)
-                                .background(C.surf)
-                                .cornerRadius(16)
-                                .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color(hex: "#7f1d1d"), lineWidth: 1))
-                            }
-                            .buttonStyle(.plain)
-
-                            if !cacheStatus.isEmpty {
-                                Text(cacheStatus)
-                                    .font(.system(size: 12))
-                                    .foregroundColor(cacheStatus.hasPrefix("✓") ? C.green : C.red)
-                            }
-                        }
-                    }
-                    .padding(20)
-                }
+                agentSettingsSection
+                updateSection
+                reportSection
+                cacheSection
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 34)
+            .padding(.top, 30)
+            .padding(.bottom, 30)
         }
         .background(C.bg)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -183,26 +44,46 @@ struct LogsTabView: View {
         }
     }
 
-    @ViewBuilder
-    private func compactActionButton(title: String, icon: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                Image(systemName: icon)
-                Text(title)
-                    .font(.system(size: 12, weight: .medium))
+    private var versionPill: some View {
+        Text(AppConfig.shared.displayVersion)
+            .font(.system(size: 12, design: .monospaced))
+            .foregroundColor(C.secondary)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 6)
+            .background(C.chip)
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+    }
+
+    // MARK: - Agent settings
+
+    private var agentSettingsSection: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            SectionLabel(text: "AGENT SETTINGS")
+            SurfaceCard {
+                VStack(alignment: .leading, spacing: 0) {
+                    settingRow("Open Rimeo agent at system startup",
+                               $launchAtLoginEnabled, applyLaunchAtLogin)
+                    rowDivider
+                    settingRow("Always show Rimeo agent icon in the Dock",
+                               $showInDockEnabled, applyShowInDock)
+                    rowDivider
+                    settingRow("Keep disk access alive for 24/7 background work",
+                               $keepAlive247Enabled, applyKeepAlive)
+
+                    if !settingsStatus.isEmpty {
+                        Text(settingsStatus)
+                            .font(.system(size: 12))
+                            .foregroundColor(settingsStatus.hasPrefix("✓") ? C.green : C.red)
+                            .padding(.vertical, 10)
+                    }
+                }
+                .padding(.horizontal, 20)
             }
-            .foregroundColor(C.text)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
-            .background(C.surf)
-            .cornerRadius(12)
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(C.brd, lineWidth: 1))
         }
-        .buttonStyle(.plain)
     }
 
     @ViewBuilder
-    private func settingToggleRow(title: String, binding: Binding<Bool>, action: @escaping (Bool) -> Void) -> some View {
+    private func settingRow(_ title: String, _ binding: Binding<Bool>, _ action: @escaping (Bool) -> Void) -> some View {
         Toggle(isOn: Binding(
             get: { binding.wrappedValue },
             set: { newValue in
@@ -211,11 +92,252 @@ struct LogsTabView: View {
             }
         )) {
             Text(title)
-                .font(.system(size: 13))
+                .font(.system(size: 15, weight: .medium))
                 .foregroundColor(C.text)
         }
-        .toggleStyle(.checkbox)
+        .toggleStyle(RimeoCheckboxStyle())
+        .frame(height: 52)
     }
+
+    private var rowDivider: some View {
+        Rectangle().fill(C.cardBrd).frame(height: 1)
+    }
+
+    // MARK: - Software update
+
+    private var updateSection: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            SectionLabel(text: "SOFTWARE UPDATE")
+            SurfaceCard {
+                updateCheckContent
+                    .padding(20)
+            }
+        }
+    }
+
+    private func updateIconBox(_ system: String, tint: Color, bg: Color) -> some View {
+        Image(systemName: system)
+            .font(.system(size: 19))
+            .foregroundColor(tint)
+            .frame(width: 38, height: 38)
+            .background(bg)
+            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+    }
+
+    @ViewBuilder
+    private var updateCheckContent: some View {
+        switch updateState {
+        case .idle:
+            HStack(spacing: 14) {
+                updateIconBox("arrow.triangle.2.circlepath", tint: C.accText, bg: C.accSoft)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Software updates")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(C.text)
+                    Text("Check whether a newer build is available")
+                        .font(.system(size: 13))
+                        .foregroundColor(C.dim)
+                }
+                Spacer()
+                SecondaryButton(title: "Check for Updates", icon: nil, action: runUpdateCheck)
+            }
+
+        case .checking:
+            HStack(spacing: 14) {
+                updateIconBox("arrow.triangle.2.circlepath", tint: C.accText, bg: C.accSoft)
+                ProgressView().scaleEffect(0.7)
+                Text("Checking for updates…")
+                    .font(.system(size: 14))
+                    .foregroundColor(C.secondary)
+                Spacer()
+            }
+
+        case .upToDate:
+            HStack(spacing: 14) {
+                updateIconBox("checkmark", tint: C.green, bg: C.greenSoft)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Rimeo agent is up to date")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(C.text)
+                    Text(AppConfig.shared.displayVersion)
+                        .font(.system(size: 13))
+                        .foregroundColor(C.dim)
+                }
+                Spacer()
+                SecondaryButton(title: "Check Again", icon: nil, action: runUpdateCheck)
+            }
+
+        case .available(let info):
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 14) {
+                    updateIconBox("arrow.down.circle.fill", tint: C.accText, bg: C.accSoft)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Update available: \(info.version)")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(C.text)
+                        if !info.notes.isEmpty {
+                            Text(info.notes)
+                                .font(.system(size: 12))
+                                .foregroundColor(C.dim)
+                                .lineLimit(3)
+                        }
+                    }
+                    Spacer()
+                }
+                HStack(spacing: 10) {
+                    RimeoButton(title: "Update Now", icon: "arrow.down.circle", color: C.acc) {
+                        (NSApp.delegate as? AppDelegate)?.triggerUpdate(info)
+                    }
+                    SecondaryButton(title: "On Next Launch", icon: "clock") {
+                        UpdateChecker.shared.setPending(info)
+                        updateState = .scheduled(info.version)
+                    }
+                }
+            }
+
+        case .scheduled(let version):
+            HStack(spacing: 14) {
+                updateIconBox("clock.fill", tint: C.amber, bg: C.amber.opacity(0.14))
+                Text("Will update to \(version) on next launch")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(C.text)
+                Spacer()
+                SecondaryButton(title: "Cancel", icon: "xmark") {
+                    UpdateChecker.shared.clearPending()
+                    updateState = .idle
+                }
+            }
+        }
+    }
+
+    // MARK: - Report a bug
+
+    private var reportSection: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            SectionLabel(text: "REPORT A BUG")
+            SurfaceCard {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Describe the issue — the last 200 log lines are attached automatically.")
+                        .font(.system(size: 13))
+                        .foregroundColor(C.secondary)
+
+                    TextEditor(text: $bugDesc)
+                        .font(.system(size: 13))
+                        .foregroundColor(C.text)
+                        .hideScrollBackground()
+                        .frame(minHeight: 90, maxHeight: 140)
+                        .padding(8)
+                        .background(C.field)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(C.cardBrd, lineWidth: 1))
+
+                    HStack(spacing: 10) {
+                        if isSending {
+                            ProgressView().scaleEffect(0.7)
+                            Text("Sending…")
+                                .font(.system(size: 13))
+                                .foregroundColor(C.dim)
+                        } else {
+                            RimeoButton(title: "Send Report", icon: "paperplane.fill", color: C.acc, action: sendBugReport)
+                        }
+                        SecondaryButton(title: "Copy Log", icon: "doc.on.doc", action: copyLogs)
+                        SecondaryButton(title: "Open Log", icon: "doc.text", action: openLogFile)
+                        Spacer()
+                    }
+
+                    if !bugStatus.isEmpty {
+                        Text(bugStatus)
+                            .font(.system(size: 13))
+                            .foregroundColor(bugStatus.hasPrefix("✓") ? C.green : C.red)
+                    }
+                }
+                .padding(20)
+            }
+        }
+    }
+
+    // MARK: - Cache
+
+    private var cacheSection: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            SectionLabel(text: "CACHE")
+            SurfaceCard {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Converted audio, waveforms and artwork are stored here so tracks load instantly on repeat plays.")
+                        .font(.system(size: 13))
+                        .foregroundColor(C.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    VStack(alignment: .leading, spacing: 9) {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(String(format: "%.2f GB used", cacheSize))
+                                .font(.system(size: 22, weight: .heavy))
+                                .foregroundColor(C.text)
+                            Spacer()
+                            Text("of \(Int(Double(maxCacheGB) ?? 3)) GB max")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(C.dim)
+                        }
+                        cacheBar
+                    }
+
+                    rowDivider
+
+                    HStack(spacing: 14) {
+                        SecondaryButton(title: "Clear Cache", icon: "trash", action: clearCache, destructive: true)
+
+                        if !cacheStatus.isEmpty {
+                            Text(cacheStatus)
+                                .font(.system(size: 12))
+                                .foregroundColor(cacheStatus.hasPrefix("✓") ? C.green : C.red)
+                        }
+
+                        Spacer()
+
+                        Text("Max cache")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(C.secondary)
+
+                        HStack(spacing: 6) {
+                            TextField("3", text: $maxCacheGB)
+                                .textFieldStyle(.plain)
+                                .multilineTextAlignment(.center)
+                                .font(.system(size: 14, design: .monospaced))
+                                .foregroundColor(C.text)
+                                .frame(width: 40)
+                            Text("GB")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(C.dim)
+                        }
+                        .padding(.horizontal, 12)
+                        .frame(height: 40)
+                        .background(C.field)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(C.brd, lineWidth: 1))
+
+                        RimeoButton(title: "Save", icon: nil, color: C.acc, action: saveMaxCache)
+                    }
+                }
+                .padding(20)
+            }
+        }
+    }
+
+    private var cacheBar: some View {
+        let fill = cacheProgress > 0.9 ? C.red : (cacheProgress > 0.7 ? C.amber : C.acc)
+        return ZStack(alignment: .leading) {
+            Capsule().fill(C.chip).frame(height: 8)
+            GeometryReader { geo in
+                Capsule()
+                    .fill(fill)
+                    .frame(width: max(0, geo.size.width * cacheProgress), height: 8)
+            }
+            .frame(height: 8)
+        }
+        .frame(height: 8)
+    }
+
+    // MARK: - Settings actions
 
     private func reloadSettingsFromStore() {
         launchAtLoginEnabled = AgentSettings.shared.launchAtLoginEnabled
@@ -303,82 +425,6 @@ struct LogsTabView: View {
         cacheStatus = "✓ Max cache set to \(value) GB"
     }
 
-    // MARK: - Update checker
-
-    @ViewBuilder
-    private var updateCheckContent: some View {
-        switch updateState {
-        case .idle:
-            HStack {
-                compactActionButton(title: "Check for Updates", icon: "arrow.triangle.2.circlepath", action: runUpdateCheck)
-                Spacer()
-            }
-
-        case .checking:
-            HStack(spacing: 10) {
-                ProgressView().scaleEffect(0.7)
-                Text("Checking for updates…")
-                    .font(.system(size: 13))
-                    .foregroundColor(C.dim)
-                Spacer()
-            }
-
-        case .upToDate:
-            HStack(spacing: 10) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(C.green)
-                Text("You're up to date")
-                    .font(.system(size: 13))
-                    .foregroundColor(C.text)
-                Spacer()
-                compactActionButton(title: "Check Again", icon: "arrow.triangle.2.circlepath", action: runUpdateCheck)
-            }
-
-        case .available(let info):
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 10) {
-                    Image(systemName: "arrow.down.circle.fill")
-                        .foregroundColor(C.acc)
-                        .font(.system(size: 16))
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Update available: \(info.version)")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(C.text)
-                        if !info.notes.isEmpty {
-                            Text(info.notes)
-                                .font(.system(size: 11))
-                                .foregroundColor(C.dim)
-                                .lineLimit(3)
-                        }
-                    }
-                }
-                HStack(spacing: 10) {
-                    RimeoButton(title: "Update Now", icon: "arrow.down.circle", color: C.acc) {
-                        (NSApp.delegate as? AppDelegate)?.triggerUpdate(info)
-                    }
-                    compactActionButton(title: "On Next Launch", icon: "clock", action: {
-                        UpdateChecker.shared.setPending(info)
-                        updateState = .scheduled(info.version)
-                    })
-                }
-            }
-
-        case .scheduled(let version):
-            HStack(spacing: 10) {
-                Image(systemName: "clock.fill")
-                    .foregroundColor(C.amber)
-                Text("Will update to \(version) on next launch")
-                    .font(.system(size: 13))
-                    .foregroundColor(C.text)
-                Spacer()
-                compactActionButton(title: "Cancel", icon: "xmark", action: {
-                    UpdateChecker.shared.clearPending()
-                    updateState = .idle
-                })
-            }
-        }
-    }
-
     private func runUpdateCheck() {
         updateState = .checking
         UpdateChecker.shared.forceCheckAsync { info in
@@ -440,14 +486,4 @@ private enum UpdateCheckState {
     case upToDate
     case available(UpdateInfo)
     case scheduled(String)
-}
-
-private struct SelectableTextModifier: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(macOS 12, *) {
-            content.textSelection(.enabled)
-        } else {
-            content
-        }
-    }
 }

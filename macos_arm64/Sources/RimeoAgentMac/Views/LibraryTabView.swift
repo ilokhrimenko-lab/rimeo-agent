@@ -5,131 +5,252 @@ import UniformTypeIdentifiers
 struct LibraryTabView: View {
     @State private var statusMsg = ""
     @State private var dbAgeText = ""
-    @State private var dbAgeColor = C.dim
     @State private var xmlPath = AppConfig.shared.xmlPath
     @State private var masterDBErr: String? = nil
 
+    @State private var dbEnabled  = AppConfig.shared.dbSourceEnabled
+    @State private var xmlEnabled = AppConfig.shared.xmlSourceEnabled
+
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Library")
-                    .font(.system(size: 24, weight: .bold))
-                    .foregroundColor(C.text)
+            VStack(alignment: .leading, spacing: 26) {
+                ScreenHeader(title: "Library",
+                             subtitle: "Turn on the sources Rimeo reads your tracks from — you can use both at once.")
 
-                Text("Reads your Rekordbox library automatically and serves tracks to rimeo.app.")
-                    .font(.system(size: 13))
-                    .foregroundColor(C.dim)
+                topTabs
 
-                Spacer().frame(height: 4)
+                dbCard
 
-                SectionLabel(text: "REKORDBOX DATABASE")
+                if let err = masterDBErr { masterDBWarning(err) }
 
-                SurfaceCard {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack(spacing: 8) {
-                            Image(systemName: AppConfig.shared.dbExists ? "checkmark.circle" : "exclamationmark.triangle")
-                                .foregroundColor(AppConfig.shared.dbExists ? C.green : C.red)
-                                .font(.system(size: 18))
-                            Text(AppConfig.shared.dbExists ? "Connected" : "Not found")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundColor(AppConfig.shared.dbExists ? C.green : C.red)
-                        }
-
-                        Text(AppConfig.shared.dbPath)
-                            .font(.system(size: 11))
-                            .foregroundColor(C.dim)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-
-                        if !dbAgeText.isEmpty {
-                            Text(dbAgeText)
-                                .font(.system(size: 12))
-                                .foregroundColor(dbAgeColor)
-                        }
-
-                        if !statusMsg.isEmpty {
-                            Text(statusMsg)
-                                .font(.system(size: 13))
-                                .foregroundColor(C.dim)
-                        }
-
-                        HStack(spacing: 16) {
-                            RimeoButton(title: "Reload Library",
-                                        icon: "arrow.clockwise",
-                                        color: C.acc,
-                                        action: reloadLibrary)
-                        }
-                    }
-                    .padding(20)
-                }
-
-                // Warning when master.db can't be read
-                if let err = masterDBErr {
-                    SurfaceCard {
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack(spacing: 8) {
-                                Image(systemName: "exclamationmark.triangle")
-                                    .foregroundColor(C.amber)
-                                    .font(.system(size: 16))
-                                Text("master.db could not be read")
-                                    .font(.system(size: 13, weight: .semibold))
-                                    .foregroundColor(C.amber)
-                            }
-                            if err.contains("SQLCipher Python module missing") || err.contains("sqlcipher3") || err.contains("pysqlcipher3") {
-                                Text("This Mac build could not open Rekordbox master.db because the SQLCipher helper is missing. As a temporary workaround, export XML from Rekordbox and select it below.")
-                                    .font(.system(size: 12))
-                                    .foregroundColor(C.dim)
-                            } else {
-                                Text(String(err.prefix(200)))
-                                    .font(.system(size: 11))
-                                    .foregroundColor(C.dim)
-                                    .lineLimit(3)
-                            }
-                        }
-                        .padding(16)
-                    }
-                }
-
-                Spacer().frame(height: 4)
-
-                SectionLabel(text: "REKORDBOX XML (ALTERNATIVE)")
-
-                SurfaceCard {
-                    VStack(alignment: .leading, spacing: 10) {
-                        let xmlExists = !xmlPath.isEmpty && FileManager.default.fileExists(atPath: xmlPath)
-                        HStack(spacing: 8) {
-                            Image(systemName: xmlExists ? "checkmark.circle" : (xmlPath.isEmpty ? "minus.circle" : "xmark.circle"))
-                                .foregroundColor(xmlExists ? C.green : C.dim)
-                                .font(.system(size: 18))
-                            Text(xmlExists ? "XML configured" : (xmlPath.isEmpty ? "Not configured" : "File not found"))
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundColor(xmlExists ? C.green : C.dim)
-                        }
-
-                        if !xmlPath.isEmpty {
-                            Text(xmlPath)
-                                .font(.system(size: 11))
-                                .foregroundColor(C.dim)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-
-                        RimeoButton(
-                            title: xmlPath.isEmpty ? "Select rekordbox.xml" : "Change XML Path",
-                            icon: "folder",
-                            color: C.acc,
-                            action: pickXML
-                        )
-                    }
-                    .padding(20)
-                }
+                xmlCard
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 34)
+            .padding(.top, 30)
+            .padding(.bottom, 30)
         }
         .background(C.bg)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { refreshDatabaseAge() }
     }
+
+    // MARK: - Top tabs
+
+    private var topTabs: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .bottom, spacing: 28) {
+                VStack(spacing: 12) {
+                    Text("Rekordbox")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundColor(C.text)
+                    Rectangle().fill(C.acc).frame(height: 2).clipShape(Capsule())
+                }
+                .fixedSize()
+
+                VStack(spacing: 12) {
+                    HStack(spacing: 8) {
+                        Text("Other DJ software")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(C.faint)
+                        Text("SOON")
+                            .font(.system(size: 10, weight: .bold))
+                            .kerning(0.6)
+                            .foregroundColor(C.dim)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(C.chip)
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    }
+                    Rectangle().fill(Color.clear).frame(height: 2)
+                }
+                .fixedSize()
+
+                Spacer()
+            }
+            Rectangle().fill(C.brd).frame(height: 1)
+        }
+    }
+
+    // MARK: - Rekordbox database card
+
+    private var dbCard: some View {
+        let exists = AppConfig.shared.dbExists
+        return SurfaceCard {
+            VStack(alignment: .leading, spacing: 14) {
+                sourceHeader(
+                    icon: "cylinder.split.1x2",
+                    iconTint: C.accText,
+                    iconBg: C.accSoft,
+                    title: "Rekordbox database",
+                    statusDot: dbEnabled ? (exists ? C.green : C.red) : C.dim,
+                    statusText: dbEnabled ? (exists ? "Connected" : "Not found") : "Off",
+                    statusColor: dbEnabled ? (exists ? C.green : C.red) : C.dim,
+                    isOn: $dbEnabled,
+                    onToggle: { v in
+                        AppConfig.shared.setDBSourceEnabled(v)
+                        RekordboxParser.shared.invalidateCache()
+                    }
+                )
+
+                VStack(alignment: .leading, spacing: 14) {
+                    Text(AppConfig.shared.dbPath)
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundColor(C.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    if !dbAgeText.isEmpty {
+                        Text(dbAgeText)
+                            .font(.system(size: 13))
+                            .foregroundColor(C.dim)
+                    }
+
+                    if !statusMsg.isEmpty {
+                        Text(statusMsg)
+                            .font(.system(size: 13))
+                            .foregroundColor(C.secondary)
+                    }
+
+                    RimeoButton(title: "Reload Library",
+                                icon: "arrow.clockwise",
+                                color: C.acc,
+                                action: reloadLibrary)
+                }
+                .opacity(dbEnabled ? 1 : 0.5)
+            }
+            .padding(20)
+        }
+    }
+
+    // MARK: - XML card
+
+    private var xmlCard: some View {
+        let xmlExists = !xmlPath.isEmpty && FileManager.default.fileExists(atPath: xmlPath)
+        let statusText: String
+        let statusColor: Color
+        if !xmlEnabled {
+            statusText = "Off"; statusColor = C.dim
+        } else if xmlExists {
+            statusText = "Configured"; statusColor = C.green
+        } else if xmlPath.isEmpty {
+            statusText = "No file selected"; statusColor = C.dim
+        } else {
+            statusText = "File not found"; statusColor = C.red
+        }
+
+        return SurfaceCard {
+            VStack(alignment: .leading, spacing: 14) {
+                sourceHeader(
+                    icon: "doc.text",
+                    iconTint: C.dim,
+                    iconBg: C.chip,
+                    title: "Exported XML file",
+                    statusDot: statusColor,
+                    statusText: statusText,
+                    statusColor: statusColor,
+                    isOn: $xmlEnabled,
+                    onToggle: { v in
+                        AppConfig.shared.setXMLSourceEnabled(v)
+                        RekordboxParser.shared.invalidateCache()
+                    }
+                )
+
+                VStack(alignment: .leading, spacing: 14) {
+                    if !xmlPath.isEmpty {
+                        Text(xmlPath)
+                            .font(.system(size: 13, design: .monospaced))
+                            .foregroundColor(C.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+
+                    SecondaryButton(
+                        title: xmlPath.isEmpty ? "Select rekordbox.xml" : "Change XML Path",
+                        icon: "folder",
+                        action: pickXML
+                    )
+                }
+                .opacity(xmlEnabled ? 1 : 0.5)
+            }
+            .padding(20)
+        }
+    }
+
+    // MARK: - Source header row
+
+    @ViewBuilder
+    private func sourceHeader(icon: String,
+                              iconTint: Color,
+                              iconBg: Color,
+                              title: String,
+                              statusDot: Color,
+                              statusText: String,
+                              statusColor: Color,
+                              isOn: Binding<Bool>,
+                              onToggle: @escaping (Bool) -> Void) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 18))
+                .foregroundColor(iconTint)
+                .frame(width: 40, height: 40)
+                .background(iconBg)
+                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundColor(C.text)
+                HStack(spacing: 6) {
+                    Circle().fill(statusDot).frame(width: 6, height: 6)
+                    Text(statusText)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(statusColor)
+                }
+            }
+
+            Spacer()
+
+            Toggle("", isOn: Binding(
+                get: { isOn.wrappedValue },
+                set: { newValue in
+                    isOn.wrappedValue = newValue
+                    onToggle(newValue)
+                }
+            ))
+            .labelsHidden()
+            .toggleStyle(RimeoSwitchStyle())
+        }
+    }
+
+    private func masterDBWarning(_ err: String) -> some View {
+        SurfaceCard {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(C.amber)
+                        .font(.system(size: 16))
+                    Text("master.db could not be read")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(C.amber)
+                }
+                if err.contains("SQLCipher Python module missing") || err.contains("sqlcipher3") || err.contains("pysqlcipher3") {
+                    Text("This Mac build could not open Rekordbox master.db because the SQLCipher helper is missing. As a temporary workaround, export XML from Rekordbox and enable it below.")
+                        .font(.system(size: 13))
+                        .foregroundColor(C.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text(String(err.prefix(200)))
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundColor(C.dim)
+                        .lineLimit(3)
+                }
+            }
+            .padding(18)
+        }
+    }
+
+    // MARK: - Actions
 
     private func refreshDatabaseAge() {
         let path = AppConfig.shared.dbPath
@@ -147,15 +268,12 @@ struct LibraryTabView: View {
         let ageLabel: String
         if age < 3600 {
             ageLabel = "\(Int(age / 60)) min ago"
-            dbAgeColor = C.dim
         } else if age < 86400 {
             ageLabel = "\(Int(age / 3600)) h ago"
-            dbAgeColor = C.dim
         } else {
             ageLabel = "\(Int(age / 86400)) days ago"
-            dbAgeColor = C.dim
         }
-        dbAgeText = "Last modified: \(updated)  ·  \(ageLabel)"
+        dbAgeText = "Last modified \(updated)  ·  \(ageLabel)"
     }
 
     private func reloadLibrary() {
@@ -191,6 +309,10 @@ struct LibraryTabView: View {
             AppConfig.shared.setXMLPath(url.path)
             RekordboxParser.shared.invalidateCache()
             xmlPath = url.path
+            if !xmlEnabled {
+                xmlEnabled = true
+                AppConfig.shared.setXMLSourceEnabled(true)
+            }
             reloadLibrary()
         }
     }

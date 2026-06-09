@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "RimeoAgent",
-    platforms: [.macOS(.v11)],
+    platforms: [.macOS(.v12)],
     dependencies: [
         .package(url: "https://github.com/sqlcipher/SQLCipher.swift.git", from: "4.15.0"),
     ],

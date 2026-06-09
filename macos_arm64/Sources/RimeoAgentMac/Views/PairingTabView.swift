@@ -3,77 +3,73 @@ import AppKit
 
 struct PairingTabView: View {
     @EnvironmentObject var appState: AppState
+    @State private var qrString = AppConfig.shared.localAgentURL()
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Pairing")
-                    .font(.system(size: 24, weight: .bold))
-                    .foregroundColor(C.text)
+            VStack(alignment: .leading, spacing: 26) {
+                ScreenHeader(title: "Pairing",
+                             subtitle: "Connect your music to the web player and the Rimeo iOS app.")
 
-                Spacer().frame(height: 4)
+                VStack(alignment: .leading, spacing: 11) {
+                    SectionLabel(text: "WEB BROWSER")
+                    SurfaceCard {
+                        VStack(alignment: .leading, spacing: 16) {
+                            Text("To listen to your music from any web browser")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundColor(C.text)
 
-                SectionLabel(text: "WEB BROWSER")
-                SurfaceCard {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("To listen to your music from any web browser:")
-                            .font(.system(size: 13))
-                            .foregroundColor(C.text)
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            StepRow(number: "1", text: "Open rimeo.app and log in to your account.")
-                            StepRow(number: "2", text: "Go to Account → click «Generate Link Token».")
-                            StepRow(number: "3", text: "Enter the token in the Agent's Account tab and press Link.")
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        .background(C.bg)
-                        .cornerRadius(16)
-
-                        browserStatus
-                    }
-                    .padding(20)
-                }
-
-                Spacer().frame(height: 4)
-
-                SectionLabel(text: "iOS APP")
-                SurfaceCard {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("To use the Rimeo iOS app on your iPhone:")
-                            .font(.system(size: 13))
-                            .foregroundColor(C.text)
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            StepRow(number: "1", text: "Open the Rimeo iOS app on your iPhone.")
-                            StepRow(number: "2", text: "Tap «Pair» and scan the QR code shown on rimeo.app.")
-                            StepRow(number: "3", text: "Log in to your account — your library will sync automatically.")
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        .background(C.bg)
-                        .cornerRadius(16)
-
-                        Button(action: openRimeoApp) {
-                            HStack(spacing: 8) {
-                                Image(systemName: "safari")
-                                Text("Open rimeo.app")
-                                    .font(.system(size: 13, weight: .medium))
+                            VStack(alignment: .leading, spacing: 11) {
+                                StepRow(number: "1", text: "Open rimeo.app and log in to your account.")
+                                StepRow(number: "2", text: "Go to Account, then click Generate Link Token.")
+                                StepRow(number: "3", text: "Enter the token in the Agent's Account tab and press Link.")
                             }
-                            .foregroundColor(C.acc)
-                            .padding(.horizontal, 20)
-                            .padding(.vertical, 10)
-                            .background(C.surf)
-                            .cornerRadius(16)
-                            .overlay(RoundedRectangle(cornerRadius: 16).stroke(C.brd, lineWidth: 1))
+
+                            browserStatus
                         }
-                        .buttonStyle(.plain)
+                        .padding(20)
                     }
-                    .padding(20)
                 }
 
+                VStack(alignment: .leading, spacing: 11) {
+                    SectionLabel(text: "RIMEO iOS APP")
+                    SurfaceCard {
+                        HStack(alignment: .top, spacing: 24) {
+                            VStack(alignment: .leading, spacing: 16) {
+                                Text("To use the Rimeo iOS app on your iPhone")
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .foregroundColor(C.text)
+
+                                VStack(alignment: .leading, spacing: 11) {
+                                    StepRow(number: "1", text: "Open the Rimeo iOS app on your iPhone.")
+                                    StepRow(number: "2", text: "Tap Pair and scan the QR code shown here.")
+                                    StepRow(number: "3", text: "Log in to your account — your library syncs automatically.")
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                            VStack(spacing: 12) {
+                                QRCodeView(string: qrString, size: 132)
+                                    .padding(14)
+                                    .background(Color.white)
+                                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(C.brd, lineWidth: 1))
+
+                                SecondaryButton(title: "Refresh QR", icon: "arrow.clockwise") {
+                                    qrString = AppConfig.shared.localAgentURL()
+                                }
+                                .frame(maxWidth: .infinity)
+                            }
+                            .frame(width: 164)
+                        }
+                        .padding(20)
+                    }
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 34)
+            .padding(.top, 30)
+            .padding(.bottom, 30)
         }
         .background(C.bg)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -82,37 +78,31 @@ struct PairingTabView: View {
     @ViewBuilder
     private var browserStatus: some View {
         if appState.cloudLinked {
-            HStack(spacing: 6) {
-                Image(systemName: "checkmark.circle")
+            HStack(spacing: 9) {
+                Image(systemName: "checkmark.circle.fill")
                     .foregroundColor(C.green)
-                    .font(.system(size: 14))
+                    .font(.system(size: 16))
                 Text("Connected as \(appState.cloudEmail.isEmpty ? DataStore.shared.data.cloud_url : appState.cloudEmail)")
-                    .font(.system(size: 12))
+                    .font(.system(size: 14, weight: .semibold))
                     .foregroundColor(C.green)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(Color(hex: "#052e16"))
-            .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color(hex: "#166534"), lineWidth: 1))
-            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(C.greenSoft)
+            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
         } else {
-            HStack(spacing: 6) {
+            HStack(spacing: 9) {
                 Image(systemName: "link.badge.minus")
                     .foregroundColor(C.dim)
-                    .font(.system(size: 14))
+                    .font(.system(size: 15))
                 Text("Not connected — link your agent in the Account tab")
-                    .font(.system(size: 12))
-                    .foregroundColor(C.dim)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(C.secondary)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(Color(hex: "#1c1917"))
-            .overlay(RoundedRectangle(cornerRadius: 16).stroke(C.brd, lineWidth: 1))
-            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(C.chip)
+            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
         }
-    }
-
-    private func openRimeoApp() {
-        NSWorkspace.shared.open(URL(string: AppConfig.shared.rimeoAppURL)!)
     }
 }

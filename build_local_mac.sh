@@ -11,8 +11,27 @@ APP_VERSION_BASE="${APP_VERSION_BASE:-1.0}"
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MAC_DIR="$ROOT_DIR/macos_arm64"
 DIST_DIR="$ROOT_DIR/dist"
-APP_DIR="$DIST_DIR/RimeoAgent.app"
-ICON_ICNS="$ROOT_DIR/rimeo1024-bigsur.icns"
+
+# REVIEW=1 builds a parallel "Rimeo Agent (Review)" that coexists with the main
+# agent: different bundle id, Application Support dir, port (8042) and icon.
+REVIEW="${REVIEW:-0}"
+if [[ "$REVIEW" == "1" ]]; then
+    APP_NAME="RimeoAgentReview"
+    BUNDLE_ID="app.rimeo.agent.review"
+    DISPLAY_NAME="Rimeo Agent (Review)"
+    ICON_ICNS="$ROOT_DIR/RimeoAgentReview.icns"
+    SWIFT_DEFINES="-Xswiftc -DREVIEW"
+    ZIP_NAME="RimeoAgentReview_mac.zip"
+    echo "==> REVIEW build (bundle=$BUNDLE_ID, port 8042, RimeoAgentReview support dir)"
+else
+    APP_NAME="RimeoAgent"
+    BUNDLE_ID="app.rimeo.agent"
+    DISPLAY_NAME="Rimeo Agent"
+    ICON_ICNS="$ROOT_DIR/rimeo1024-bigsur.icns"
+    SWIFT_DEFINES=""
+    ZIP_NAME="RimeoAgent_mac.zip"
+fi
+APP_DIR="$DIST_DIR/$APP_NAME.app"
 
 pick_codesign_identity() {
     if [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
@@ -65,7 +84,7 @@ echo "    icon: $ICON_ICNS"
 
 echo "==> Building Swift release (Universal: arm64 + x86_64)..."
 cd "$MAC_DIR"
-swift build -c release --arch arm64 --arch x86_64
+swift build -c release --arch arm64 --arch x86_64 $SWIFT_DEFINES
 
 UNIVERSAL="$MAC_DIR/.build/apple/Products/Release/RimeoAgent"
 HELPER="$MAC_DIR/.build/apple/Products/Release/RekordboxDBHelper"
@@ -97,6 +116,9 @@ install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_DIR/Contents
 cp "$MAC_DIR/build/Info.plist" "$APP_DIR/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION_BASE" "$APP_DIR/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $APP_BUNDLE_VERSION" "$APP_DIR/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$APP_DIR/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $DISPLAY_NAME" "$APP_DIR/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleName $DISPLAY_NAME" "$APP_DIR/Contents/Info.plist"
 cp "$ICON_ICNS" "$APP_DIR/Contents/Resources/RimeoAgent.icns"
 cp "$ROOT_DIR/build_info.py" "$APP_DIR/Contents/Resources/build_info.py"
 cp "$ROOT_DIR/similarity_config.json" "$APP_DIR/Contents/Resources/similarity_config.json"
@@ -107,15 +129,15 @@ echo "    tunnel-runtime, ffmpeg, and ffprobe are installed by Component Gate fr
 echo "==> Signing .app bundle..."
 echo "    identity: $CODESIGN_IDENTITY"
 xattr -cr "$APP_DIR"
-codesign --force --deep --sign "$CODESIGN_IDENTITY" --identifier app.rimeo.agent "$APP_DIR"
+codesign --force --deep --sign "$CODESIGN_IDENTITY" --identifier "$BUNDLE_ID" "$APP_DIR"
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 codesign -dv --verbose=4 "$APP_DIR" 2>&1 | sed -n '/^Identifier=/p;/^Signature=/p;/^TeamIdentifier=/p;/^Info.plist=/p;/^Sealed Resources=/p;/^Internal requirements=/p'
 
 echo "==> Packaging..."
-rm -f "$DIST_DIR/RimeoAgent_mac.zip"
+rm -f "$DIST_DIR/$ZIP_NAME"
 cd "$DIST_DIR"
-zip -r RimeoAgent_mac.zip RimeoAgent.app --quiet
+zip -r "$ZIP_NAME" "$APP_NAME.app" --quiet
 
 echo ""
-echo "✓ Done: $DIST_DIR/RimeoAgent_mac.zip"
+echo "✓ Done: $DIST_DIR/$ZIP_NAME"
 echo "  Test: open $APP_DIR"

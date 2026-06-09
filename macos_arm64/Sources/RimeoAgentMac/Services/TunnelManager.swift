@@ -266,7 +266,7 @@ final class TunnelManager {
     }
 
     private func parseNamedTunnelConfig() -> NamedTunnelConfig? {
-        let path = "\(NSHomeDirectory())/.cloudflared/config.yml"
+        let path = "\(AppConfig.shared.cloudflaredDir)/config.yml"
         guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
         var uuid: String?
         var hostname: String?

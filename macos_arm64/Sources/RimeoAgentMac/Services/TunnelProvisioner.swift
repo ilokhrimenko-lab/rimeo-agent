@@ -17,7 +17,7 @@ final class TunnelProvisioner {
     private let maxAttempts = 5
     private let retryReasons: Set<String> = ["throttled", "cloudflare_error", "db_error"]
 
-    private var cloudflaredDir: String { "\(NSHomeDirectory())/.cloudflared" }
+    private var cloudflaredDir: String { AppConfig.shared.cloudflaredDir }
     private var configPath: String { "\(cloudflaredDir)/config.yml" }
 
     /// Entry point — call once at startup after the relay is up. Runs the whole
