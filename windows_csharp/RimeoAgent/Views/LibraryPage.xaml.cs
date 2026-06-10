@@ -13,8 +13,14 @@ namespace RimeoAgent.Views;
 // cards (database / exported XML), each with its own enable toggle.
 public sealed partial class LibraryPage : Page
 {
-    private readonly TextBlock _dbAge     = new() { FontSize = 13, Foreground = UI.Dim, Visibility = Visibility.Collapsed };
-    private readonly TextBlock _statusMsg = new() { FontSize = 13, Foreground = UI.Secondary, Visibility = Visibility.Collapsed, TextWrapping = TextWrapping.Wrap };
+    // State (plain values) + references to the CURRENT rendered blocks. The blocks
+    // are recreated fresh on every Rebuild — never reused across trees — so we never
+    // hit WinUI's "element already has a parent". The references only exist so async
+    // work (Reload / age refresh) can live-update whatever block is on screen now.
+    private string _dbAgeText = "";
+    private string _statusText = "";
+    private TextBlock? _dbAgeBlock;
+    private TextBlock? _statusBlock;
     private readonly StackPanel _stack;
 
     public LibraryPage()
@@ -27,9 +33,10 @@ public sealed partial class LibraryPage : Page
         RefreshDatabaseAge();
     }
 
-    // Repopulate the stable root. Clearing first detaches the shared _dbAge /
-    // _statusMsg TextBlocks before they are re-added, so we never hit WinUI's
-    // "element already has a parent" (the bug that broke the source toggles).
+    // Repopulate the stable root. Every child (incl. the age/status blocks) is
+    // created fresh here — nothing is reused across rebuilds — so re-adding can
+    // never hit WinUI's "element already has a parent". Always call this deferred
+    // (DispatcherQueue) from event handlers, never synchronously inside them.
     private void Rebuild()
     {
         _stack.Children.Clear();
@@ -92,10 +99,23 @@ public sealed partial class LibraryPage : Page
 
         var header = SourceHeader("", UI.AccText, UI.AccSoft, "Rekordbox database", dotColor, statusText, dotColor, toggle);
 
+        _dbAgeBlock = new TextBlock
+        {
+            FontSize = 13, Foreground = UI.Dim, TextWrapping = TextWrapping.Wrap,
+            Text = _dbAgeText,
+            Visibility = string.IsNullOrEmpty(_dbAgeText) ? Visibility.Collapsed : Visibility.Visible
+        };
+        _statusBlock = new TextBlock
+        {
+            FontSize = 13, Foreground = UI.Secondary, TextWrapping = TextWrapping.Wrap,
+            Text = _statusText,
+            Visibility = string.IsNullOrEmpty(_statusText) ? Visibility.Collapsed : Visibility.Visible
+        };
+
         var body = UI.VStack(14,
             UI.Mono(string.IsNullOrEmpty(AppConfig.Shared.DbPath) ? "—" : AppConfig.Shared.DbPath),
-            _dbAge,
-            _statusMsg,
+            _dbAgeBlock,
+            _statusBlock,
             UI.PrimaryButton("Reload Library", Reload_Click));
         body.Opacity = enabled ? 1.0 : 0.5;
 
@@ -174,21 +194,40 @@ public sealed partial class LibraryPage : Page
     private void RefreshDatabaseAge()
     {
         var path = AppConfig.Shared.DbPath;
-        if (string.IsNullOrEmpty(path) || !File.Exists(path)) { _dbAge.Visibility = Visibility.Collapsed; return; }
+        if (string.IsNullOrEmpty(path) || !File.Exists(path))
+        {
+            _dbAgeText = "";
+        }
+        else
+        {
+            var mdate = File.GetLastWriteTime(path);
+            var age = DateTime.Now - mdate;
+            string ageLabel = age.TotalHours < 1 ? $"{(int)age.TotalMinutes} min ago"
+                : age.TotalDays < 1 ? $"{(int)age.TotalHours} h ago"
+                : $"{(int)age.TotalDays} days ago";
+            _dbAgeText = $"Last modified {mdate:dd MMM yyyy, HH:mm}  ·  {ageLabel}";
+        }
 
-        var mdate = File.GetLastWriteTime(path);
-        var age = DateTime.Now - mdate;
-        string ageLabel = age.TotalHours < 1 ? $"{(int)age.TotalMinutes} min ago"
-            : age.TotalDays < 1 ? $"{(int)age.TotalHours} h ago"
-            : $"{(int)age.TotalDays} days ago";
-        _dbAge.Text = $"Last modified {mdate:dd MMM yyyy, HH:mm}  ·  {ageLabel}";
-        _dbAge.Visibility = Visibility.Visible;
+        if (_dbAgeBlock != null)
+        {
+            _dbAgeBlock.Text = _dbAgeText;
+            _dbAgeBlock.Visibility = string.IsNullOrEmpty(_dbAgeText) ? Visibility.Collapsed : Visibility.Visible;
+        }
+    }
+
+    private void SetStatus(string text)
+    {
+        _statusText = text;
+        if (_statusBlock != null)
+        {
+            _statusBlock.Text = text;
+            _statusBlock.Visibility = string.IsNullOrEmpty(text) ? Visibility.Collapsed : Visibility.Visible;
+        }
     }
 
     private void Reload_Click(object sender, RoutedEventArgs e)
     {
-        _statusMsg.Visibility = Visibility.Visible;
-        _statusMsg.Text = "Loading…";
+        SetStatus("Loading…");
         _ = Task.Run(() =>
         {
             RekordboxParser.Shared.InvalidateCache();
@@ -196,10 +235,9 @@ public sealed partial class LibraryPage : Page
             var source = result.Source ?? (AppConfig.Shared.DbExists ? "db" : "xml");
             DispatcherQueue.TryEnqueue(() =>
             {
-                if (result.Tracks.Count > 0)
-                    _statusMsg.Text = $"✓ {result.Tracks.Count} tracks, {result.Playlists.Count} playlists  ({source})";
-                else
-                    _statusMsg.Text = "0 tracks — library source could not be read";
+                SetStatus(result.Tracks.Count > 0
+                    ? $"✓ {result.Tracks.Count} tracks, {result.Playlists.Count} playlists  ({source})"
+                    : "0 tracks — library source could not be read");
                 RefreshDatabaseAge();
             });
         });
