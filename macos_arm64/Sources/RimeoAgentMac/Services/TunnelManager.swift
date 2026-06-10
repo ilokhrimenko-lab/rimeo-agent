@@ -227,7 +227,11 @@ final class TunnelManager {
     private func probeReadinessOnce(_ url: String) -> Bool {
         guard let probeURL = URL(string: "\(url)/api/status") else { return false }
         var req = URLRequest(url: probeURL)
-        req.httpMethod = "HEAD"
+        // ВАЖНО: GET, не HEAD. Роутер матчит по (метод, путь) и HEAD-кейса для
+        // /api/status нет → HEAD проваливается в default → 404 (≥400) → probe
+        // НИКОГДА не проходит и каждый холодный старт впустую жжёт 30×2с до
+        // «promoting anyway». GET /api/status отдаёт 200 и промоут срабатывает сразу.
+        req.httpMethod = "GET"
         req.timeoutInterval = readinessProbeTimeout
         let sema = DispatchSemaphore(value: 0)
         var alive = false
