@@ -214,7 +214,7 @@ public sealed partial class LibraryPage : Page
         AppConfig.Shared.SetXmlPath(file.Path);
         if (!AppConfig.Shared.XmlSourceEnabled) AppConfig.Shared.SetXmlSourceEnabled(true);
         RekordboxParser.Shared.InvalidateCache();
-        Content = Build();
+        Rebuild();
         Reload_Click(sender, e);
     }
 }
