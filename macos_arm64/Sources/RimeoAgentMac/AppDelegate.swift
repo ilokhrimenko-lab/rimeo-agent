@@ -13,6 +13,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Ignore SIGPIPE (prevents crashes on broken socket writes)
         signal(SIGPIPE, SIG_IGN)
 
+        // Apply the saved appearance BEFORE any window is created so the first
+        // frame renders in the correct theme (no dark flash on a light Mac).
+        ThemeManager.shared.apply()
+
         setupAppMenu()
         setupMenuBar()
         createMainWindow()

@@ -16,6 +16,7 @@ struct LogsTabView: View {
     @State private var cacheStatus = ""
 
     @State private var updateState: UpdateCheckState = .idle
+    @State private var theme = ThemeManager.shared.theme
 
     var body: some View {
         ScrollView {
@@ -26,6 +27,7 @@ struct LogsTabView: View {
                     trailing: AnyView(versionPill)
                 )
 
+                appearanceSection
                 agentSettingsSection
                 updateSection
                 reportSection
@@ -52,6 +54,48 @@ struct LogsTabView: View {
             .padding(.vertical, 6)
             .background(C.chip)
             .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+    }
+
+    // MARK: - Appearance
+
+    private var appearanceSection: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            SectionLabel(text: "APPEARANCE")
+            HStack(spacing: 4) {
+                themeSegment(.auto,  "Auto",  "circle.lefthalf.filled")
+                themeSegment(.light, "Light", "sun.max")
+                themeSegment(.dark,  "Dark",  "moon")
+            }
+            .padding(4)
+            .background(C.segTrack)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .fixedSize()
+
+            Text("Auto follows your macOS appearance. Light or Dark forces a fixed theme.")
+                .font(.system(size: 13))
+                .foregroundColor(C.dim)
+        }
+    }
+
+    @ViewBuilder
+    private func themeSegment(_ value: AppTheme, _ label: String, _ icon: String) -> some View {
+        let selected = theme == value
+        Button {
+            theme = value
+            ThemeManager.shared.setTheme(value)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: icon).font(.system(size: 14, weight: .medium))
+                Text(label).font(.system(size: 14, weight: selected ? .semibold : .medium))
+            }
+            .foregroundColor(selected ? C.text : C.secondary)
+            .frame(height: 40)
+            .padding(.horizontal, 18)
+            .background(selected ? C.segActive : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .shadow(color: selected ? .black.opacity(0.08) : .clear, radius: 3, y: 1)
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Agent settings

@@ -59,6 +59,9 @@ enum ColorPalette {
     static let btn2Txt   = dyn(0x2B3445, 0xE6E8EC)
     // Switch off track
     static let switchOff = dyn(0xD7DAE0, 0x3A3F49)
+    // Segmented control
+    static let segTrack  = dyn(0xEBEDF1, 0x23262E)
+    static let segActive = dyn(0xFFFFFF, 0x363C46)
 }
 
 // MARK: - Root

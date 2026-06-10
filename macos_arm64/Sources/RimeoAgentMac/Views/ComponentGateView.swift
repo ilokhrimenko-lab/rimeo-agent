@@ -34,7 +34,6 @@ struct ComponentGateView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(48)
         .background(C.bg)
-        .preferredColorScheme(.dark)
     }
 
     @ViewBuilder
