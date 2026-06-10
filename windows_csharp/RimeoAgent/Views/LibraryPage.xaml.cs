@@ -15,26 +15,31 @@ public sealed partial class LibraryPage : Page
 {
     private readonly TextBlock _dbAge     = new() { FontSize = 13, Foreground = UI.Dim, Visibility = Visibility.Collapsed };
     private readonly TextBlock _statusMsg = new() { FontSize = 13, Foreground = UI.Secondary, Visibility = Visibility.Collapsed, TextWrapping = TextWrapping.Wrap };
+    private readonly StackPanel _stack;
 
     public LibraryPage()
     {
         InitializeComponent();
-        Content = Build();
+        var (scroll, stack) = UI.Page();
+        _stack = stack;
+        Content = scroll;
+        Rebuild();
         RefreshDatabaseAge();
     }
 
-    private ScrollViewer Build()
+    // Repopulate the stable root. Clearing first detaches the shared _dbAge /
+    // _statusMsg TextBlocks before they are re-added, so we never hit WinUI's
+    // "element already has a parent" (the bug that broke the source toggles).
+    private void Rebuild()
     {
-        var (scroll, stack) = UI.Page();
+        _stack.Children.Clear();
 
-        stack.Children.Add(UI.ScreenHeader("Library",
+        _stack.Children.Add(UI.ScreenHeader("Library",
             "Turn on the sources Rimeo reads your tracks from — you can use both at once."));
 
-        stack.Children.Add(TopTabs());
-        stack.Children.Add(DbCard());
-        stack.Children.Add(XmlCard());
-
-        return scroll;
+        _stack.Children.Add(TopTabs());
+        _stack.Children.Add(DbCard());
+        _stack.Children.Add(XmlCard());
     }
 
     // ── Top tabs: Rekordbox (active) / Other DJ software (SOON) ──────────────
@@ -76,7 +81,7 @@ public sealed partial class LibraryPage : Page
         {
             AppConfig.Shared.SetDbSourceEnabled(on);
             RekordboxParser.Shared.InvalidateCache();
-            Content = Build();
+            Rebuild();
             RefreshDatabaseAge();
         });
 
@@ -106,7 +111,7 @@ public sealed partial class LibraryPage : Page
         {
             AppConfig.Shared.SetXmlSourceEnabled(on);
             RekordboxParser.Shared.InvalidateCache();
-            Content = Build();
+            Rebuild();
             RefreshDatabaseAge();
         });
 

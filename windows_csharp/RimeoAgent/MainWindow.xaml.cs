@@ -11,11 +11,12 @@ namespace RimeoAgent;
 
 public sealed partial class MainWindow : Window
 {
-    private readonly NavigationView _navView;
-    private readonly Frame _contentFrame;
+    private NavigationView _navView = null!;
+    private Frame _contentFrame = null!;
     private bool _defaultPageRequested;
     private bool _navigatingProgrammatically;
     private bool _didInitialSetup;
+    private string _currentTag = "Library";
 
     /// <summary>HWND of the main window — used by pages to host file pickers.</summary>
     internal static IntPtr Hwnd { get; private set; }
@@ -27,14 +28,22 @@ public sealed partial class MainWindow : Window
     {
         Instance = this;
         AppState.Shared.SetDispatcherQueue(Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
+        UI.IsDark = ResolveDark(ThemeManager.CurrentElementTheme);
+        BuildShell();
+    }
+
+    // Builds (or fully rebuilds) the nav shell for the current theme. Rebuilding
+    // wholesale is the reliable way to re-theme on a live theme switch — the
+    // NavigationView pane material and already-realized visuals don't re-theme
+    // in place when RequestedTheme changes at runtime.
+    private void BuildShell()
+    {
+        var theme = ThemeManager.CurrentElementTheme;
 
         _contentFrame = new Frame
         {
             Content = CreateStatusView("Rimeo Agent is starting...")
         };
-
-        var theme = ThemeManager.CurrentElementTheme;
-        UI.IsDark = ResolveDark(theme);
 
         _navView = new NavigationView
         {
@@ -45,7 +54,8 @@ public sealed partial class MainWindow : Window
             IsSettingsVisible = false,   // hide the built-in gear (we have our own Settings)
             PaneHeader = BuildBrand(),
             PaneFooter = BuildFooter(),
-            Content = _contentFrame
+            Content = _contentFrame,
+            RequestedTheme = theme
         };
         // Mirror the macOS rail: Library / Pairing / Account / Settings (no Analysis).
         _navView.MenuItems.Add(CreateNavItem("Library", "Library")); // Folder
@@ -53,7 +63,6 @@ public sealed partial class MainWindow : Window
         _navView.MenuItems.Add(CreateNavItem("Account", "Account")); // Cloud
         _navView.MenuItems.Add(CreateNavItem("Settings", "Logs"));    // Settings gear
         _navView.SelectionChanged += NavView_SelectionChanged;
-        _navView.RequestedTheme = theme;
         ApplyPaneTheme();
 
         Content = _navView;
@@ -77,25 +86,33 @@ public sealed partial class MainWindow : Window
         _ => Application.Current.RequestedTheme == ApplicationTheme.Dark
     };
 
-    /// <summary>Re-applies the saved theme app-wide and refreshes the current page.</summary>
+    /// <summary>Re-applies the saved theme app-wide by rebuilding the shell.</summary>
     public void ApplyTheme()
     {
-        var theme = ThemeManager.CurrentElementTheme;
-        _navView.RequestedTheme = theme;
-        UI.IsDark = ResolveDark(theme);
-        ApplyPaneTheme();
+        UI.IsDark = ResolveDark(ThemeManager.CurrentElementTheme);
+        var tag = _currentTag;
+        BuildShell();
+        SelectNav(tag);
+        NavigateSafely(PageTypeFor(tag), tag);
+    }
 
-        _navView.PaneHeader = BuildBrand();
-        _navView.PaneFooter = BuildFooter();
+    private static Type PageTypeFor(string tag) => tag switch
+    {
+        "Pairing" => typeof(PairingPage),
+        "Account" => typeof(AccountPage),
+        "Logs"    => typeof(LogsPage),
+        _         => typeof(LibraryPage),
+    };
 
-        var current = _contentFrame.CurrentSourcePageType;
-        if (current != null)
-        {
-            _navigatingProgrammatically = true;
-            try { _contentFrame.Navigate(current); }
-            catch (Exception ex) { Log.Error($"Theme refresh navigate failed: {ex}"); }
-            finally { _navigatingProgrammatically = false; }
-        }
+    private void SelectNav(string tag)
+    {
+        var item = _navView.MenuItems.OfType<NavigationViewItem>()
+            .FirstOrDefault(i => i.Tag?.ToString() == tag);
+        if (item == null) return;
+        _navigatingProgrammatically = true;
+        try { _navView.SelectedItem = item; }
+        catch (Exception ex) { Log.Error($"Select nav failed: {ex}"); }
+        finally { _navigatingProgrammatically = false; }
     }
 
     private static StackPanel BuildBrand()
@@ -233,6 +250,7 @@ public sealed partial class MainWindow : Window
 
     private void NavigateSafely(Type pageType, string pageName)
     {
+        _currentTag = pageName;
         try
         {
             Log.Info($"Navigating to {pageName}");
