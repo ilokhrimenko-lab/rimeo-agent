@@ -125,7 +125,7 @@ internal static class UI
     };
 
     /// <summary>Screen header: big title with optional trailing element (e.g. version).</summary>
-    public static Grid ScreenHeader(string title, string? subtitle = null, UIElement? trailing = null)
+    public static Grid ScreenHeader(string title, string? subtitle = null, FrameworkElement? trailing = null)
     {
         var grid = new Grid();
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -139,7 +139,7 @@ internal static class UI
 
         if (trailing != null)
         {
-            if (trailing is FrameworkElement fe) fe.VerticalAlignment = VerticalAlignment.Bottom;
+            trailing.VerticalAlignment = VerticalAlignment.Bottom;
             Grid.SetColumn(trailing, 1);
             grid.Children.Add(trailing);
         }
