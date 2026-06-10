@@ -39,6 +39,7 @@ public sealed class AudioService
                 throw new Exception($"AIFF conversion failed: {result.Stderr}");
 
             Log.Info($"AIFF conversion complete: track={trackId}, wav={cached}");
+            CacheManager.Shared.ScheduleEnforce();
             return cached;
         }
         finally { sem.Release(); }
@@ -94,6 +95,7 @@ public sealed class AudioService
         try
         {
             File.WriteAllText(cacheFile, System.Text.Json.JsonSerializer.Serialize(out_));
+            CacheManager.Shared.ScheduleEnforce();
         }
         catch { }
         return out_;
@@ -120,6 +122,7 @@ public sealed class AudioService
         }, 45);
         var ok = result.Success && File.Exists(cacheFile);
         if (!ok) Log.Warn($"Artwork extraction failed: track={trackId}");
+        else CacheManager.Shared.ScheduleEnforce();
         return ok ? cacheFile : null;
     }
 

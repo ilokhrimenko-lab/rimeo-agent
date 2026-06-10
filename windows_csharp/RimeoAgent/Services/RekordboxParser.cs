@@ -22,7 +22,7 @@ public sealed class RekordboxParser
     private LibraryData ParseInternal()
     {
         var dbPath = AppConfig.Shared.DbPath;
-        if (!string.IsNullOrEmpty(dbPath) && File.Exists(dbPath))
+        if (AppConfig.Shared.DbSourceEnabled && !string.IsNullOrEmpty(dbPath) && File.Exists(dbPath))
         {
             var mtime = GetMtime(dbPath);
             var key = $"db:{dbPath}";
@@ -39,7 +39,7 @@ public sealed class RekordboxParser
         }
 
         var xmlPath = AppConfig.Shared.XmlPath;
-        if (!string.IsNullOrEmpty(xmlPath) && File.Exists(xmlPath))
+        if (AppConfig.Shared.XmlSourceEnabled && !string.IsNullOrEmpty(xmlPath) && File.Exists(xmlPath))
         {
             var mtime = GetMtime(xmlPath);
             var key = $"xml:{xmlPath}";

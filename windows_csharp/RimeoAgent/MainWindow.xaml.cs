@@ -20,8 +20,12 @@ public sealed partial class MainWindow : Window
     /// <summary>HWND of the main window — used by pages to host file pickers.</summary>
     internal static IntPtr Hwnd { get; private set; }
 
+    /// <summary>Current window — used by pages to apply a theme change app-wide.</summary>
+    internal static MainWindow? Instance { get; private set; }
+
     public MainWindow()
     {
+        Instance = this;
         AppState.Shared.SetDispatcherQueue(Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
 
         _contentFrame = new Frame
@@ -29,25 +33,80 @@ public sealed partial class MainWindow : Window
             Content = CreateStatusView("Rimeo Agent is starting...")
         };
 
+        var theme = ThemeManager.CurrentElementTheme;
+        UI.IsDark = ResolveDark(theme);
+
         _navView = new NavigationView
         {
             IsBackButtonVisible = NavigationViewBackButtonVisible.Collapsed,
             PaneDisplayMode = NavigationViewPaneDisplayMode.Left,
-            IsPaneToggleButtonVisible = true,
-            OpenPaneLength = 200,
+            IsPaneToggleButtonVisible = false,
+            OpenPaneLength = 212,
+            IsSettingsVisible = false,   // hide the built-in gear (we have our own Settings)
+            PaneHeader = BuildBrand(),
+            PaneFooter = BuildFooter(),
             Content = _contentFrame
         };
         // Mirror the macOS rail: Library / Pairing / Account / Settings (no Analysis).
-        _navView.MenuItems.Add(CreateNavItem("Library", "Library"));
-        _navView.MenuItems.Add(CreateNavItem("Pairing", "Pairing"));
-        _navView.MenuItems.Add(CreateNavItem("Account", "Account"));
-        _navView.MenuItems.Add(CreateNavItem("Settings", "Logs"));
-        _navView.IsSettingsVisible = false;   // hide the built-in gear (we have our own Settings)
+        _navView.MenuItems.Add(CreateNavItem("Library", "Library")); // Folder
+        _navView.MenuItems.Add(CreateNavItem("Pairing", "Pairing")); // Link
+        _navView.MenuItems.Add(CreateNavItem("Account", "Account")); // Cloud
+        _navView.MenuItems.Add(CreateNavItem("Settings", "Logs"));    // Settings gear
         _navView.SelectionChanged += NavView_SelectionChanged;
-        _navView.RequestedTheme = ElementTheme.Dark;
-        _navView.Background = UI.Bg;
+        _navView.RequestedTheme = theme;
 
         Content = _navView;
+    }
+
+    private static bool ResolveDark(ElementTheme t) => t switch
+    {
+        ElementTheme.Light => false,
+        ElementTheme.Dark  => true,
+        _ => Application.Current.RequestedTheme == ApplicationTheme.Dark
+    };
+
+    /// <summary>Re-applies the saved theme app-wide and refreshes the current page.</summary>
+    public void ApplyTheme()
+    {
+        var theme = ThemeManager.CurrentElementTheme;
+        _navView.RequestedTheme = theme;
+        UI.IsDark = ResolveDark(theme);
+
+        _navView.PaneHeader = BuildBrand();
+        _navView.PaneFooter = BuildFooter();
+
+        var current = _contentFrame.CurrentSourcePageType;
+        if (current != null)
+        {
+            _navigatingProgrammatically = true;
+            try { _contentFrame.Navigate(current); }
+            catch (Exception ex) { Log.Error($"Theme refresh navigate failed: {ex}"); }
+            finally { _navigatingProgrammatically = false; }
+        }
+    }
+
+    private static StackPanel BuildBrand()
+    {
+        var badge = new Microsoft.UI.Xaml.Controls.Border
+        {
+            Width = 30, Height = 30, CornerRadius = new CornerRadius(9), Background = UI.Acc,
+            VerticalAlignment = VerticalAlignment.Center,
+            Child = new TextBlock { Text = "R", FontSize = 17, FontWeight = Microsoft.UI.Text.FontWeights.ExtraBold, Foreground = UI.White, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center }
+        };
+        var name = new TextBlock { Text = "Rimeo", FontSize = 17, FontWeight = Microsoft.UI.Text.FontWeights.ExtraBold, Foreground = UI.Text, VerticalAlignment = VerticalAlignment.Center };
+        var tag = new TextBlock { Text = "Agent", FontSize = 11, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = UI.Dim, VerticalAlignment = VerticalAlignment.Center };
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Margin = new Thickness(14, 8, 14, 10) };
+        row.Children.Add(badge); row.Children.Add(name); row.Children.Add(tag);
+        return row;
+    }
+
+    private static StackPanel BuildFooter()
+    {
+        var dot = new Microsoft.UI.Xaml.Shapes.Ellipse { Width = 7, Height = 7, Fill = UI.Green, VerticalAlignment = VerticalAlignment.Center };
+        var label = new TextBlock { Text = "Agent online", FontSize = 12, FontWeight = Microsoft.UI.Text.FontWeights.Medium, Foreground = UI.Secondary, VerticalAlignment = VerticalAlignment.Center };
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Margin = new Thickness(20, 11, 20, 11) };
+        row.Children.Add(dot); row.Children.Add(label);
+        return row;
     }
 
     private void NavView_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
@@ -129,8 +188,17 @@ public sealed partial class MainWindow : Window
         AppWindow.Hide();
     }
 
-    private static NavigationViewItem CreateNavItem(string content, string tag) =>
-        new() { Content = content, Tag = tag };
+    private static NavigationViewItem CreateNavItem(string content, string tag)
+    {
+        var symbol = tag switch
+        {
+            "Library" => Symbol.Library,
+            "Pairing" => Symbol.Link,
+            "Account" => Symbol.Contact,
+            _         => Symbol.Setting,
+        };
+        return new NavigationViewItem { Content = content, Tag = tag, Icon = new SymbolIcon(symbol) };
+    }
 
     private void NavigateSafely(Type pageType, string pageName)
     {

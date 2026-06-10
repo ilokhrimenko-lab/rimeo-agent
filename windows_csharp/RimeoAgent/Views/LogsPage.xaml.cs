@@ -12,8 +12,8 @@ using Windows.ApplicationModel.DataTransfer;
 
 namespace RimeoAgent.Views;
 
-// 1:1 mirror of macOS LogsTabView ("Settings"): agent settings + in-app updates +
-// report a bug + cache management.
+// 1:1 mirror of macOS LogsTabView ("Settings"): appearance + agent settings +
+// in-app updates + report a bug + cache management.
 public sealed partial class LogsPage : Page
 {
     private readonly TextBlock  _settingsStatus = new() { FontSize = 12, Visibility = Visibility.Collapsed };
@@ -23,17 +23,20 @@ public sealed partial class LogsPage : Page
     private readonly TextBlock  _bugStatus      = new() { FontSize = 13, Visibility = Visibility.Collapsed, TextWrapping = TextWrapping.Wrap };
     private readonly StackPanel _bugButtonHost  = new() { Orientation = Orientation.Horizontal, Spacing = 10, VerticalAlignment = VerticalAlignment.Center };
 
-    private readonly TextBlock    _cacheUsage   = new() { FontSize = 22, FontWeight = FontWeights.Bold, Foreground = UI.Text, Text = "0.00 GB used" };
-    private readonly ProgressBar  _cacheBar     = new() { Width = 280, Minimum = 0, Maximum = 3, Value = 0 };
-    private readonly TextBlock    _cacheMax     = new() { FontSize = 12, Foreground = UI.Dim, Text = "of 3 GB max" };
-    private readonly TextBox      _cacheMaxBox  = new() { Width = 72, Text = "3", TextAlignment = TextAlignment.Center };
+    private readonly TextBlock    _cacheUsage   = new() { FontSize = 22, FontWeight = FontWeights.ExtraBold, Foreground = UI.Text, Text = "0.00 GB used" };
+    private readonly ProgressBar  _cacheBar     = new() { Minimum = 0, Maximum = 3, Value = 0, Height = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
+    private readonly TextBlock    _cacheMax     = new() { FontSize = 13, FontWeight = FontWeights.Medium, Foreground = UI.Dim, Text = "of 3 GB max", VerticalAlignment = VerticalAlignment.Center };
+    private readonly TextBox      _cacheMaxBox  = new() { Width = 64, Text = "3", TextAlignment = TextAlignment.Center };
     private readonly TextBlock    _cacheStatus  = new() { FontSize = 12, Visibility = Visibility.Collapsed };
+
+    private readonly StackPanel _themeHost = new() { Orientation = Orientation.Horizontal, Spacing = 4 };
 
     public LogsPage()
     {
         InitializeComponent();
         Content = Build();
         BuildUpdateIdle();
+        RebuildThemeSegmented();
         RefreshCacheSize();
     }
 
@@ -41,89 +44,137 @@ public sealed partial class LogsPage : Page
     {
         var (scroll, stack) = UI.Page();
 
-        // Header: "Settings" + version on the right
-        var header = new Grid();
-        header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        var h = UI.Heading("Settings");
-        Grid.SetColumn(h, 0); header.Children.Add(h);
-        var ver = new TextBlock { Text = AppConfig.Shared.DisplayVersion, FontSize = 12, Foreground = UI.Dim, VerticalAlignment = VerticalAlignment.Bottom };
-        Grid.SetColumn(ver, 1); header.Children.Add(ver);
-        stack.Children.Add(header);
+        var ver = new Border
+        {
+            Background = UI.Chip,
+            CornerRadius = new CornerRadius(9),
+            Padding = new Thickness(11, 6, 11, 6),
+            Child = new TextBlock { Text = AppConfig.Shared.DisplayVersion, FontSize = 12, FontFamily = new FontFamily("Consolas"), Foreground = UI.Secondary }
+        };
+        stack.Children.Add(UI.ScreenHeader("Settings", "Manage how the Rimeo agent runs on this PC.", ver));
+
+        // APPEARANCE
+        stack.Children.Add(UI.SectionLabel("Appearance"));
+        var seg = new Border { Background = UI.SegTrack, CornerRadius = new CornerRadius(14), Padding = new Thickness(4), Child = _themeHost, HorizontalAlignment = HorizontalAlignment.Left };
+        stack.Children.Add(UI.VStack(11, seg,
+            UI.Body("Auto follows your Windows appearance. Light or Dark forces a fixed theme.", UI.Dim, 13)));
 
         // AGENT SETTINGS
         stack.Children.Add(UI.SectionLabel("Agent settings"));
-        var launchToggle = new ToggleSwitch { IsOn = AgentSettings.LaunchAtLogin };
-        launchToggle.Header = new TextBlock { Text = "Open RimeoAgent at system startup", FontSize = 13, Foreground = UI.Text };
-        launchToggle.Toggled += (_, _) =>
+        var launch = new CheckBox
         {
-            AgentSettings.LaunchAtLogin = launchToggle.IsOn;
-            _settingsStatus.Visibility = Visibility.Visible;
-            _settingsStatus.Text = launchToggle.IsOn ? "✓ Launch at startup enabled" : "✓ Launch at startup disabled";
-            _settingsStatus.Foreground = UI.Green;
+            IsChecked = AgentSettings.LaunchAtLogin,
+            Content = new TextBlock { Text = "Open Rimeo agent at system startup", FontSize = 15, FontWeight = FontWeights.Medium, Foreground = UI.Text }
         };
-        stack.Children.Add(UI.Card(UI.VStack(12, launchToggle, _settingsStatus)));
+        launch.Checked   += (_, _) => SetLaunch(true);
+        launch.Unchecked += (_, _) => SetLaunch(false);
+        stack.Children.Add(UI.Card(UI.VStack(8, launch, _settingsStatus)));
 
-        // CHECK FOR UPDATES
-        stack.Children.Add(UI.SectionLabel("Check for updates"));
+        // SOFTWARE UPDATE
+        stack.Children.Add(UI.SectionLabel("Software update"));
         stack.Children.Add(UI.Card(_updateHost));
 
         // REPORT A BUG
         stack.Children.Add(UI.SectionLabel("Report a bug"));
+        _bugBox.Background = UI.Field;
+        _bugBox.BorderBrush = UI.CardBrd;
+        _bugBox.CornerRadius = new CornerRadius(12);
         _bugButtonHost.Children.Add(UI.PrimaryButton("Send Report", SendBug_Click));
-        var bugCard = UI.VStack(12,
-            UI.Body("The last 200 log lines will be attached automatically.", UI.Dim, 12),
+        var bugCard = UI.VStack(14,
+            UI.Body("Describe the issue — the last 200 log lines are attached automatically.", UI.Secondary, 13),
             _bugBox,
             UI.HStack(10,
                 _bugButtonHost,
                 UI.SecondaryButton("Copy Log", CopyLog_Click),
                 UI.SecondaryButton("Open Log", OpenLog_Click)),
-            _bugStatus
-        );
+            _bugStatus);
         stack.Children.Add(UI.Card(bugCard));
 
         // CACHE
         stack.Children.Add(UI.SectionLabel("Cache"));
         _cacheBar.Foreground = UI.Acc;
-        var saveBtn = UI.PrimaryButton("Save", SaveMaxCache_Click);
-        var clearBtn = new Button
-        {
-            Content = new TextBlock { Text = "Clear Cache", FontSize = 13, FontWeight = FontWeights.Medium, Foreground = UI.Red },
-            Background = UI.Surf,
-            BorderBrush = new SolidColorBrush(UI.Hex("#7f1d1d")),
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(12),
-            Padding = new Thickness(20, 10, 20, 10),
-            HorizontalAlignment = HorizontalAlignment.Left
-        };
-        clearBtn.Click += ClearCache_Click;
+        _cacheBar.Background = UI.Chip;
 
-        var cacheTop = new Grid();
-        cacheTop.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        cacheTop.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        var left = UI.VStack(6, _cacheUsage, _cacheBar, _cacheMax);
-        Grid.SetColumn(left, 0); cacheTop.Children.Add(left);
-        var right = UI.VStack(4,
-            new TextBlock { Text = "Max cache (GB)", FontSize = 11, Foreground = UI.Dim, HorizontalAlignment = HorizontalAlignment.Right },
-            UI.HStack(8, _cacheMaxBox, saveBtn));
-        right.VerticalAlignment = VerticalAlignment.Center;
-        Grid.SetColumn(right, 1); cacheTop.Children.Add(right);
+        var usageTop = new Grid();
+        usageTop.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        usageTop.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        Grid.SetColumn(_cacheUsage, 0); usageTop.Children.Add(_cacheUsage);
+        Grid.SetColumn(_cacheMax, 1); usageTop.Children.Add(_cacheMax);
 
-        var cacheCard = UI.VStack(12,
-            UI.Body("The cache stores converted audio (WAV), waveform data and artwork so tracks load faster on repeat plays.", UI.Dim, 12),
-            cacheTop,
-            UI.HStack(12, clearBtn, _cacheStatus)
-        );
+        var divider = new Border { Height = 1, Background = UI.CardBrd };
+
+        var controls = new Grid { VerticalAlignment = VerticalAlignment.Center };
+        controls.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        controls.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        controls.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var clearBtn = UI.DestructiveButton("Clear Cache", ClearCache_Click);
+        Grid.SetColumn(clearBtn, 0); controls.Children.Add(clearBtn);
+        _cacheStatus.VerticalAlignment = VerticalAlignment.Center;
+        _cacheStatus.Margin = new Thickness(12, 0, 0, 0);
+        Grid.SetColumn(_cacheStatus, 1); controls.Children.Add(_cacheStatus);
+
+        _cacheMaxBox.Background = UI.Field;
+        _cacheMaxBox.BorderBrush = UI.Brd;
+        _cacheMaxBox.CornerRadius = new CornerRadius(12);
+        var right = UI.HStack(10,
+            new TextBlock { Text = "Max cache", FontSize = 13, FontWeight = FontWeights.Medium, Foreground = UI.Secondary, VerticalAlignment = VerticalAlignment.Center },
+            _cacheMaxBox,
+            UI.PrimaryButton("Save", SaveMaxCache_Click));
+        Grid.SetColumn(right, 2); controls.Children.Add(right);
+
+        var cacheCard = UI.VStack(16,
+            UI.Body("Converted audio, waveforms and artwork are stored here so tracks load instantly on repeat plays.", UI.Secondary, 13),
+            UI.VStack(9, usageTop, _cacheBar),
+            divider,
+            controls);
         stack.Children.Add(UI.Card(cacheCard));
 
         return scroll;
     }
 
-    // ── Update checker UI ──────────────────────────────────────────────────
+    // ── Appearance segmented ────────────────────────────────────────────────
+    private void RebuildThemeSegmented()
+    {
+        _themeHost.Children.Clear();
+        _themeHost.Children.Add(ThemeSeg(AppTheme.Auto, "Auto"));
+        _themeHost.Children.Add(ThemeSeg(AppTheme.Light, "Light"));
+        _themeHost.Children.Add(ThemeSeg(AppTheme.Dark, "Dark"));
+    }
+
+    private Button ThemeSeg(AppTheme value, string label)
+    {
+        var active = ThemeManager.Theme == value;
+        var btn = new Button
+        {
+            Content = new TextBlock { Text = label, FontSize = 14, FontWeight = active ? FontWeights.SemiBold : FontWeights.Medium, Foreground = active ? UI.Text : UI.Secondary },
+            Background = active ? UI.SegActive : new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+            BorderThickness = new Thickness(0),
+            CornerRadius = new CornerRadius(11),
+            Padding = new Thickness(18, 9, 18, 9)
+        };
+        btn.Click += (_, _) =>
+        {
+            ThemeManager.Theme = value;
+            MainWindow.Instance?.ApplyTheme();
+        };
+        return btn;
+    }
+
+    private void SetLaunch(bool on)
+    {
+        AgentSettings.LaunchAtLogin = on;
+        _settingsStatus.Visibility = Visibility.Visible;
+        _settingsStatus.Text = on ? "✓ Launch at startup enabled" : "✓ Launch at startup disabled";
+        _settingsStatus.Foreground = UI.Green;
+    }
+
+    // ── Update checker UI (unchanged logic) ─────────────────────────────────
     private void BuildUpdateIdle()
     {
         _updateHost.Children.Clear();
-        _updateHost.Children.Add(UI.SecondaryButton("Check for Updates", (_, _) => RunUpdateCheck()));
+        _updateHost.Children.Add(UI.HStack(12,
+            new TextBlock { Text = "Check whether a newer build is available", FontSize = 14, Foreground = UI.Secondary, VerticalAlignment = VerticalAlignment.Center },
+            UI.SecondaryButton("Check for Updates", (_, _) => RunUpdateCheck())));
     }
 
     private void RunUpdateCheck()
@@ -131,7 +182,7 @@ public sealed partial class LogsPage : Page
         _updateHost.Children.Clear();
         _updateHost.Children.Add(UI.HStack(10,
             new ProgressRing { IsActive = true, Width = 18, Height = 18 },
-            new TextBlock { Text = "Checking for updates…", FontSize = 13, Foreground = UI.Dim, VerticalAlignment = VerticalAlignment.Center }));
+            new TextBlock { Text = "Checking for updates…", FontSize = 14, Foreground = UI.Secondary, VerticalAlignment = VerticalAlignment.Center }));
 
         UpdateChecker.Shared.ForceCheckAsync(info =>
             DispatcherQueue.TryEnqueue(() =>
@@ -146,7 +197,7 @@ public sealed partial class LogsPage : Page
         _updateHost.Children.Clear();
         _updateHost.Children.Add(UI.HStack(10,
             new Microsoft.UI.Xaml.Shapes.Ellipse { Width = 12, Height = 12, Fill = UI.Green, VerticalAlignment = VerticalAlignment.Center },
-            new TextBlock { Text = "You're up to date", FontSize = 13, Foreground = UI.Text, VerticalAlignment = VerticalAlignment.Center },
+            new TextBlock { Text = "Rimeo agent is up to date", FontSize = 14, Foreground = UI.Text, VerticalAlignment = VerticalAlignment.Center },
             UI.SecondaryButton("Check Again", (_, _) => RunUpdateCheck())));
     }
 
@@ -154,9 +205,9 @@ public sealed partial class LogsPage : Page
     {
         _updateHost.Children.Clear();
         var lines = UI.VStack(2,
-            new TextBlock { Text = $"Update available: {info.Version}", FontSize = 13, FontWeight = FontWeights.Medium, Foreground = UI.Text });
+            new TextBlock { Text = $"Update available: {info.Version}", FontSize = 15, FontWeight = FontWeights.SemiBold, Foreground = UI.Text });
         if (!string.IsNullOrEmpty(info.Notes))
-            lines.Children.Add(new TextBlock { Text = info.Notes, FontSize = 11, Foreground = UI.Dim, TextWrapping = TextWrapping.Wrap });
+            lines.Children.Add(new TextBlock { Text = info.Notes, FontSize = 12, Foreground = UI.Dim, TextWrapping = TextWrapping.Wrap });
 
         _updateHost.Children.Add(lines);
         _updateHost.Children.Add(UI.PrimaryButton("Update Now", (_, _) => UpdateNow(info)));
@@ -165,7 +216,7 @@ public sealed partial class LogsPage : Page
     private void UpdateNow(UpdateInfo info)
     {
         _updateHost.Children.Clear();
-        var progress = new TextBlock { Text = "Downloading update… 0%", FontSize = 13, Foreground = UI.Dim };
+        var progress = new TextBlock { Text = "Downloading update… 0%", FontSize = 14, Foreground = UI.Secondary };
         _updateHost.Children.Add(UI.HStack(10,
             new ProgressRing { IsActive = true, Width = 18, Height = 18 }, progress));
 
@@ -175,7 +226,6 @@ public sealed partial class LogsPage : Page
             {
                 UpdateChecker.Shared.DownloadAndApply(info, p =>
                     DispatcherQueue.TryEnqueue(() => progress.Text = $"Downloading update… {(int)(p * 100)}%"));
-                // DownloadAndApply calls Environment.Exit on success.
             }
             catch (Exception ex)
             {
@@ -183,14 +233,14 @@ public sealed partial class LogsPage : Page
                 DispatcherQueue.TryEnqueue(() =>
                 {
                     _updateHost.Children.Clear();
-                    _updateHost.Children.Add(new TextBlock { Text = $"Update failed: {ex.Message}", FontSize = 13, Foreground = UI.Red, TextWrapping = TextWrapping.Wrap });
+                    _updateHost.Children.Add(new TextBlock { Text = $"Update failed: {ex.Message}", FontSize = 14, Foreground = UI.Red, TextWrapping = TextWrapping.Wrap });
                     _updateHost.Children.Add(UI.SecondaryButton("Try Again", (_, _) => RunUpdateCheck()));
                 });
             }
         });
     }
 
-    // ── Report a bug ───────────────────────────────────────────────────────
+    // ── Report a bug ────────────────────────────────────────────────────────
     private async void SendBug_Click(object sender, RoutedEventArgs e)
     {
         var desc = _bugBox.Text.Trim();
@@ -241,7 +291,7 @@ public sealed partial class LogsPage : Page
         _bugStatus.Foreground = ok ? UI.Green : UI.Red;
     }
 
-    // ── Cache ──────────────────────────────────────────────────────────────
+    // ── Cache ───────────────────────────────────────────────────────────────
     private void RefreshCacheSize()
     {
         var stored = (int)DataStore.Shared.Data.MaxCacheGb;
@@ -275,8 +325,18 @@ public sealed partial class LogsPage : Page
         _cacheBar.Maximum = value;
         _cacheMax.Text = $"of {value} GB max";
         _cacheStatus.Visibility = Visibility.Visible;
-        _cacheStatus.Text = $"✓ Max cache set to {value} GB";
-        _cacheStatus.Foreground = UI.Green;
+        _cacheStatus.Text = "Applying limit…";
+        _cacheStatus.Foreground = UI.Dim;
+        Task.Run(() =>
+        {
+            CacheManager.Shared.EnforceLimit();
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                _cacheStatus.Text = $"✓ Max cache set to {value} GB";
+                _cacheStatus.Foreground = UI.Green;
+                RefreshCacheSize();
+            });
+        });
     }
 
     private void ClearCache_Click(object sender, RoutedEventArgs e)

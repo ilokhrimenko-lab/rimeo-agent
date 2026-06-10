@@ -27,10 +27,16 @@ public sealed class AppConfig
 
     private string _xmlPath = "";
     private string _dbPath  = "";
+    private bool   _dbSourceEnabled  = true;
+    private bool   _xmlSourceEnabled = true;
     private readonly object _lock = new();
 
     public string XmlPath { get { lock (_lock) return _xmlPath; } }
     public string DbPath  { get { lock (_lock) return _dbPath;  } }
+    /// <summary>Whether the Rekordbox master.db source is enabled (Library toggle).</summary>
+    public bool DbSourceEnabled  { get { lock (_lock) return _dbSourceEnabled;  } }
+    /// <summary>Whether the exported XML source is enabled (Library toggle).</summary>
+    public bool XmlSourceEnabled { get { lock (_lock) return _xmlSourceEnabled; } }
 
     public bool XmlExists => !string.IsNullOrEmpty(XmlPath) && File.Exists(XmlPath);
     public bool DbExists  => !string.IsNullOrEmpty(DbPath)  && File.Exists(DbPath);
@@ -79,6 +85,8 @@ public sealed class AppConfig
                 var val = parts[1].Trim();
                 if (key == "RIMEO_XML_PATH") _xmlPath = val;
                 else if (key == "RIMEO_DB_PATH" && !string.IsNullOrEmpty(val)) _dbPath = val;
+                else if (key == "RIMEO_DB_ENABLED" && !string.IsNullOrEmpty(val)) _dbSourceEnabled = ParseBool(val);
+                else if (key == "RIMEO_XML_ENABLED" && !string.IsNullOrEmpty(val)) _xmlSourceEnabled = ParseBool(val);
             }
         }
     }
@@ -93,6 +101,24 @@ public sealed class AppConfig
     {
         lock (_lock) { _dbPath = path; }
         UpdateEnvVar("RIMEO_DB_PATH", path);
+    }
+
+    public void SetDbSourceEnabled(bool on)
+    {
+        lock (_lock) { _dbSourceEnabled = on; }
+        UpdateEnvVar("RIMEO_DB_ENABLED", on ? "1" : "0");
+    }
+
+    public void SetXmlSourceEnabled(bool on)
+    {
+        lock (_lock) { _xmlSourceEnabled = on; }
+        UpdateEnvVar("RIMEO_XML_ENABLED", on ? "1" : "0");
+    }
+
+    private static bool ParseBool(string v)
+    {
+        v = v.Trim().ToLowerInvariant();
+        return v is "1" or "true" or "yes" or "on";
     }
 
     public string GetLocalIp()

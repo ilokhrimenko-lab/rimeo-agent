@@ -95,6 +95,8 @@ public partial class App : Application
 
         SafeStart("cloud relay", () => CloudRelay.Shared.StartIfLinked());
 
+        SafeStart("cache prune", () => Services.CacheManager.Shared.ScheduleEnforce());
+
         // Ensure cloudflared/ffmpeg are present, THEN bring up the tunnel and
         // provision the per-user named tunnel — the server only accepts named
         // tunnels for audio streaming (quick trycloudflare tunnels are rejected).

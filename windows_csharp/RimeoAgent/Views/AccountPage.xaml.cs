@@ -13,8 +13,8 @@ namespace RimeoAgent.Views;
 // 1:1 mirror of macOS AccountTabView: connection status + link-to-account form.
 public sealed partial class AccountPage : Page
 {
-    private readonly StackPanel _statusHost = new() { Orientation = Orientation.Vertical, Spacing = 12 };
-    private readonly TextBox    _tokenBox   = new() { PlaceholderText = "8-character code from web dashboard", FontSize = 13 };
+    private readonly StackPanel _statusHost = new() { Orientation = Orientation.Vertical, Spacing = 16 };
+    private readonly TextBox    _tokenBox   = new() { PlaceholderText = "8-character code from web dashboard", FontSize = 15, FontFamily = new FontFamily("Consolas") };
     private readonly TextBlock  _linkStatus = new() { FontSize = 13, Visibility = Visibility.Collapsed, TextWrapping = TextWrapping.Wrap };
     private readonly StackPanel _linkButtonHost = new() { Orientation = Orientation.Horizontal, Spacing = 16, VerticalAlignment = VerticalAlignment.Center };
 
@@ -33,23 +33,27 @@ public sealed partial class AccountPage : Page
     {
         var (scroll, stack) = UI.Page();
 
-        stack.Children.Add(UI.Heading("Account"));
-        stack.Children.Add(UI.Subtitle("Link this agent to your Rimeo account so the web app knows it's online."));
+        stack.Children.Add(UI.ScreenHeader("Account",
+            "Link this agent to your Rimeo account so the web app knows it's online."));
 
         stack.Children.Add(UI.SectionLabel("Connection status"));
-        stack.Children.Add(_statusHost);
+        stack.Children.Add(UI.Card(_statusHost));
 
         stack.Children.Add(UI.SectionLabel("Link to account"));
 
         _linkButtonHost.Children.Add(UI.PrimaryButton("Link Agent", Link_Click));
-        var card = UI.VStack(14,
-            UI.StepsBox(
-                UI.StepRow("1", "Open rimeo.app → Account → click «Generate Link Token»."),
-                UI.StepRow("2", "Enter the 8-character code below and click Link.")
-            ),
+
+        _tokenBox.Background = UI.Field;
+        _tokenBox.BorderBrush = UI.Brd;
+        _tokenBox.CornerRadius = new CornerRadius(13);
+        _tokenBox.Padding = new Thickness(14, 12, 14, 12);
+
+        var card = UI.VStack(16,
+            UI.StepsList(
+                UI.StepRow("1", "On rimeo.app open Account and click Generate Link Token."),
+                UI.StepRow("2", "Enter the 8-character code below and click Link Agent.")),
             _tokenBox,
-            UI.HStack(16, _linkButtonHost, _linkStatus)
-        );
+            UI.HStack(16, _linkButtonHost, _linkStatus));
         stack.Children.Add(UI.Card(card));
 
         return scroll;
@@ -59,37 +63,29 @@ public sealed partial class AccountPage : Page
     {
         _statusHost.Children.Clear();
 
-        // Connection badge
         var color = _linked ? UI.Green : UI.Red;
-        var bg = new SolidColorBrush(_linked ? UI.Hex("#14532d") : UI.Hex("#3b1717"));
-        var dot = new Microsoft.UI.Xaml.Shapes.Ellipse { Width = 12, Height = 12, Fill = color, VerticalAlignment = VerticalAlignment.Center };
-        var label = new TextBlock
+        var icon = new FontIcon
         {
-            Text = _linked ? $"Linked as {_who}" : "Not linked to a cloud account",
-            FontSize = 13, Foreground = color, VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap
+            Glyph = _linked ? "" : "",   // CheckMark / Error
+            FontFamily = new FontFamily("Segoe MDL2 Assets"),
+            FontSize = 20,
+            Foreground = color,
+            VerticalAlignment = VerticalAlignment.Center
         };
-        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
-        row.Children.Add(dot); row.Children.Add(label);
-        _statusHost.Children.Add(new Border
+
+        var textStack = new StackPanel { Orientation = Orientation.Vertical, Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
+        textStack.Children.Add(new TextBlock
         {
-            Background = bg, CornerRadius = new CornerRadius(12), Padding = new Thickness(12, 6, 12, 6),
-            HorizontalAlignment = HorizontalAlignment.Left, Child = row
+            Text = _linked ? "Linked to your account" : "Not linked to a cloud account",
+            FontSize = 17, FontWeight = FontWeights.Bold, Foreground = UI.Text, TextWrapping = TextWrapping.Wrap
         });
+        if (_linked)
+            textStack.Children.Add(new TextBlock { Text = _who, FontSize = 13, FontWeight = FontWeights.Medium, Foreground = UI.Secondary, TextWrapping = TextWrapping.Wrap });
+
+        _statusHost.Children.Add(UI.HStack(11, icon, textStack));
 
         if (_linked)
-        {
-            var del = new Button
-            {
-                Content = new TextBlock { Text = "Delete Connection", FontSize = 13, FontWeight = FontWeights.Medium, Foreground = UI.Red },
-                Background = new SolidColorBrush(UI.Hex("#3b1717")),
-                BorderThickness = new Thickness(0),
-                CornerRadius = new CornerRadius(12),
-                Padding = new Thickness(20, 10, 20, 10),
-                HorizontalAlignment = HorizontalAlignment.Left
-            };
-            del.Click += Unlink_Click;
-            _statusHost.Children.Add(del);
-        }
+            _statusHost.Children.Add(UI.DestructiveButton("Delete Connection", Unlink_Click));
     }
 
     private async Task RefreshAccount()
