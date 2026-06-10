@@ -57,6 +57,7 @@ final class AudioService {
         }
         let size = (try? FileManager.default.attributesOfItem(atPath: cached.path))?[.size] as? Int ?? 0
         logger.info("AIFF conversion complete: track=\(trackID), wav=\(cached.path), bytes=\(size)")
+        CacheManager.shared.scheduleEnforce()
         return cached.path
     }
 
@@ -112,6 +113,7 @@ final class AudioService {
         let out: [String: Any] = ["duration": duration, "peaks": peaks]
         if let data = try? JSONSerialization.data(withJSONObject: out) {
             try? data.write(to: cacheURL)
+            CacheManager.shared.scheduleEnforce()
         }
         return out
     }
@@ -159,6 +161,8 @@ final class AudioService {
         let ok = result.success && FileManager.default.fileExists(atPath: cacheURL.path)
         if !ok {
             logger.warning("Artwork extraction failed: track=\(trackID), stderr=\(result.stderr)")
+        } else {
+            CacheManager.shared.scheduleEnforce()
         }
         return ok ? cacheURL.path : nil
     }

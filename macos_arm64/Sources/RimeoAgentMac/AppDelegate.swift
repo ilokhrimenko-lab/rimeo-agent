@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         createMainWindow()
         TCCDiagnostics.logIdentityOnce()
         AgentSettings.shared.applyAllAtLaunch()
+        CacheManager.shared.scheduleEnforce()
         SimilarityEngine.shared.startCloudSync()
         NotificationCenter.default.addObserver(
             self,

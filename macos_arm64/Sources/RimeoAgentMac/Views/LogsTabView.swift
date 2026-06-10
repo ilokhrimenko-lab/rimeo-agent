@@ -422,7 +422,14 @@ struct LogsTabView: View {
         let value = max(1, Int(maxCacheGB) ?? 3)
         DataStore.shared.update { $0.max_cache_gb = Double(value) }
         maxCacheGB = "\(value)"
-        cacheStatus = "✓ Max cache set to \(value) GB"
+        cacheStatus = "Applying limit…"
+        DispatchQueue.global(qos: .utility).async {
+            CacheManager.shared.enforceLimit()
+            DispatchQueue.main.async {
+                cacheStatus = "✓ Max cache set to \(value) GB"
+                refreshCacheSize()
+            }
+        }
     }
 
     private func runUpdateCheck() {
