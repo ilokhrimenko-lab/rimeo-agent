@@ -171,13 +171,31 @@ public sealed partial class MainWindow : Window
                 presenter.IsResizable = true;
             }
 
-            // Open at a comfortable size, centred on the work area (first launch).
-            const int targetW = 1280, targetH = 860;
+            // Adaptive first-launch size: a fraction of the work area, scaled by the
+            // monitor DPI. A fixed pixel size (MoveAndResize is in *physical* pixels)
+            // looks tiny on high-DPI displays — 1280px on a 4K/200% screen is a third
+            // of the width and the content is scaled down on top of that.
             var area = Microsoft.UI.Windowing.DisplayArea.GetFromWindowId(
                 AppWindow.Id, Microsoft.UI.Windowing.DisplayAreaFallback.Primary);
             var work = area.WorkArea;
-            int w = Math.Min(targetW, work.Width  - 40);
-            int h = Math.Min(targetH, work.Height - 40);
+
+            var hwndForDpi = WinRT.Interop.WindowNative.GetWindowHandle(this);
+            uint dpi = GetDpiForWindow(hwndForDpi);
+            double scale = dpi >= 72 ? dpi / 96.0 : 1.0;
+
+            // Work area expressed in effective (DIP) pixels.
+            double workWDip = work.Width  / scale;
+            double workHDip = work.Height / scale;
+
+            // Comfortable size: ~two thirds of the screen, clamped to sane bounds,
+            // and never larger than the work area itself.
+            double wDip = Math.Clamp(workWDip * 0.68, 1080, 1560);
+            double hDip = Math.Clamp(workHDip * 0.84, 760, 1040);
+            wDip = Math.Min(wDip, workWDip - 24);
+            hDip = Math.Min(hDip, workHDip - 48);
+
+            int w = (int)Math.Round(wDip * scale);
+            int h = (int)Math.Round(hDip * scale);
             int x = work.X + (work.Width  - w) / 2;
             int y = work.Y + (work.Height - h) / 2;
             AppWindow.MoveAndResize(new Windows.Graphics.RectInt32(x, y, w, h));
@@ -246,4 +264,7 @@ public sealed partial class MainWindow : Window
 
     [DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(IntPtr hWnd);
 }
