@@ -54,8 +54,20 @@ public sealed partial class MainWindow : Window
         _navView.MenuItems.Add(CreateNavItem("Settings", "Logs"));    // Settings gear
         _navView.SelectionChanged += NavView_SelectionChanged;
         _navView.RequestedTheme = theme;
+        ApplyPaneTheme();
 
         Content = _navView;
+    }
+
+    // The NavigationView pane material follows the window backdrop (system theme),
+    // not RequestedTheme — so in a forced dark theme on a light Windows it stays
+    // white and hides the white-on-white nav. Override the pane background brushes.
+    private void ApplyPaneTheme()
+    {
+        _navView.Resources["NavigationViewDefaultPaneBackground"]  = UI.Sidebar;
+        _navView.Resources["NavigationViewExpandedPaneBackground"] = UI.Sidebar;
+        _navView.Resources["NavigationViewCompactPaneBackground"]  = UI.Sidebar;
+        _navView.Background = UI.Sidebar;
     }
 
     private static bool ResolveDark(ElementTheme t) => t switch
@@ -71,6 +83,7 @@ public sealed partial class MainWindow : Window
         var theme = ThemeManager.CurrentElementTheme;
         _navView.RequestedTheme = theme;
         UI.IsDark = ResolveDark(theme);
+        ApplyPaneTheme();
 
         _navView.PaneHeader = BuildBrand();
         _navView.PaneFooter = BuildFooter();
