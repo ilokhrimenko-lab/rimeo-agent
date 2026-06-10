@@ -3,7 +3,8 @@ import AppKit
 
 struct PairingTabView: View {
     @EnvironmentObject var appState: AppState
-    @State private var qrString = AppConfig.shared.localAgentURL()
+    /// JSON payload the Rimeo iOS app expects: {"url":..,"code":..,"agent_id":..}
+    @State private var qrString = ""
 
     var body: some View {
         ScrollView {
@@ -56,7 +57,7 @@ struct PairingTabView: View {
                                     .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(C.brd, lineWidth: 1))
 
                                 SecondaryButton(title: "Refresh QR", icon: "arrow.clockwise") {
-                                    qrString = AppConfig.shared.localAgentURL()
+                                    refreshPairing()
                                 }
                                 .frame(maxWidth: .infinity)
                             }
@@ -73,6 +74,28 @@ struct PairingTabView: View {
         }
         .background(C.bg)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear { refreshPairing() }
+    }
+
+    /// Requests a fresh pairing code from the agent and builds the exact JSON
+    /// payload the Rimeo iOS scanner decodes into `PairingInfo`.
+    private func refreshPairing() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let resp = APIRouter.shared.route(HTTPRequest(
+                method: "GET",
+                path: "/api/pairing_info",
+                queryParams: [:],
+                headers: [:],
+                body: Data()
+            ))
+            guard case .data(let data) = resp.body,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let url = obj["local_url"] as? String,
+                  let code = obj["code"] as? String else { return }
+            let agentID = (obj["agent_id"] as? String) ?? AppConfig.shared.agentID
+            let payload = #"{"url":"\#(url)","code":"\#(code)","agent_id":"\#(agentID)"}"#
+            DispatchQueue.main.async { qrString = payload }
+        }
     }
 
     @ViewBuilder
