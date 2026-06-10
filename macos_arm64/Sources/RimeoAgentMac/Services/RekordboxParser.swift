@@ -7,6 +7,14 @@ final class RekordboxParser: NSObject {
     private var cachedData:  LibraryData?
     private var cachedMtime: Double = 0
     private var cachedSourceKey: String = ""
+    // Производный индекс trackID → Track, строится вместе с cachedData (единый
+    // источник правды). Нужен для O(1)-поиска обложек вместо скана всех треков.
+    private var cachedTrackIndex: [String: Track] = [:]
+    // Debounce: даже если mtime сменился, не переразбираем чаще, чем раз в N сек —
+    // чтобы checkpoint Rekordbox во время стрима не молотил диск. Реальные правки
+    // библиотеки подхватятся с задержкой < N сек (для DJ-сценария незаметно).
+    private var lastParseAt: Double = 0
+    private let minReparseInterval: Double = 3.0
 
     // Last error from master.db helper; nil when last attempt succeeded or cache was cleared
     private(set) var masterDBError: String? = nil
@@ -23,17 +31,19 @@ final class RekordboxParser: NSObject {
         if AppConfig.shared.dbSourceEnabled, !dbPath.isEmpty, FileManager.default.fileExists(atPath: dbPath) {
             let mtime = dbMtime(at: dbPath)
             let cacheKey = "db:\(dbPath)"
-            if let cached = cachedData, mtime == cachedMtime, cacheKey == cachedSourceKey {
-                return cached
+            if let cached = cachedData, cacheKey == cachedSourceKey {
+                // Свежий кеш — отдаём сразу.
+                if mtime == cachedMtime { return cached }
+                // mtime сменился, но не парсим чаще раза в N сек (debounce).
+                if now() - lastParseAt < minReparseInterval { return cached }
             }
+            lastParseAt = now()
 
             let alreadyFailed = dbPath == masterDBLastFailedPath && mtime == masterDBLastFailedMtime
             if !alreadyFailed {
                 if let dbResult = parseMasterDB(dbPath: dbPath, mtime: mtime),
                    !dbResult.tracks.isEmpty {
-                    cachedData = dbResult
-                    cachedMtime = mtime
-                    cachedSourceKey = cacheKey
+                    setCache(dbResult, mtime: mtime, sourceKey: cacheKey)
                     masterDBError = nil
                     masterDBLastFailedPath = ""
                     masterDBLastFailedMtime = -1
@@ -65,9 +75,7 @@ final class RekordboxParser: NSObject {
         }
 
         let result = parseXML(xml, mtime: mtime)
-        cachedData  = result
-        cachedMtime = mtime
-        cachedSourceKey = cacheKey
+        setCache(result, mtime: mtime, sourceKey: cacheKey)
         logger.info("XML parsed: \(result.tracks.count) tracks")
         return result
     }
@@ -210,14 +218,37 @@ final class RekordboxParser: NSObject {
 
     // Rekordbox 6 master.db is SQLite in WAL mode: new edits land in master.db-wal
     // first and the main master.db mtime stays frozen until a checkpoint. Key the
-    // cache on the newest of db / -wal / -shm so WAL writes invalidate the cache.
+    // cache on the newest of db / -wal so WAL writes invalidate the cache.
+    // NB: -shm (shared-memory index) НЕ учитываем — SQLite дёргает его при любом
+    // открытии БД (даже на чтение), реальных данных там нет; раньше из-за него
+    // кеш сбрасывался почти на каждый запрос и БД переразбиралась во время стрима.
     private func dbMtime(at dbPath: String) -> Double {
         var latest = 0.0
-        for suffix in ["", "-wal", "-shm"] {
+        for suffix in ["", "-wal"] {
             let m = fileMtime(at: dbPath + suffix)
             if m > latest { latest = m }
         }
         return latest
+    }
+
+    private func now() -> Double { Date().timeIntervalSinceReferenceDate }
+
+    // Единая точка установки кеша: данные + mtime + ключ + производный индекс.
+    private func setCache(_ data: LibraryData, mtime: Double, sourceKey: String) {
+        cachedData = data
+        cachedMtime = mtime
+        cachedSourceKey = sourceKey
+        var index = [String: Track](minimumCapacity: data.tracks.count)
+        for t in data.tracks { index[t.id] = t }
+        cachedTrackIndex = index
+    }
+
+    /// O(1)-поиск трека по id из кеша (для обложек). Гарантирует прогрев кеша.
+    func track(byID id: String) -> Track? {
+        return queue.sync {
+            _ = _parse()
+            return cachedTrackIndex[id]
+        }
     }
 
     private func parseMasterDB(dbPath: String, mtime: Double) -> LibraryData? {

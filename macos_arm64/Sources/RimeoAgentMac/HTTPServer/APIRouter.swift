@@ -333,8 +333,7 @@ final class APIRouter {
     // track has no ImagePath or the file is absent. Rekordbox stores ImagePath
     // relative to "<rekordbox dir>/share" (dbPath lives at "<rekordbox dir>/master.db").
     private func rekordboxArtworkFile(forTrackID id: String) -> String? {
-        let lib = RekordboxParser.shared.parse()
-        guard let track = lib.tracks.first(where: { $0.id == id }),
+        guard let track = RekordboxParser.shared.track(byID: id),
               let imagePath = track.image_path,
               !imagePath.isEmpty else { return nil }
 
