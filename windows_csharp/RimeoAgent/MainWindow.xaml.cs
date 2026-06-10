@@ -91,9 +91,14 @@ public sealed partial class MainWindow : Window
     {
         UI.IsDark = ResolveDark(ThemeManager.CurrentElementTheme);
         var tag = _currentTag;
-        BuildShell();
-        SelectNav(tag);
-        NavigateSafely(PageTypeFor(tag), tag);
+        // Defer: this is called from a Button.Click inside the content we are about
+        // to replace — rebuilding the shell synchronously from there can crash WinUI.
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            BuildShell();
+            SelectNav(tag);
+            NavigateSafely(PageTypeFor(tag), tag);
+        });
     }
 
     private static Type PageTypeFor(string tag) => tag switch

@@ -81,8 +81,10 @@ public sealed partial class LibraryPage : Page
         {
             AppConfig.Shared.SetDbSourceEnabled(on);
             RekordboxParser.Shared.InvalidateCache();
-            Rebuild();
-            RefreshDatabaseAge();
+            // Defer to the next tick: rebuilding clears the tree that holds this
+            // very ToggleSwitch, and doing that inside its own Toggled handler
+            // crashes WinUI. Let the event finish first.
+            DispatcherQueue.TryEnqueue(() => { Rebuild(); RefreshDatabaseAge(); });
         });
 
         var dotColor    = !enabled ? UI.Dim : (exists ? UI.Green : UI.Red);
@@ -111,8 +113,10 @@ public sealed partial class LibraryPage : Page
         {
             AppConfig.Shared.SetXmlSourceEnabled(on);
             RekordboxParser.Shared.InvalidateCache();
-            Rebuild();
-            RefreshDatabaseAge();
+            // Defer to the next tick: rebuilding clears the tree that holds this
+            // very ToggleSwitch, and doing that inside its own Toggled handler
+            // crashes WinUI. Let the event finish first.
+            DispatcherQueue.TryEnqueue(() => { Rebuild(); RefreshDatabaseAge(); });
         });
 
         string statusText;
