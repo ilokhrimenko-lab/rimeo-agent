@@ -5,6 +5,8 @@ using Microsoft.UI.Xaml.Markup;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using Windows.UI;
+// Disambiguate from System.IO.Path (pulled in by ImplicitUsings).
+using Path = Microsoft.UI.Xaml.Shapes.Path;
 
 namespace RimeoAgent.Views;
 
