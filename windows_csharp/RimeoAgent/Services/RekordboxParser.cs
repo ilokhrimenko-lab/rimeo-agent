@@ -13,6 +13,11 @@ public sealed class RekordboxParser
     private LibraryData? _cachedData;
     private double       _cachedMtime;
     private string       _cachedSourceKey = "";
+    // Debounce: даже если mtime сменился, не переразбираем чаще, чем раз в N сек —
+    // чтобы checkpoint Rekordbox не молотил диск во время стрима. Реальные правки
+    // подхватятся с задержкой < N сек. Паритет с macOS-агентом.
+    private double       _lastParseAt;
+    private const double MinReparseInterval = 3.0;
 
     public LibraryData Parse()
     {
@@ -24,10 +29,15 @@ public sealed class RekordboxParser
         var dbPath = AppConfig.Shared.DbPath;
         if (AppConfig.Shared.DbSourceEnabled && !string.IsNullOrEmpty(dbPath) && File.Exists(dbPath))
         {
-            var mtime = GetMtime(dbPath);
+            var mtime = DbMtime(dbPath);
             var key = $"db:{dbPath}";
-            if (_cachedData != null && mtime == _cachedMtime && key == _cachedSourceKey)
-                return _cachedData;
+            if (_cachedData != null && key == _cachedSourceKey)
+            {
+                if (mtime == _cachedMtime) return _cachedData;
+                // mtime сменился, но не парсим чаще раза в N сек (debounce).
+                if (Now() - _lastParseAt < MinReparseInterval) return _cachedData;
+            }
+            _lastParseAt = Now();
 
             Log.Info("Parsing Rekordbox master.db (cache miss)…");
             var result = ParseMasterDb(dbPath);
@@ -361,5 +371,23 @@ public sealed class RekordboxParser
             return new DateTimeOffset(File.GetLastWriteTimeUtc(path)).ToUnixTimeMilliseconds() / 1000.0;
         }
         catch { return 0; }
+    }
+
+    private static double Now() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+
+    // Rekordbox 6 master.db — SQLite в WAL-режиме: правки сначала попадают в
+    // master.db-wal, а mtime самой master.db «заморожен» до checkpoint. Ключ кеша —
+    // по новейшему из db / -wal, чтобы WAL-записи инвалидировали кеш.
+    // NB: -shm НЕ учитываем (его SQLite дёргает при любом открытии БД даже на
+    // чтение — иначе кеш сбрасывался бы почти на каждый запрос). Паритет с macOS.
+    private static double DbMtime(string dbPath)
+    {
+        var latest = 0.0;
+        foreach (var suffix in new[] { "", "-wal" })
+        {
+            var m = GetMtime(dbPath + suffix);
+            if (m > latest) latest = m;
+        }
+        return latest;
     }
 }

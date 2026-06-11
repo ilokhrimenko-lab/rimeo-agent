@@ -67,18 +67,23 @@ jobs:
           cp "$GITHUB_WORKSPACE/build_info.py" "$APP/Contents/Resources/build_info.py"
           cp "$GITHUB_WORKSPACE/similarity_config.json" "$APP/Contents/Resources/similarity_config.json"
 
-      - name: Sign macOS app
+      - name: Sign macOS app (Developer ID + hardened runtime)
         env:
           MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
           MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
         run: |
           set -e
           if [ -z "$MACOS_CERT_P12" ]; then
-            echo "::error::MACOS_CERT_P12 secret not set — refusing to ship an adhoc-signed build (FDA would reset on every update)"
+            echo "::error::MACOS_CERT_P12 secret not set — refusing to ship an adhoc-signed build (Gatekeeper would block it)"
             exit 1
           fi
-          ID="Rimeo Self-Signed"
+          if [ -z "$SIGN_IDENTITY" ]; then
+            echo "::error::MACOS_SIGN_IDENTITY secret not set (expected: 'Developer ID Application: ... (TEAMID)')"
+            exit 1
+          fi
+          ID="$SIGN_IDENTITY"
           APP="$GITHUB_WORKSPACE/dist/RimeoAgent.app"
           CERT_P12="$RUNNER_TEMP/cert.p12"
           KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
@@ -99,12 +104,43 @@ jobs:
               [ -e Versions/Current/Resources ] && ln -s Versions/Current/Resources Resources || true
               ln -s Versions/Current/SQLCipher SQLCipher )
           fi
-          [ -d "$FW" ] && codesign --force --sign "$ID" "$FW/Versions/A"
-          codesign --force --sign "$ID" "$APP/Contents/MacOS/rbdb-helper"
-          codesign --force --sign "$ID" "$APP/Contents/MacOS/RimeoAgent"
-          codesign --force --sign "$ID" --identifier app.rimeo.agent "$APP"
+          # Подпись изнутри наружу с hardened runtime (--options runtime) и
+          # доверенным timestamp — обязательные условия нотаризации Apple.
+          # SQLCipher.framework подписан той же командой -> library validation
+          # пропускает его без disable-library-validation.
+          SIGN="codesign --force --timestamp --options runtime --sign $ID"
+          [ -d "$FW" ] && $SIGN "$FW/Versions/A"
+          $SIGN "$APP/Contents/MacOS/rbdb-helper"
+          $SIGN "$APP/Contents/MacOS/RimeoAgent"
+          codesign --force --timestamp --options runtime --sign "$ID" --identifier app.rimeo.agent "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
-          codesign -dvv "$APP" 2>&1 | grep -E "Identifier|Authority|Sealed"
+          codesign -dvv "$APP" 2>&1 | grep -E "Identifier|Authority|TeamIdentifier|Sealed"
+
+      - name: Notarize & staple macOS app
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_BASE64: ${{ secrets.ASC_API_KEY_BASE64 }}
+        run: |
+          set -e
+          if [ -z "$ASC_API_KEY_BASE64" ]; then
+            echo "::error::ASC_API_KEY_BASE64 secret not set — cannot notarize (Gatekeeper would still warn)"
+            exit 1
+          fi
+          APP="$GITHUB_WORKSPACE/dist/RimeoAgent.app"
+          API_KEY="$RUNNER_TEMP/asc_api_key.p8"
+          echo "$ASC_API_KEY_BASE64" | base64 --decode > "$API_KEY"
+          ZIP="$RUNNER_TEMP/RimeoAgent_notarize.zip"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+          xcrun notarytool submit "$ZIP" \
+            --key "$API_KEY" \
+            --key-id "$ASC_API_KEY_ID" \
+            --issuer "$ASC_API_ISSUER_ID" \
+            --wait
+          # Прикрепляем билет к .app — дальше Package зипует уже нотаризованный бандл.
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+          spctl --assess --type execute --verbose=4 "$APP" || true
 
       - name: Package
         run: |
