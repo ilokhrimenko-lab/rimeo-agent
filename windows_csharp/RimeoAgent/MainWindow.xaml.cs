@@ -16,6 +16,7 @@ public sealed partial class MainWindow : Window
     private bool _defaultPageRequested;
     private bool _navigatingProgrammatically;
     private bool _didInitialSetup;
+    private bool _inGate;
     private string _currentTag = "Library";
 
     /// <summary>HWND of the main window — used by pages to host file pickers.</summary>
@@ -29,8 +30,59 @@ public sealed partial class MainWindow : Window
         Instance = this;
         AppState.Shared.SetDispatcherQueue(Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
         UI.IsDark = ResolveDark(ThemeManager.CurrentElementTheme);
-        BuildShell();
+
+        // Until the agent is linked to a Rimeo account, show the Link-device gate
+        // (custom titlebar + pairing-code entry); otherwise go straight to the shell.
+        if (AppState.Shared.CloudLinked) BuildShell();
+        else ShowLinkGate();
     }
+
+    // ── Link-device gate ──────────────────────────────────────────────────────
+    private void ShowLinkGate()
+    {
+        _inGate = true;
+        var gate = new LinkDevicePage(onLinked: ExitLinkGate);
+        try
+        {
+            ExtendsContentIntoTitleBar = true;
+            Content = gate;
+            SetTitleBar(gate.TitleBarDragRegion);
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"Link gate setup failed: {ex}");
+            ExtendsContentIntoTitleBar = false;
+            Content = gate;
+        }
+    }
+
+    // Called after a successful link: drop the custom chrome and bring up the shell.
+    private void ExitLinkGate()
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            _inGate = false;
+            try { ExtendsContentIntoTitleBar = false; } catch (Exception ex) { Log.Error($"Title bar reset failed: {ex}"); }
+            _defaultPageRequested = false;
+            BuildShell();
+            SelectNav("Library");
+            NavigateSafely(typeof(LibraryPage), "Library");
+        });
+    }
+
+    internal void MinimizeGate() => (AppWindow.Presenter as OverlappedPresenter)?.Minimize();
+
+    internal void ToggleMaximizeGate()
+    {
+        if (AppWindow.Presenter is OverlappedPresenter p)
+        {
+            if (p.State == OverlappedPresenterState.Maximized) p.Restore();
+            else p.Maximize();
+        }
+    }
+
+    // Mirror the window-close behaviour: hide to the tray, keep serving in the background.
+    internal void CloseGate() => AppWindow.Hide();
 
     // Builds (or fully rebuilds) the nav shell for the current theme. Rebuilding
     // wholesale is the reliable way to re-theme on a live theme switch — the
@@ -161,6 +213,7 @@ public sealed partial class MainWindow : Window
 
     public void NavigateToDefaultPage()
     {
+        if (_inGate) return;                 // gate owns the window; no shell/nav yet
         if (_defaultPageRequested) return;
         _defaultPageRequested = true;
 
