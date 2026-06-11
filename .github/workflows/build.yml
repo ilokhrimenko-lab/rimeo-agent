@@ -108,10 +108,10 @@ jobs:
           # доверенным timestamp — обязательные условия нотаризации Apple.
           # SQLCipher.framework подписан той же командой -> library validation
           # пропускает его без disable-library-validation.
-          SIGN="codesign --force --timestamp --options runtime --sign $ID"
-          [ -d "$FW" ] && $SIGN "$FW/Versions/A"
-          $SIGN "$APP/Contents/MacOS/rbdb-helper"
-          $SIGN "$APP/Contents/MacOS/RimeoAgent"
+          # NB: "$ID" обязательно в кавычках — identity содержит пробелы.
+          [ -d "$FW" ] && codesign --force --timestamp --options runtime --sign "$ID" "$FW/Versions/A"
+          codesign --force --timestamp --options runtime --sign "$ID" "$APP/Contents/MacOS/rbdb-helper"
+          codesign --force --timestamp --options runtime --sign "$ID" "$APP/Contents/MacOS/RimeoAgent"
           codesign --force --timestamp --options runtime --sign "$ID" --identifier app.rimeo.agent "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
           codesign -dvv "$APP" 2>&1 | grep -E "Identifier|Authority|TeamIdentifier|Sealed"
