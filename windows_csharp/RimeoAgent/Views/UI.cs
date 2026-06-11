@@ -1,6 +1,7 @@
 using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Markup;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using Windows.UI;
@@ -51,6 +52,18 @@ internal static class UI
     public static SolidColorBrush SegTrack   => new(Pick(0xEBEDF1, 0x23262E));
     public static SolidColorBrush SegActive  => new(Pick(0xFFFFFF, 0x363C46));
     public static SolidColorBrush White      => new(Microsoft.UI.Colors.White);
+
+    // ── Link Device gate (custom window chrome + code cells) ─────────────────
+    public static SolidColorBrush WinChrome  => new(Pick(0xFFFFFF, 0x16181C)); // titlebar strip
+    public static SolidColorBrush LockBg      => new(Pick(0xEAF0FE, 0x17243F)); // lock emblem fill
+    public static SolidColorBrush LockBrd     => new(Pick(0xDCE7FD, 0x2A3A5C)); // lock emblem border
+    public static SolidColorBrush CellBrd     => new(Pick(0xE3E6EB, 0x2E323B)); // idle code-cell border
+    public static SolidColorBrush TitleInk    => new(Pick(0x3A3F49, 0xC9CDD4)); // titlebar "Rimeo"
+    public static SolidColorBrush TitleDim    => new(Pick(0xA2A7B0, 0x6E747E)); // titlebar "Agent"
+    public static SolidColorBrush WinCtrl     => new(Pick(0x6B7280, 0x8B919B)); // window control glyphs
+    /// <summary>Soft accent ring behind the focused code cell (#2563EB / #3B82F6 @ ~14%).</summary>
+    public static SolidColorBrush AccGlow =>
+        new(Color.FromArgb(0x24, (byte)(IsDark ? 0x3B : 0x25), (byte)(IsDark ? 0x82 : 0x63), (byte)(IsDark ? 0xF6 : 0xEB)));
 
     public static Color Hex(string hex)
     {
@@ -281,5 +294,26 @@ internal static class UI
         var s = new StackPanel { Orientation = Orientation.Horizontal, Spacing = spacing, VerticalAlignment = VerticalAlignment.Center };
         foreach (var c in children) s.Children.Add(c);
         return s;
+    }
+
+    // ── Stroke icons (SVG path data on a 0–24 viewBox, scaled into `size`) ────
+    private static string HexOf(Color c) => $"#{c.A:X2}{c.R:X2}{c.G:X2}{c.B:X2}";
+
+    private static Path StrokePath(string data, Color stroke, double thickness)
+    {
+        // WinUI has no Geometry.Parse; round-trip the path mini-language through XAML.
+        var xaml =
+            "<Path xmlns=\"http://schemas.microsoft.com/winfx/2006/xaml/presentation\" " +
+            $"Data=\"{data}\" Stroke=\"{HexOf(stroke)}\" StrokeThickness=\"{thickness.ToString(System.Globalization.CultureInfo.InvariantCulture)}\" " +
+            "StrokeStartLineCap=\"Round\" StrokeEndLineCap=\"Round\" StrokeLineJoin=\"Round\" />";
+        return (Path)XamlReader.Load(xaml);
+    }
+
+    /// <summary>Builds a stroked icon from one or more SVG path strings drawn on a 24×24 grid.</summary>
+    public static Viewbox Icon(double size, SolidColorBrush stroke, double thickness, params string[] paths)
+    {
+        var canvas = new Canvas { Width = 24, Height = 24 };
+        foreach (var d in paths) canvas.Children.Add(StrokePath(d, stroke.Color, thickness));
+        return new Viewbox { Width = size, Height = size, Stretch = Stretch.Uniform, Child = canvas };
     }
 }

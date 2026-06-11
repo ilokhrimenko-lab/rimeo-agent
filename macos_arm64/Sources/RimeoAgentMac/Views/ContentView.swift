@@ -73,7 +73,9 @@ struct ContentView: View {
         Group {
             switch appState.componentGateState {
             case .clear:
-                if appState.isOnboarding {
+                if !appState.cloudLinked {
+                    LinkDeviceView()
+                } else if appState.isOnboarding {
                     OnboardingView()
                 } else {
                     MainLayout()
