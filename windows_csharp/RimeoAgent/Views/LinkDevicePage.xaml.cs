@@ -21,7 +21,7 @@ namespace RimeoAgent.Views;
 // hands control back to the main shell via the supplied callback.
 public sealed partial class LinkDevicePage : Page
 {
-    private const int CodeLength = 6;
+    private const int CodeLength = 8;   // pairing token length (matches iOS / web dashboard)
 
     // Glyph paths on a 0–24 viewBox (mirrors the SVG icons in the Paper export).
     private static readonly string[] LinkGlyph =
@@ -194,18 +194,18 @@ public sealed partial class LinkDevicePage : Page
     {
         var overlay = new Grid { Margin = new Thickness(0, 26, 0, 0), HorizontalAlignment = HorizontalAlignment.Center };
 
-        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, HorizontalAlignment = HorizontalAlignment.Center };
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Center };
         for (int i = 0; i < CodeLength; i++)
         {
             var glyph = new TextBlock
             {
-                FontSize = 24, FontWeight = FontWeights.SemiBold,
+                FontSize = 22, FontWeight = FontWeights.SemiBold,
                 FontFamily = new FontFamily("Consolas"), Foreground = UI.Text,
                 HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center
             };
             var caret = new Border
             {
-                Width = 2, Height = 26, CornerRadius = new CornerRadius(2), Background = UI.Acc,
+                Width = 2, Height = 24, CornerRadius = new CornerRadius(2), Background = UI.Acc,
                 HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
                 Visibility = Visibility.Collapsed
             };
@@ -215,7 +215,7 @@ public sealed partial class LinkDevicePage : Page
 
             var box = new Border
             {
-                Width = 54, Height = 62, CornerRadius = new CornerRadius(13),
+                Width = 46, Height = 58, CornerRadius = new CornerRadius(12),
                 Background = UI.Surf, BorderBrush = UI.CellBrd, BorderThickness = new Thickness(1),
                 Child = inner
             };
@@ -362,9 +362,9 @@ public sealed partial class LinkDevicePage : Page
     private async void Submit()
     {
         var token = _input.Text.Trim();
-        if (token.Length < 4)
+        if (token.Length < CodeLength)
         {
-            ShowStatus("Enter the pairing code from rimeo.app.", ok: false);
+            ShowStatus("Enter the full 8-character pairing code from rimeo.app.", ok: false);
             return;
         }
 
