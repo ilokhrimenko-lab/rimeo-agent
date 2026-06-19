@@ -992,40 +992,19 @@ final class APIRouter {
     ///    This is what fixes "scanning the QR didn't open the library".
     /// If no PSK has been provisioned yet, falls back to the legacy JWT gate.
     private func authGate(_ req: HTTPRequest) -> HTTPResponse? {
-        if isViaTunnel(req) {
-            return jwtGate(req)
-        }
+        // A valid per-device PSK authorises a LOCAL client without the server JWT
+        // (the LAN path). Otherwise fall back to the JWT gate (remote / relay /
+        // tunnel path), exactly as before. PSK-or-JWT avoids fragile "is this via
+        // the tunnel?" detection — the relay presents requests without consistent
+        // cf-* headers/Host, so detection mis-fired and broke remote access. The
+        // premium gate is enforced server-side anyway: a free user gets neither a
+        // tunnel nor a JWT, so they can only ever reach us directly on the LAN.
         let secret = DataStore.shared.data.lan_secret
-        guard !secret.isEmpty else {
-            // No v2 pairing yet → prior behaviour (jwtGate is a no-op until a named
-            // tunnel exists, so the agent isn't locked out of itself pre-pairing).
-            return jwtGate(req)
+        if !secret.isEmpty {
+            let provided = req.queryParams["lan_token"] ?? bearerToken(req)
+            if let provided = provided, provided == secret { return nil }
         }
-        let provided = req.queryParams["lan_token"] ?? bearerToken(req)
-        if let provided = provided, provided == secret {
-            return nil   // authorised local client
-        }
-        logger.warning("LAN auth rejected: path=\(req.path), token_present=\(provided != nil)")
-        return HTTPResponse(
-            status: 401,
-            headers: [
-                "Content-Type": "application/json",
-                "WWW-Authenticate": "Bearer realm=\"rimeo-agent-lan\", error=\"lan_token\"",
-            ],
-            body: .data((try? JSONSerialization.data(withJSONObject: [
-                "error": "unauthorized", "reason": "lan_token",
-            ])) ?? Data())
-        )
-    }
-
-    /// True when the request came through the Cloudflare named tunnel rather than
-    /// the local network: Cloudflare injects cf-* headers and the Host is the
-    /// tunnel hostname. Direct LAN requests have neither.
-    private func isViaTunnel(_ req: HTTPRequest) -> Bool {
-        if req.headers["cf-ray"] != nil || req.headers["cf-connecting-ip"] != nil { return true }
-        let named = TunnelManager.shared.namedHostname
-        if !named.isEmpty, let host = req.headers["host"], host.contains(named) { return true }
-        return false
+        return jwtGate(req)
     }
 
     private func bearerToken(_ req: HTTPRequest) -> String? {
