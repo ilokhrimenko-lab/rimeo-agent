@@ -96,7 +96,8 @@ struct PairingTabView: View {
             // v2 QR payload (LAN tier): embed the PSK + LAN endpoint so iOS can talk
             // to us directly on the local network. url/code kept for back-compat.
             var dict: [String: Any] = ["url": url, "code": code, "agent_id": agentID]
-            for k in ["v", "secret", "hostname", "lan_ip", "lan_port"] {
+            for k in ["v", "secret", "hostname", "lan_ip", "lan_port",
+                      "type", "cloud_url", "mobile_token"] {
                 if let val = obj[k] { dict[k] = val }
             }
             let payload = (try? JSONSerialization.data(withJSONObject: dict))

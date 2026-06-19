@@ -445,7 +445,7 @@ final class APIRouter {
 
         // v2 payload: keeps url/code for back-compat, adds the LAN fields iOS
         // (PairingInfo v2) needs — secret(PSK), mDNS hostname, LAN ip:port.
-        let qrDict: [String: Any] = [
+        var qrDict: [String: Any] = [
             "v": 2,
             "url": url,
             "code": code,
@@ -455,23 +455,54 @@ final class APIRouter {
             "lan_ip": localIP,
             "lan_port": port,
         ]
+        // Dual-mode: also embed a cloud session (type/cloud_url/mobile_token) so one
+        // scan gives BOTH LAN (PSK) and remote (cloud). Best-effort — LAN-only if
+        // not cloud-linked or rimeo.app is unreachable.
+        if let cloud = _fetchCloudPairing() {
+            qrDict["type"]         = "rimeo_cloud"
+            qrDict["cloud_url"]    = cloud.cloudURL
+            qrDict["mobile_token"] = cloud.mobileToken
+        }
+
         let qrData  = (try? JSONSerialization.data(withJSONObject: qrDict))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         let encoded = qrData.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? qrData
         let qrURL   = "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=\(encoded)"
 
-        return .json([
-            "code":      code,
-            "qr_url":    qrURL,
-            "local_url": url,
-            "agent_id":  AppConfig.shared.agentID,
-            // v2 LAN fields — the Pairing view embeds these into the displayed QR.
-            "v":         2,
-            "secret":    psk,
-            "hostname":  hostname,
-            "lan_ip":    localIP,
-            "lan_port":  port,
-        ])
+        // The Pairing view embeds these response fields into the displayed QR.
+        var resp = qrDict
+        resp["qr_url"]    = qrURL
+        resp["local_url"] = url
+        return .json(resp)
+    }
+
+    /// Best-effort: ask rimeo.app for a one-time mobile pairing token so the QR can
+    /// also establish a cloud session (remote access). nil if not cloud-linked or
+    /// the call fails — the QR then stays LAN-only. Synchronous (getPairingInfo
+    /// runs off the main thread when the Pairing view refreshes).
+    private func _fetchCloudPairing() -> (cloudURL: String, mobileToken: String)? {
+        let d = DataStore.shared.data
+        guard !d.cloud_url.isEmpty, !d.cloud_token.isEmpty,
+              var comps = URLComponents(string: "\(d.cloud_url)/api/agents/mobile_token") else { return nil }
+        comps.queryItems = [
+            URLQueryItem(name: "agent_id", value: AppConfig.shared.agentID),
+            URLQueryItem(name: "token", value: d.cloud_token),
+        ]
+        guard let url = comps.url else { return nil }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 6
+        var result: (String, String)?
+        let sem = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: req) { data, _, _ in
+            defer { sem.signal() }
+            guard let data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let mt  = obj["mobile_token"] as? String, !mt.isEmpty,
+                  let cu  = obj["cloud_url"] as? String, !cu.isEmpty else { return }
+            result = (cu, mt)
+        }.resume()
+        _ = sem.wait(timeout: .now() + 7)
+        return result
     }
 
     // MARK: - /api/check_pairing
