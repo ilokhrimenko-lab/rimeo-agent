@@ -461,10 +461,16 @@ final class APIRouter {
         let qrURL   = "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=\(encoded)"
 
         return .json([
-            "code":     code,
-            "qr_url":   qrURL,
+            "code":      code,
+            "qr_url":    qrURL,
             "local_url": url,
-            "agent_id": AppConfig.shared.agentID,
+            "agent_id":  AppConfig.shared.agentID,
+            // v2 LAN fields — the Pairing view embeds these into the displayed QR.
+            "v":         2,
+            "secret":    psk,
+            "hostname":  hostname,
+            "lan_ip":    localIP,
+            "lan_port":  port,
         ])
     }
 

@@ -93,7 +93,15 @@ struct PairingTabView: View {
                   let url = obj["local_url"] as? String,
                   let code = obj["code"] as? String else { return }
             let agentID = (obj["agent_id"] as? String) ?? AppConfig.shared.agentID
-            let payload = #"{"url":"\#(url)","code":"\#(code)","agent_id":"\#(agentID)"}"#
+            // v2 QR payload (LAN tier): embed the PSK + LAN endpoint so iOS can talk
+            // to us directly on the local network. url/code kept for back-compat.
+            var dict: [String: Any] = ["url": url, "code": code, "agent_id": agentID]
+            for k in ["v", "secret", "hostname", "lan_ip", "lan_port"] {
+                if let val = obj[k] { dict[k] = val }
+            }
+            let payload = (try? JSONSerialization.data(withJSONObject: dict))
+                .flatMap { String(data: $0, encoding: .utf8) }
+                ?? #"{"url":"\#(url)","code":"\#(code)","agent_id":"\#(agentID)"}"#
             DispatchQueue.main.async { qrString = payload }
         }
     }
