@@ -55,7 +55,7 @@ final class APIRouter {
         let path = req.path
 
         if APIRouter.jwtProtectedPaths.contains(path) {
-            if let failure = jwtGate(req) { return failure }
+            if let failure = authGate(req) { return failure }
         }
 
         switch (req.method, path) {
@@ -423,17 +423,42 @@ final class APIRouter {
         let chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         let code  = String((0..<5).map { _ in chars.randomElement()! })
 
-        DataStore.shared.update { $0.pairing_code = code }
+        // Persistent per-device PSK (generate once, reuse across QR refreshes).
+        var psk = DataStore.shared.data.lan_secret
+        if psk.isEmpty {
+            let bytes = (0..<32).map { _ in UInt8.random(in: 0...255) }
+            psk = Data(bytes).base64EncodedString()
+                .replacingOccurrences(of: "+", with: "-")
+                .replacingOccurrences(of: "/", with: "_")
+                .replacingOccurrences(of: "=", with: "")
+        }
+        DataStore.shared.update { d in d.pairing_code = code; d.lan_secret = psk }
 
         let localIP  = AppConfig.shared.getLocalIP()
-        let localURL = "http://\(localIP):\(AppConfig.shared.port)"
+        let port     = Int(AppConfig.shared.port)
+        let localURL = "http://\(localIP):\(port)"
+        let hostname = ProcessInfo.processInfo.hostName
         let d        = DataStore.shared.data
         let url      = TunnelManager.shared.activeURL.isEmpty
                         ? (d.tunnel_url.isEmpty ? localURL : d.tunnel_url)
                         : TunnelManager.shared.activeURL
-        let qrData   = #"{"url":"\#(url)","code":"\#(code)","agent_id":"\#(AppConfig.shared.agentID)"}"#
-        let encoded  = qrData.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? qrData
-        let qrURL    = "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=\(encoded)"
+
+        // v2 payload: keeps url/code for back-compat, adds the LAN fields iOS
+        // (PairingInfo v2) needs — secret(PSK), mDNS hostname, LAN ip:port.
+        let qrDict: [String: Any] = [
+            "v": 2,
+            "url": url,
+            "code": code,
+            "agent_id": AppConfig.shared.agentID,
+            "secret": psk,
+            "hostname": hostname,
+            "lan_ip": localIP,
+            "lan_port": port,
+        ]
+        let qrData  = (try? JSONSerialization.data(withJSONObject: qrDict))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        let encoded = qrData.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? qrData
+        let qrURL   = "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=\(encoded)"
 
         return .json([
             "code":     code,
@@ -922,6 +947,55 @@ final class APIRouter {
     }
 
     // MARK: - JWT middleware
+
+    /// Auth for protected paths (M4). LAN vs remote split:
+    ///  • Remote (via Cloudflare named tunnel) → server JWT, exactly as before.
+    ///  • Local network → per-device PSK (`?lan_token=` or Bearer). No JWT needed,
+    ///    so a directly-paired iOS device can load the library / stream on the LAN.
+    ///    This is what fixes "scanning the QR didn't open the library".
+    /// If no PSK has been provisioned yet, falls back to the legacy JWT gate.
+    private func authGate(_ req: HTTPRequest) -> HTTPResponse? {
+        if isViaTunnel(req) {
+            return jwtGate(req)
+        }
+        let secret = DataStore.shared.data.lan_secret
+        guard !secret.isEmpty else {
+            // No v2 pairing yet → prior behaviour (jwtGate is a no-op until a named
+            // tunnel exists, so the agent isn't locked out of itself pre-pairing).
+            return jwtGate(req)
+        }
+        let provided = req.queryParams["lan_token"] ?? bearerToken(req)
+        if let provided = provided, provided == secret {
+            return nil   // authorised local client
+        }
+        logger.warning("LAN auth rejected: path=\(req.path), token_present=\(provided != nil)")
+        return HTTPResponse(
+            status: 401,
+            headers: [
+                "Content-Type": "application/json",
+                "WWW-Authenticate": "Bearer realm=\"rimeo-agent-lan\", error=\"lan_token\"",
+            ],
+            body: .data((try? JSONSerialization.data(withJSONObject: [
+                "error": "unauthorized", "reason": "lan_token",
+            ])) ?? Data())
+        )
+    }
+
+    /// True when the request came through the Cloudflare named tunnel rather than
+    /// the local network: Cloudflare injects cf-* headers and the Host is the
+    /// tunnel hostname. Direct LAN requests have neither.
+    private func isViaTunnel(_ req: HTTPRequest) -> Bool {
+        if req.headers["cf-ray"] != nil || req.headers["cf-connecting-ip"] != nil { return true }
+        let named = TunnelManager.shared.namedHostname
+        if !named.isEmpty, let host = req.headers["host"], host.contains(named) { return true }
+        return false
+    }
+
+    private func bearerToken(_ req: HTTPRequest) -> String? {
+        guard let auth = req.headers["authorization"],
+              auth.lowercased().hasPrefix("bearer ") else { return nil }
+        return String(auth.dropFirst("bearer ".count))
+    }
 
     private func jwtGate(_ req: HTTPRequest) -> HTTPResponse? {
         let aud = TunnelManager.shared.namedHostname

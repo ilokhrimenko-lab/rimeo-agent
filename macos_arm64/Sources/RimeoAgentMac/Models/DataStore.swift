@@ -5,6 +5,10 @@ struct RimoData: Codable {
     var notes:             [String: String]    = [:]
     var global_exclusions: [String]            = []
     var pairing_code:      String              = ""
+    // Per-device LAN pre-shared key (M4). Strong, persistent (unlike the rotating
+    // 5-char pairing_code). Authorises direct local-network requests without a
+    // server JWT; emitted in the v2 QR as `secret` and sent back as `?lan_token=`.
+    var lan_secret:        String              = ""
     var cloud_url:         String              = ""
     var cloud_user_id:     String?             = nil
     var cloud_token:       String              = ""

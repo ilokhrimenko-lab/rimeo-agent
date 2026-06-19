@@ -244,6 +244,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         server.router = { APIRouter.shared.route($0) }
         do {
             try server.start()
+            // M4: advertise on the LAN so the iOS app can discover us over Bonjour.
+            BonjourAdvertiser.shared.start(port: AppConfig.shared.port,
+                                           agentID: AppConfig.shared.agentID)
         } catch {
             logger.error("HTTP server failed to start: \(error)")
         }
