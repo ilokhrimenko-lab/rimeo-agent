@@ -11,19 +11,38 @@ public sealed class AgentHttpServer
 
     public void Start()
     {
+        // M4: prefer binding ALL interfaces so the app is reachable directly on the
+        // LAN. That needs a urlacl reservation (added by the installer); if it's
+        // missing the bind throws, so we fall back to localhost-only — the tunnel/
+        // relay (remote) path still works, just no direct LAN.
+        _listener = new HttpListener();
+        _listener.Prefixes.Add($"http://+:{AppConfig.Port}/");
+        try
+        {
+            _listener.Start();
+            _running = true;
+            Log.Info($"HTTP server listening on all interfaces :{AppConfig.Port} (LAN enabled)");
+            Task.Run(AcceptLoop);
+            return;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"Bind http://+:{AppConfig.Port}/ failed ({ex.Message}) — falling back to localhost (no LAN). " +
+                     $"Installer should reserve: netsh http add urlacl url=http://+:{AppConfig.Port}/ sddl=D:(A;;GX;;;WD)");
+            try { _listener.Close(); } catch { /* ignore */ }
+        }
+
         _listener = new HttpListener();
         _listener.Prefixes.Add($"http://127.0.0.1:{AppConfig.Port}/");
         _listener.Prefixes.Add($"http://localhost:{AppConfig.Port}/");
-
         try { _listener.Start(); }
         catch (Exception ex)
         {
             Log.Error($"HTTP server failed to start: {ex.Message}");
             return;
         }
-
         _running = true;
-        Log.Info($"HTTP server listening on port {AppConfig.Port}");
+        Log.Info($"HTTP server listening on localhost :{AppConfig.Port} (LAN disabled — no urlacl)");
         Task.Run(AcceptLoop);
     }
 

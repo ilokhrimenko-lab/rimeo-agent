@@ -55,6 +55,38 @@ public sealed class ApiRouter
         return true;
     }
 
+    // PSK-or-JWT (mirrors macOS authGate). A valid per-device LAN PSK authorises a
+    // local client without the server JWT; otherwise fall back to the JWT gate
+    // (remote / relay). We do NOT try to detect "is this via the tunnel?" — the
+    // relay presents requests without consistent cf-* headers / Host, and that
+    // mis-detection broke remote on macOS (build 207/208). Premium gating stays
+    // server-side: a free user gets neither a tunnel nor a JWT, so they can only
+    // ever reach us directly on the LAN.
+    private static async Task<bool> AuthGate(AgentRequest req, HttpListenerResponse resp)
+    {
+        var secret = DataStore.Shared.Data.LanSecret;
+        if (!string.IsNullOrEmpty(secret))
+        {
+            var provided = req.QueryParams.GetValueOrDefault("lan_token", "");
+            if (string.IsNullOrEmpty(provided)) provided = BearerToken(req) ?? "";
+            if (provided == secret)
+            {
+                Log.Info($"authGate: LAN/psk path={req.Path}");
+                return false; // authorised local client
+            }
+        }
+        Log.Info($"authGate: remote/jwt path={req.Path}");
+        return await JwtGate(req, resp);
+    }
+
+    private static string? BearerToken(AgentRequest req)
+    {
+        if (req.Headers.TryGetValue("authorization", out var auth) &&
+            auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+            return auth.Substring("Bearer ".Length);
+        return null;
+    }
+
     public async Task RouteAsync(AgentRequest req, HttpListenerResponse resp)
     {
         try
@@ -79,7 +111,7 @@ public sealed class ApiRouter
             // JWT gate for endpoints reachable over the public named tunnel.
             // Enforced only once on a named tunnel (NamedHostname non-empty) —
             // see JwtGate. Returns true (and writes 401) when rejected.
-            if (JwtProtectedPaths.Contains(req.Path) && await JwtGate(req, resp))
+            if (JwtProtectedPaths.Contains(req.Path) && await AuthGate(req, resp))
                 return;
 
             switch ((req.Method, req.Path))
@@ -307,21 +339,76 @@ public sealed class ApiRouter
         const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
         var rng  = new Random();
         var code = new string(Enumerable.Range(0, 5).Select(_ => chars[rng.Next(chars.Length)]).ToArray());
-        DataStore.Shared.Update(d => d.PairingCode = code);
+
+        // Persistent per-device PSK (generate once, reuse across QR refreshes).
+        var psk = DataStore.Shared.Data.LanSecret;
+        if (string.IsNullOrEmpty(psk))
+        {
+            var raw = new byte[32];
+            System.Security.Cryptography.RandomNumberGenerator.Fill(raw);
+            psk = Convert.ToBase64String(raw).Replace("+", "-").Replace("/", "_").Replace("=", "");
+        }
+        DataStore.Shared.Update(d => { d.PairingCode = code; d.LanSecret = psk; });
 
         var localIp  = AppConfig.Shared.GetLocalIp();
-        var localUrl = $"http://{localIp}:{AppConfig.Port}";
+        var port     = AppConfig.Port;
+        var localUrl = $"http://{localIp}:{port}";
         var d2       = DataStore.Shared.Data;
         var tunnel   = TunnelManager.Shared.ActiveUrl;
         var url      = string.IsNullOrEmpty(tunnel)
                         ? (string.IsNullOrEmpty(d2.TunnelUrl) ? localUrl : d2.TunnelUrl)
                         : tunnel;
+        var hostname = Environment.MachineName;
 
-        var qrData    = $"{{\"url\":\"{url}\",\"code\":\"{code}\",\"agent_id\":\"{AppConfig.Shared.AgentId}\"}}";
-        var encoded   = Uri.EscapeDataString(qrData);
-        var qrUrl     = $"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={encoded}";
+        // v2 payload + optional dual-mode cloud fields → one scan = LAN (PSK) + remote (cloud).
+        var qr = new Dictionary<string, object>
+        {
+            ["v"]        = 2,
+            ["url"]      = url,
+            ["code"]     = code,
+            ["agent_id"] = AppConfig.Shared.AgentId,
+            ["secret"]   = psk,
+            ["hostname"] = hostname,
+            ["lan_ip"]   = localIp,
+            ["lan_port"] = port,
+        };
+        var cloud = await FetchCloudPairing();
+        if (cloud != null)
+        {
+            qr["type"]         = "rimeo_cloud";
+            qr["cloud_url"]    = cloud.Value.cloudUrl;
+            qr["mobile_token"] = cloud.Value.mobileToken;
+        }
 
-        await WriteJson(resp, 200, new { code, qr_url = qrUrl, local_url = url, agent_id = AppConfig.Shared.AgentId });
+        var qrData  = JsonSerializer.Serialize(qr);
+        var encoded = Uri.EscapeDataString(qrData);
+        var qrUrl   = $"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={encoded}";
+
+        var respObj = new Dictionary<string, object>(qr) { ["qr_url"] = qrUrl, ["local_url"] = url };
+        await WriteJson(resp, 200, respObj);
+    }
+
+    // Best-effort: ask rimeo.app for a one-time mobile pairing token so the QR can
+    // also carry a cloud session (remote). null if not cloud-linked or it fails.
+    private static async Task<(string cloudUrl, string mobileToken)?> FetchCloudPairing()
+    {
+        var d = DataStore.Shared.Data;
+        if (string.IsNullOrEmpty(d.CloudUrl) || string.IsNullOrEmpty(d.CloudToken)) return null;
+        try
+        {
+            var url = $"{d.CloudUrl}/api/agents/mobile_token" +
+                      $"?agent_id={Uri.EscapeDataString(AppConfig.Shared.AgentId)}" +
+                      $"&token={Uri.EscapeDataString(d.CloudToken)}";
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(6) };
+            var body = await http.GetStringAsync(url);
+            var obj  = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body);
+            if (obj != null
+                && obj.TryGetValue("mobile_token", out var mt) && mt.GetString() is string mts && mts.Length > 0
+                && obj.TryGetValue("cloud_url",    out var cu) && cu.GetString() is string cus && cus.Length > 0)
+                return (cus, mts);
+        }
+        catch (Exception ex) { Log.Warn($"FetchCloudPairing failed: {ex.Message}"); }
+        return null;
     }
 
     // ── /api/check_pairing ───────────────────────────────────────────────────

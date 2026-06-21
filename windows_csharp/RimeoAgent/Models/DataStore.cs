@@ -9,6 +9,10 @@ public sealed class RimoData
     [JsonPropertyName("notes")]             public Dictionary<string, string> Notes           { get; set; } = new();
     [JsonPropertyName("global_exclusions")] public List<string>               GlobalExclusions { get; set; } = new();
     [JsonPropertyName("pairing_code")]      public string                     PairingCode      { get; set; } = "";
+    // Per-device LAN pre-shared key (M4). Persistent (unlike the rotating
+    // PairingCode). Authorises direct local-network requests without a server JWT;
+    // emitted in the v2 QR as `secret`, sent back as `?lan_token=`. Mirrors macOS.
+    [JsonPropertyName("lan_secret")]        public string                     LanSecret        { get; set; } = "";
     [JsonPropertyName("cloud_url")]         public string                     CloudUrl         { get; set; } = "";
     [JsonPropertyName("cloud_user_id")]     public string?                    CloudUserId      { get; set; }
     [JsonPropertyName("cloud_token")]       public string                     CloudToken       { get; set; } = "";

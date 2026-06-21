@@ -53,6 +53,16 @@ Section "Install"
   CreateShortcut "$SMPROGRAMS\Rimeo Agent\Rimeo Agent.lnk" "$INSTDIR\RimeoAgent.exe" "" "$INSTDIR\Assets\rimeo.ico"
   CreateShortcut "$SMPROGRAMS\Rimeo Agent\Uninstall Rimeo Agent.lnk" "$INSTDIR\Uninstall.exe"
   CreateShortcut "$DESKTOP\Rimeo Agent.lnk" "$INSTDIR\RimeoAgent.exe" "" "$INSTDIR\Assets\rimeo.ico"
+
+  ; M4 (LAN tier): let the non-elevated agent listen on ALL interfaces so phones
+  ; on the same Wi-Fi reach it directly. urlacl grants http://+:8000/ to Everyone
+  ; (WD SID — locale-independent), the firewall rule opens the TCP port inbound.
+  ; delete-then-add so a reinstall doesn't error on an existing entry.
+  DetailPrint "Reserving HTTP URL + firewall rule for LAN access…"
+  nsExec::ExecToLog 'netsh http delete urlacl url=http://+:8000/'
+  nsExec::ExecToLog 'netsh http add urlacl url=http://+:8000/ sddl=D:(A;;GX;;;WD)'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Rimeo Agent (LAN)"'
+  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="Rimeo Agent (LAN)" dir=in action=allow protocol=TCP localport=8000'
 SectionEnd
 
 Section "Uninstall"
@@ -63,4 +73,8 @@ Section "Uninstall"
 
   RMDir /r "$INSTDIR"
   DeleteRegKey HKCU "Software\RimeoAgent"
+
+  ; Remove the LAN urlacl + firewall rule added on install.
+  nsExec::ExecToLog 'netsh http delete urlacl url=http://+:8000/'
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Rimeo Agent (LAN)"'
 SectionEnd
