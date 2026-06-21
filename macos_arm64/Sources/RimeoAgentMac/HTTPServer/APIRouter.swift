@@ -1002,8 +1002,12 @@ final class APIRouter {
         let secret = DataStore.shared.data.lan_secret
         if !secret.isEmpty {
             let provided = req.queryParams["lan_token"] ?? bearerToken(req)
-            if let provided = provided, provided == secret { return nil }
+            if let provided = provided, provided == secret {
+                logger.info("authGate: LAN/psk path=\(req.path)")
+                return nil
+            }
         }
+        logger.info("authGate: remote/jwt path=\(req.path)")
         return jwtGate(req)
     }
 
