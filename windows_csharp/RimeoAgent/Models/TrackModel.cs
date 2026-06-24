@@ -19,12 +19,25 @@ public sealed class Track
     [JsonPropertyName("date_str")]         public string DateStr        { get; set; } = "0000-00-00";
     [JsonPropertyName("playlists")]        public List<string> Playlists { get; set; } = new();
     [JsonPropertyName("playlist_indices")] public Dictionary<string, int> PlaylistIndices { get; set; } = new();
+    // Play-history membership — separate from Playlists so playlist counts stay clean.
+    [JsonPropertyName("histories")]        public List<string> Histories { get; set; } = new();
+    [JsonPropertyName("history_indices")]  public Dictionary<string, int> HistoryIndices { get; set; } = new();
 }
 
 public sealed class Playlist
 {
     [JsonPropertyName("path")] public string Path { get; set; } = "";
     [JsonPropertyName("date")] public double Date { get; set; }
+    // Rekordbox play-history session. Omitted (null) for regular playlists.
+    [JsonPropertyName("history")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? History { get; set; }
+    [JsonPropertyName("history_id")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? HistoryId { get; set; }
+    [JsonPropertyName("name")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Name { get; set; }
 }
 
 public sealed class LibraryData

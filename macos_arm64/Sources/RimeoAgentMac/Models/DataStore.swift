@@ -3,6 +3,11 @@ import Foundation
 // Persistent data stored in rimo_data.json
 struct RimoData: Codable {
     var notes:             [String: String]    = [:]
+    // Custom display names for Rekordbox play-history sessions (djmdHistory.ID →
+    // user-chosen name). Rekordbox's own DB is read-only to us, so renames live
+    // here and are applied to the parsed library on every read. Synced to all
+    // clients (iOS + web) because both read names from this agent.
+    var history_names:     [String: String]    = [:]
     var global_exclusions: [String]            = []
     var pairing_code:      String              = ""
     // Per-device LAN pre-shared key (M4). Strong, persistent (unlike the rotating

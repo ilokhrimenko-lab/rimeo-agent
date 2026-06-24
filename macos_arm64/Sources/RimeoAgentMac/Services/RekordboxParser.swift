@@ -23,7 +23,25 @@ final class RekordboxParser: NSObject {
     private var masterDBLastFailedMtime: Double = -1
 
     func parse() -> LibraryData {
-        return queue.sync { _parse() }
+        return queue.sync { applyHistoryNames(_parse()) }
+    }
+
+    // Overlay user-chosen history names on top of the parsed library. Applied on
+    // every public parse() (cheap — a map over the playlists array) so a rename
+    // shows up on the next /api/data without re-running the DB helper. Rekordbox's
+    // own DB stays untouched; the names live in DataStore.history_names.
+    private func applyHistoryNames(_ data: LibraryData) -> LibraryData {
+        let overrides = DataStore.shared.data.history_names
+        guard !overrides.isEmpty else { return data }
+        let playlists = data.playlists.map { pl -> Playlist in
+            guard pl.history == true, let hid = pl.history_id,
+                  let custom = overrides[hid], !custom.isEmpty else { return pl }
+            var copy = pl
+            copy.name = custom
+            return copy
+        }
+        return LibraryData(tracks: data.tracks, playlists: playlists,
+                           xml_date: data.xml_date, source: data.source)
     }
 
     private func _parse() -> LibraryData {
@@ -433,6 +451,8 @@ for row in cur.fetchall():
         "image_path": str(row[13] or ""),
         "playlists": [],
         "playlist_indices": {},
+        "histories": [],
+        "history_indices": {},
     }
     track_index[track_id] = len(tracks)
     tracks.append(track)
@@ -631,8 +651,59 @@ for node in playlists.values():
         if track["timestamp"] > playlist_latest.get(ppath, 0):
             playlist_latest[ppath] = track["timestamp"]
 
+# Play histories (djmdHistory + djmdSongHistory). Membership goes into
+# track["histories"] (kept separate from playlists), session emitted as a
+# playlist with history=true. Wrapped so older DBs without the tables degrade
+# gracefully to no histories.
+history_playlists = []
+try:
+    cur.execute(
+        """
+        SELECT ID, COALESCE(Name, ''), COALESCE(DateCreated, ''), COALESCE(created_at, '')
+        FROM djmdHistory
+        WHERE rb_local_deleted = 0
+        """
+    )
+    hist_meta = {}
+    for hid, hname, hdate, hcreated in cur.fetchall():
+        hid = str(hid)
+        if not hid:
+            continue
+        name = str(hname or "").strip() or f"History {hid}"
+        hist_meta[hid] = {"name": name, "date": as_timestamp(hcreated, hdate)}
+
+    cur.execute(
+        """
+        SELECT HistoryID, ContentID, TrackNo
+        FROM djmdSongHistory
+        WHERE rb_local_deleted = 0
+        """
+    )
+    for history_id, content_id, track_no in cur.fetchall():
+        hid = str(history_id)
+        tid = str(content_id)
+        if hid not in hist_meta:
+            continue
+        idx = track_index.get(tid)
+        if idx is None:
+            continue
+        key = f"hist:{hid}"
+        track = tracks[idx]
+        track["history_indices"][key] = int(track_no or 0)
+        if key not in track["histories"]:
+            track["histories"].append(key)
+
+    history_playlists = [
+        {"path": f"hist:{hid}", "date": meta["date"], "smart": False,
+         "history": True, "history_id": hid, "name": meta["name"]}
+        for hid, meta in hist_meta.items()
+    ]
+except Exception:
+    history_playlists = []
+
 tracks.sort(key=lambda item: item["timestamp"], reverse=True)
 playlists_list = [{"path": path, "date": playlist_latest[path], "smart": path in smart_paths} for path in playlist_latest]
+playlists_list.extend(history_playlists)
 
 with open(out_path, "w", encoding="utf-8") as fh:
     json.dump({

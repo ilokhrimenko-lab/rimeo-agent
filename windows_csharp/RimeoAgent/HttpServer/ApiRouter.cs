@@ -126,6 +126,7 @@ public sealed class ApiRouter
                 case ("GET",  "/api/check_pairing"):       await CheckPairing(req, resp); break;
                 case ("POST", "/api/save_note"):           await SaveNote(req, resp); break;
                 case ("POST", "/api/save_exclusions"):     await SaveExclusions(req, resp); break;
+                case ("POST", "/api/rename_history"):      await RenameHistory(req, resp); break;
                 case ("POST", "/api/send_tg"):             await SendTelegram(req, resp); break;
                 case ("GET",  "/api/analysis"):            await GetAnalysis(req, resp); break;
                 case ("GET",  "/api/analysis/status"):     await GetAnalysisStatus(req, resp); break;
@@ -436,6 +437,26 @@ public sealed class ApiRouter
         {
             if (string.IsNullOrEmpty(note)) d.Notes.Remove(tid);
             else                            d.Notes[tid] = note;
+        });
+        await WriteJson(resp, 200, new { status = "ok" });
+    }
+
+    // ── /api/rename_history ──────────────────────────────────────────────────
+
+    // Sets (or clears, when name is empty) the custom display name for a Rekordbox
+    // play-history session. Stored in DataStore.HistoryNames, applied to /api/data.
+    private static async Task RenameHistory(AgentRequest req, HttpListenerResponse resp)
+    {
+        var body = ParseJsonBody<Dictionary<string, string>>(req.Body);
+        if (body == null || !body.TryGetValue("history_id", out var hid) || string.IsNullOrEmpty(hid))
+        { await WriteJson(resp, 400, new { error = "history_id required" }); return; }
+
+        body.TryGetValue("name", out var name);
+        name = (name ?? "").Trim();
+        DataStore.Shared.Update(d =>
+        {
+            if (string.IsNullOrEmpty(name)) d.HistoryNames.Remove(hid);
+            else                            d.HistoryNames[hid] = name;
         });
         await WriteJson(resp, 200, new { status = "ok" });
     }

@@ -21,7 +21,33 @@ public sealed class RekordboxParser
 
     public LibraryData Parse()
     {
-        lock (_lock) { return ParseInternal(); }
+        lock (_lock) { return ApplyHistoryNames(ParseInternal()); }
+    }
+
+    // Overlay user-chosen history names (DataStore.history_names) on the parsed
+    // library. Applied on every public Parse() so a rename shows on the next
+    // /api/data without re-reading the DB. Rekordbox's own DB is never written.
+    private static LibraryData ApplyHistoryNames(LibraryData data)
+    {
+        var overrides = DataStore.Shared.Data.HistoryNames;
+        if (overrides.Count == 0) return data;
+        // Clone only the renamed entries so the cached library keeps the original
+        // DB names — otherwise a later reset couldn't restore them.
+        var playlists = data.Playlists.Select(pl =>
+        {
+            if (pl.History == true && pl.HistoryId != null
+                && overrides.TryGetValue(pl.HistoryId, out var custom)
+                && !string.IsNullOrEmpty(custom))
+            {
+                return new Playlist
+                {
+                    Path = pl.Path, Date = pl.Date,
+                    History = pl.History, HistoryId = pl.HistoryId, Name = custom,
+                };
+            }
+            return pl;
+        }).ToList();
+        return new LibraryData { Tracks = data.Tracks, Playlists = playlists, XmlDate = data.XmlDate, Source = data.Source };
     }
 
     private LibraryData ParseInternal()
@@ -214,8 +240,68 @@ public sealed class RekordboxParser
                 }
             }
 
+            // ── Play histories (djmdHistory + djmdSongHistory) ───────────────
+            // Membership lands in track.Histories (separate from Playlists); each
+            // session is emitted as a Playlist with History=true. Wrapped so older
+            // Rekordbox DBs without these tables just yield no histories.
+            var historyPlaylists = new List<Playlist>();
+            try
+            {
+                var histName = new Dictionary<string, string>();
+                var histDate = new Dictionary<string, double>();
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = "SELECT ID, COALESCE(Name,''), COALESCE(DateCreated,''), COALESCE(created_at,'') FROM djmdHistory WHERE rb_local_deleted = 0";
+                    using var rdr = cmd.ExecuteReader();
+                    while (rdr.Read())
+                    {
+                        var hid = rdr.GetValue(0)?.ToString() ?? "";
+                        if (string.IsNullOrEmpty(hid)) continue;
+                        var name = (rdr.GetValue(1)?.ToString() ?? "").Trim();
+                        if (name.Length == 0) name = $"History {hid}";
+                        var rawHd = rdr.GetValue(3)?.ToString() ?? "";
+                        if (string.IsNullOrEmpty(rawHd)) rawHd = rdr.GetValue(2)?.ToString() ?? "";
+                        double hd = 0;
+                        if (DateTime.TryParse(rawHd, null, System.Globalization.DateTimeStyles.RoundtripKind, out var hdt))
+                            hd = new DateTimeOffset(hdt).ToUnixTimeMilliseconds() / 1000.0;
+                        histName[hid] = name;
+                        histDate[hid] = hd;
+                    }
+                }
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = "SELECT HistoryID, ContentID, TrackNo FROM djmdSongHistory WHERE rb_local_deleted = 0";
+                    using var rdr = cmd.ExecuteReader();
+                    while (rdr.Read())
+                    {
+                        var hid   = rdr.GetValue(0)?.ToString() ?? "";
+                        var tId   = rdr.GetValue(1)?.ToString() ?? "";
+                        var order = int.TryParse(rdr.GetValue(2)?.ToString(), out var o) ? o : 0;
+                        if (!histName.ContainsKey(hid)) continue;
+                        if (!trackIndex.TryGetValue(tId, out var idx)) continue;
+                        var key = $"hist:{hid}";
+                        tracksDb[idx].HistoryIndices[key] = order;
+                        if (!tracksDb[idx].Histories.Contains(key))
+                            tracksDb[idx].Histories.Add(key);
+                    }
+                }
+                historyPlaylists = histName.Select(kv => new Playlist
+                {
+                    Path = $"hist:{kv.Key}",
+                    Date = histDate.GetValueOrDefault(kv.Key, 0),
+                    History = true,
+                    HistoryId = kv.Key,
+                    Name = kv.Value,
+                }).ToList();
+            }
+            catch (Exception ex)
+            {
+                Log.Warn($"history parse skipped: {ex.Message}");
+            }
+
             tracksDb.Sort((a, b) => b.Timestamp.CompareTo(a.Timestamp));
             var playlists = allPlaylists.Select(kv => new Playlist { Path = kv.Key, Date = kv.Value }).ToList();
+            playlists.AddRange(historyPlaylists);
             var mtime     = GetMtime(dbPath);
             return new LibraryData { Tracks = tracksDb, Playlists = playlists, XmlDate = mtime, Source = "db" };
         }

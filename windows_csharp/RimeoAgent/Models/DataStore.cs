@@ -7,6 +7,9 @@ namespace RimeoAgent.Models;
 public sealed class RimoData
 {
     [JsonPropertyName("notes")]             public Dictionary<string, string> Notes           { get; set; } = new();
+    // Custom names for Rekordbox play-history sessions (djmdHistory.ID → name).
+    // Applied to the parsed library on read; Rekordbox's DB stays untouched.
+    [JsonPropertyName("history_names")]     public Dictionary<string, string> HistoryNames    { get; set; } = new();
     [JsonPropertyName("global_exclusions")] public List<string>               GlobalExclusions { get; set; } = new();
     [JsonPropertyName("pairing_code")]      public string                     PairingCode      { get; set; } = "";
     // Per-device LAN pre-shared key (M4). Persistent (unlike the rotating

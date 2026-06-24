@@ -79,6 +79,9 @@ final class APIRouter {
         case ("POST", "/api/save_note"):       return saveNote(req)
         case ("POST", "/api/save_exclusions"): return saveExclusions(req)
 
+        // Play-history rename
+        case ("POST", "/api/rename_history"):  return renameHistory(req)
+
         // Telegram
         case ("POST", "/api/send_tg"):     return sendTelegram(req)
 
@@ -406,7 +409,7 @@ final class APIRouter {
         logger.info("GET /api/data -> \(lib.tracks.count) tracks, \(lib.playlists.count) playlists, source=\(lib.source ?? "unknown")")
         let obj: [String: Any] = [
             "tracks":            lib.tracks.map { encodableTrack($0) },
-            "playlists":         lib.playlists.map { ["path": $0.path, "date": $0.date, "smart": $0.smart ?? false] },
+            "playlists":         lib.playlists.map { encodablePlaylist($0) },
             "notes":             data.notes,
             "global_exclusions": data.global_exclusions,
             // Return both keys during parity migration:
@@ -529,6 +532,24 @@ final class APIRouter {
         DataStore.shared.update { d in
             if note.isEmpty { d.notes.removeValue(forKey: tid) }
             else            { d.notes[tid] = note }
+        }
+        return .json(["status": "ok"])
+    }
+
+    // MARK: - /api/rename_history
+
+    /// Sets (or clears, when `name` is empty) the custom display name for a
+    /// Rekordbox play-history session. Stored in DataStore.history_names and
+    /// applied to every subsequent /api/data — Rekordbox's own DB is never written.
+    private func renameHistory(_ req: HTTPRequest) -> HTTPResponse {
+        guard let body = try? JSONSerialization.jsonObject(with: req.body) as? [String: String],
+              let hid  = body["history_id"], !hid.isEmpty else {
+            return .error("history_id required", status: 400)
+        }
+        let name = (body["name"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        DataStore.shared.update { d in
+            if name.isEmpty { d.history_names.removeValue(forKey: hid) }
+            else            { d.history_names[hid] = name }
         }
         return .json(["status": "ok"])
     }
@@ -1053,8 +1074,21 @@ final class APIRouter {
             "play_count": t.play_count, "location": t.location,
             "timestamp": t.timestamp, "date_str": t.date_str,
             "playlists": t.playlists, "playlist_indices": t.playlist_indices,
+            "histories": t.histories, "history_indices": t.history_indices,
         ]
         if let d = t.duration { dict["duration"] = d }
+        return dict
+    }
+
+    private func encodablePlaylist(_ p: Playlist) -> [String: Any] {
+        var dict: [String: Any] = [
+            "path": p.path, "date": p.date, "smart": p.smart ?? false,
+        ]
+        if p.history == true {
+            dict["history"]    = true
+            dict["history_id"] = p.history_id ?? ""
+            dict["name"]       = p.name ?? ""
+        }
         return dict
     }
 

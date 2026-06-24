@@ -21,12 +21,17 @@ struct HelperTrack: Codable {
     let image_path: String
     var playlists: [String]
     var playlist_indices: [String: Int]
+    var histories: [String] = []
+    var history_indices: [String: Int] = [:]
 }
 
 struct HelperPlaylist: Codable {
     let path: String
     let date: Double
     let smart: Bool
+    var history: Bool? = nil
+    var history_id: String? = nil
+    var name: String? = nil
 }
 
 struct HelperLibraryData: Codable {
@@ -544,11 +549,70 @@ func parseMasterDB(dbPath: String, mtime: Double) throws -> HelperLibraryData {
         }
     }
 
+    // Play histories (djmdHistory + djmdSongHistory). Stored separate from
+    // playlists: membership lands in track.histories (not track.playlists) and the
+    // session is emitted as a Playlist with history=true. Wrapped in do/catch so
+    // older Rekordbox DBs without these tables just yield no histories.
+    var historyPlaylists: [HelperPlaylist] = []
+    do {
+        struct HistMeta { let name: String; let date: Double }
+        var histMeta: [String: HistMeta] = [:]
+
+        let histStmt = try db.prepare(
+            """
+            SELECT ID, COALESCE(Name, ''), COALESCE(DateCreated, ''), COALESCE(created_at, '')
+            FROM djmdHistory
+            WHERE rb_local_deleted = 0
+            """
+        )
+        defer { sqlite3_finalize(histStmt) }
+        while true {
+            let rc = sqlite3_step(histStmt)
+            if rc == SQLITE_DONE { break }
+            guard rc == SQLITE_ROW else { break }
+            let id = columnText(histStmt, 0)
+            guard !id.isEmpty else { continue }
+            let name = columnText(histStmt, 1)
+            let date = asTimestamp(columnText(histStmt, 3), columnText(histStmt, 2))
+            histMeta[id] = HistMeta(name: name.isEmpty ? "History \(id)" : name, date: date)
+        }
+
+        let songStmt = try db.prepare(
+            """
+            SELECT HistoryID, ContentID, TrackNo
+            FROM djmdSongHistory
+            WHERE rb_local_deleted = 0
+            """
+        )
+        defer { sqlite3_finalize(songStmt) }
+        while true {
+            let rc = sqlite3_step(songStmt)
+            if rc == SQLITE_DONE { break }
+            guard rc == SQLITE_ROW else { break }
+            let histID = columnText(songStmt, 0)
+            let trackID = columnText(songStmt, 1)
+            let trackNo = columnInt(songStmt, 2)
+            guard histMeta[histID] != nil, let idx = trackIndex[trackID] else { continue }
+            let key = "hist:\(histID)"
+            tracks[idx].history_indices[key] = trackNo
+            if !tracks[idx].histories.contains(key) {
+                tracks[idx].histories.append(key)
+            }
+        }
+
+        historyPlaylists = histMeta.map { id, meta in
+            HelperPlaylist(path: "hist:\(id)", date: meta.date, smart: false,
+                           history: true, history_id: id, name: meta.name)
+        }
+    } catch {
+        historyPlaylists = []
+    }
+
     tracks.sort { $0.timestamp > $1.timestamp }
 
     let playlists = playlistLatest.keys.sorted().map {
         HelperPlaylist(path: $0, date: playlistLatest[$0] ?? 0, smart: smartPaths.contains($0))
-    }
+    } + historyPlaylists
 
     return HelperLibraryData(
         tracks: tracks,
