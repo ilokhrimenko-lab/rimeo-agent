@@ -1,5 +1,4 @@
 using System.Net.Http;
-using System.Text;
 using System.Text.Json;
 using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
@@ -10,14 +9,11 @@ using RimeoAgent.Models;
 
 namespace RimeoAgent.Views;
 
-// 1:1 mirror of macOS AccountTabView: connection status + link-to-account form.
+// Mirror of macOS AccountTabView (login model): signed-in status + Sign out +
+// active-session note. No token linking — the agent signs in on the gate.
 public sealed partial class AccountPage : Page
 {
     private readonly StackPanel _statusHost = new() { Orientation = Orientation.Vertical, Spacing = 16 };
-    private readonly TextBox    _tokenBox   = new() { PlaceholderText = "8-character code from web dashboard", FontSize = 15, FontFamily = new FontFamily("Consolas") };
-    private readonly TextBlock  _linkStatus = new() { FontSize = 13, Visibility = Visibility.Collapsed, TextWrapping = TextWrapping.Wrap };
-    private readonly StackPanel _linkButtonHost = new() { Orientation = Orientation.Horizontal, Spacing = 16, VerticalAlignment = VerticalAlignment.Center };
-
     private bool _linked;
     private string _who = "";
 
@@ -34,29 +30,34 @@ public sealed partial class AccountPage : Page
         var (scroll, stack) = UI.Page();
 
         stack.Children.Add(UI.ScreenHeader("Account",
-            "Link this agent to your Rimeo account so the web app knows it's online."));
+            "You're signed in to Rimeo. Devices on the same account connect automatically."));
 
-        stack.Children.Add(UI.SectionLabel("Connection status"));
+        stack.Children.Add(UI.SectionLabel("Account"));
         stack.Children.Add(UI.Card(_statusHost));
 
-        stack.Children.Add(UI.SectionLabel("Link to account"));
-
-        _linkButtonHost.Children.Add(UI.PrimaryButton("Link Agent", Link_Click));
-
-        _tokenBox.Background = UI.Field;
-        _tokenBox.BorderBrush = UI.Brd;
-        _tokenBox.CornerRadius = new CornerRadius(13);
-        _tokenBox.Padding = new Thickness(14, 12, 14, 12);
-
-        var card = UI.VStack(16,
-            UI.StepsList(
-                UI.StepRow("1", "On rimeo.app open Account and click Generate Link Token."),
-                UI.StepRow("2", "Enter the 8-character code below and click Link Agent.")),
-            _tokenBox,
-            UI.HStack(16, _linkButtonHost, _linkStatus));
-        stack.Children.Add(UI.Card(card));
+        stack.Children.Add(UI.SectionLabel("Active session"));
+        stack.Children.Add(UI.Card(BuildSessionRow()));
 
         return scroll;
+    }
+
+    private static FrameworkElement BuildSessionRow()
+    {
+        var iconBox = new Border
+        {
+            Width = 40, Height = 40, CornerRadius = new CornerRadius(11),
+            Background = UI.AccSoft, VerticalAlignment = VerticalAlignment.Center,
+            Child = UI.Icon(20, UI.AccText, 2,
+                "M4 5H20A1 1 0 0 1 21 6V16A1 1 0 0 1 20 17H4A1 1 0 0 1 3 16V6A1 1 0 0 1 4 5Z", "M8 21h8M12 17v4")
+        };
+        var textStack = new StackPanel { Orientation = Orientation.Vertical, Spacing = 3, VerticalAlignment = VerticalAlignment.Center };
+        textStack.Children.Add(new TextBlock { Text = "This computer", FontSize = 15, FontWeight = FontWeights.SemiBold, Foreground = UI.Text });
+        textStack.Children.Add(new TextBlock
+        {
+            Text = "One agent stays active per account — signing in on another computer signs this one out.",
+            FontSize = 13, Foreground = UI.Secondary, TextWrapping = TextWrapping.Wrap
+        });
+        return UI.HStack(13, iconBox, textStack);
     }
 
     private void RebuildStatus()
@@ -66,7 +67,7 @@ public sealed partial class AccountPage : Page
         var color = _linked ? UI.Green : UI.Red;
         var icon = new FontIcon
         {
-            Glyph = _linked ? "" : "",   // CheckMark / Error
+            Glyph = _linked ? "" : "",   // CheckMark / Error
             FontFamily = new FontFamily("Segoe MDL2 Assets"),
             FontSize = 20,
             Foreground = color,
@@ -76,7 +77,7 @@ public sealed partial class AccountPage : Page
         var textStack = new StackPanel { Orientation = Orientation.Vertical, Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
         textStack.Children.Add(new TextBlock
         {
-            Text = _linked ? "Linked to your account" : "Not linked to a cloud account",
+            Text = _linked ? "Signed in to Rimeo" : "Not signed in",
             FontSize = 17, FontWeight = FontWeights.Bold, Foreground = UI.Text, TextWrapping = TextWrapping.Wrap
         });
         if (_linked)
@@ -85,7 +86,7 @@ public sealed partial class AccountPage : Page
         _statusHost.Children.Add(UI.HStack(11, icon, textStack));
 
         if (_linked)
-            _statusHost.Children.Add(UI.DestructiveButton("Delete Connection", Unlink_Click));
+            _statusHost.Children.Add(UI.DestructiveButton("Sign out", Unlink_Click));
     }
 
     private async Task RefreshAccount()
@@ -106,41 +107,6 @@ public sealed partial class AccountPage : Page
         catch { }
     }
 
-    private async void Link_Click(object sender, RoutedEventArgs e)
-    {
-        var token = _tokenBox.Text.Trim();
-        if (string.IsNullOrEmpty(token))
-        {
-            ShowStatus("Please enter the link token.", ok: false);
-            return;
-        }
-
-        ShowStatus("Linking…", ok: true);
-        try
-        {
-            using var http = new HttpClient();
-            var payload = JsonSerializer.Serialize(new { token, cloud_url = AppConfig.RimeoAppUrl });
-            var resp = await http.PostAsync($"http://127.0.0.1:{AppConfig.Port}/api/link_account",
-                new StringContent(payload, Encoding.UTF8, "application/json"));
-
-            if (resp.IsSuccessStatusCode)
-            {
-                ShowStatus("✓ Linked successfully!", ok: true);
-                _tokenBox.Text = "";
-                await RefreshAccount();
-            }
-            else
-            {
-                ShowStatus($"Error {(int)resp.StatusCode}", ok: false);
-            }
-        }
-        catch (Exception ex)
-        {
-            Log.Error($"Link failed: {ex.Message}");
-            ShowStatus($"Error: {ex.Message}", ok: false);
-        }
-    }
-
     private async void Unlink_Click(object sender, RoutedEventArgs e)
     {
         try
@@ -149,13 +115,6 @@ public sealed partial class AccountPage : Page
             await http.PostAsync($"http://127.0.0.1:{AppConfig.Port}/api/unlink_account", new StringContent(""));
             await RefreshAccount();
         }
-        catch (Exception ex) { Log.Error($"Unlink failed: {ex.Message}"); }
-    }
-
-    private void ShowStatus(string text, bool ok)
-    {
-        _linkStatus.Visibility = Visibility.Visible;
-        _linkStatus.Text = text;
-        _linkStatus.Foreground = ok ? UI.Green : UI.Red;
+        catch (Exception ex) { Log.Error($"Sign out failed: {ex.Message}"); }
     }
 }

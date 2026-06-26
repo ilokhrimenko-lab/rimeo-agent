@@ -2,25 +2,22 @@ import SwiftUI
 
 struct AccountTabView: View {
     @EnvironmentObject var appState: AppState
-    @State private var tokenInput = ""
-    @State private var statusMsg = ""
-    @State private var isLinking = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
                 ScreenHeader(title: "Account",
-                             subtitle: "Link this agent to your Rimeo account so the web app knows it's online.")
+                             subtitle: "You're signed in to Rimeo. Devices on the same account connect automatically.")
 
                 VStack(alignment: .leading, spacing: 11) {
-                    SectionLabel(text: "CONNECTION STATUS")
+                    SectionLabel(text: "ACCOUNT")
                     SurfaceCard {
                         VStack(alignment: .leading, spacing: 16) {
                             connectionStatus
                             if appState.cloudLinked {
-                                SecondaryButton(title: "Delete Connection",
-                                                icon: "trash",
-                                                action: doUnlink,
+                                SecondaryButton(title: "Sign out",
+                                                icon: "rectangle.portrait.and.arrow.right",
+                                                action: doSignOut,
                                                 destructive: true)
                             }
                         }
@@ -29,47 +26,9 @@ struct AccountTabView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 11) {
-                    SectionLabel(text: "LINK TO ACCOUNT")
+                    SectionLabel(text: "ACTIVE SESSION")
                     SurfaceCard {
-                        VStack(alignment: .leading, spacing: 16) {
-                            VStack(alignment: .leading, spacing: 11) {
-                                StepRow(number: "1", text: "On rimeo.app open Account and click Generate Link Token.")
-                                StepRow(number: "2", text: "Enter the 8-character code below and click Link Agent.")
-                            }
-
-                            HStack(spacing: 10) {
-                                Image(systemName: "link")
-                                    .font(.system(size: 15))
-                                    .foregroundColor(C.dim)
-                                TextField("8-character code from web dashboard", text: $tokenInput)
-                                    .textFieldStyle(.plain)
-                                    .font(.system(size: 15, design: .monospaced))
-                                    .foregroundColor(C.text)
-                            }
-                            .padding(.horizontal, 16)
-                            .frame(height: 50)
-                            .background(C.field)
-                            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).stroke(C.brd, lineWidth: 1))
-
-                            HStack(spacing: 16) {
-                                if isLinking {
-                                    ProgressView().scaleEffect(0.7)
-                                    Text("Linking…")
-                                        .font(.system(size: 13))
-                                        .foregroundColor(C.dim)
-                                } else {
-                                    RimeoButton(title: "Link Agent", icon: "link", color: C.acc, action: doLink)
-                                }
-
-                                if !statusMsg.isEmpty {
-                                    Text(statusMsg)
-                                        .font(.system(size: 13))
-                                        .foregroundColor(statusMsg.hasPrefix("✓") ? C.green : C.red)
-                                }
-                            }
-                        }
-                        .padding(20)
+                        sessionRow.padding(20)
                     }
                 }
             }
@@ -90,7 +49,7 @@ struct AccountTabView: View {
                     .foregroundColor(C.green)
                     .font(.system(size: 22))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Linked to your account")
+                    Text("Signed in to Rimeo")
                         .font(.system(size: 17, weight: .bold))
                         .foregroundColor(C.text)
                     Text(appState.cloudEmail.isEmpty ? DataStore.shared.data.cloud_url : appState.cloudEmail)
@@ -101,10 +60,10 @@ struct AccountTabView: View {
             }
         } else {
             HStack(spacing: 11) {
-                Image(systemName: "link.badge.minus")
+                Image(systemName: "person.crop.circle.badge.exclamationmark")
                     .foregroundColor(C.red)
                     .font(.system(size: 22))
-                Text("Not linked to a cloud account")
+                Text("Not signed in")
                     .font(.system(size: 17, weight: .bold))
                     .foregroundColor(C.text)
                 Spacer()
@@ -112,43 +71,30 @@ struct AccountTabView: View {
         }
     }
 
-    private func doLink() {
-        let token = tokenInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !token.isEmpty else {
-            statusMsg = "Please enter the link token."
-            return
-        }
-
-        isLinking = true
-        statusMsg = ""
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            let payload = try? JSONSerialization.data(withJSONObject: [
-                "token": token,
-                "cloud_url": AppConfig.shared.rimeoAppURL,
-            ])
-            let resp = APIRouter.shared.route(HTTPRequest(
-                method: "POST",
-                path: "/api/link_account",
-                queryParams: [:],
-                headers: [:],
-                body: payload ?? Data()
-            ))
-
-            DispatchQueue.main.async {
-                isLinking = false
-                if resp.status == 200 {
-                    statusMsg = "✓ Linked successfully!"
-                    tokenInput = ""
-                } else {
-                    let msg = (try? JSONSerialization.jsonObject(with: bodyData(resp)) as? [String: Any])?["detail"] as? String ?? "Error"
-                    statusMsg = "Error: \(msg)"
-                }
+    private var sessionRow: some View {
+        HStack(spacing: 13) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 11, style: .continuous).fill(C.accSoft)
+                Image(systemName: "desktopcomputer")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundColor(C.accText)
             }
+            .frame(width: 40, height: 40)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("This computer")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(C.text)
+                Text("One agent stays active per account — signing in on another computer signs this one out.")
+                    .font(.system(size: 13))
+                    .foregroundColor(C.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
         }
     }
 
-    private func doUnlink() {
+    private func doSignOut() {
         DispatchQueue.global(qos: .userInitiated).async {
             _ = APIRouter.shared.route(HTTPRequest(
                 method: "POST",
@@ -158,10 +104,5 @@ struct AccountTabView: View {
                 body: Data()
             ))
         }
-    }
-
-    private func bodyData(_ resp: HTTPResponse) -> Data {
-        if case .data(let data) = resp.body { return data }
-        return Data()
     }
 }

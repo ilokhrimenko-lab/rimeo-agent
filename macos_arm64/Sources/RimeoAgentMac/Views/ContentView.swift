@@ -144,7 +144,7 @@ struct SidebarView: View {
 
     private let items: [(icon: String, label: String, idx: Int)] = [
         ("folder",    "Library",  0),
-        ("link",      "Pairing",  2),
+        ("macbook.and.iphone", "Devices", 2),
         ("cloud",     "Account",  3),
         ("gearshape", "Settings", 4),
     ]

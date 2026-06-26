@@ -111,7 +111,7 @@ public sealed partial class MainWindow : Window
         };
         // Mirror the macOS rail: Library / Pairing / Account / Settings (no Analysis).
         _navView.MenuItems.Add(CreateNavItem("Library", "Library")); // Folder
-        _navView.MenuItems.Add(CreateNavItem("Pairing", "Pairing")); // Link
+        _navView.MenuItems.Add(CreateNavItem("Devices", "Pairing")); // Link (route tag kept)
         _navView.MenuItems.Add(CreateNavItem("Account", "Account")); // Cloud
         _navView.MenuItems.Add(CreateNavItem("Settings", "Logs"));    // Settings gear
         _navView.SelectionChanged += NavView_SelectionChanged;
