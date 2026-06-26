@@ -3,6 +3,7 @@ using System.IO.Compression;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using RimeoAgent.Config;
+using RimeoAgent.Models;
 
 namespace RimeoAgent.Services;
 
