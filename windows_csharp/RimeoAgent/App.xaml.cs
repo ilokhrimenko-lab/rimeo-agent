@@ -15,6 +15,7 @@ public partial class App : Application
     private MainWindow?      _window;
     private AgentHttpServer? _server;
     private Mutex?           _singleInstanceMutex;
+    private System.Threading.Timer? _updateTimer;
     private bool            _backgroundStarted;
     private TaskbarIcon?    _trayIcon;
 
@@ -45,6 +46,12 @@ public partial class App : Application
             Environment.Exit(0);
             return;
         }
+
+        // Silent auto-update: install a build staged (downloaded) in the background
+        // during the previous session BEFORE the UI/services come up, then relaunch.
+        // ApplyStagedUpdateIfPresent() exits the process on success → launch stops here.
+        try { if (UpdateChecker.Shared.ApplyStagedUpdateIfPresent()) return; }
+        catch (Exception ex) { Log.Warn($"Staged update apply failed: {ex.Message}"); }
 
         // Bring up the window FIRST and let it become stable before touching any
         // heavy background work. Spinning up the HTTP server, the 62 MB component
@@ -102,10 +109,17 @@ public partial class App : Application
         // tunnels for audio streaming (quick trycloudflare tunnels are rejected).
         SafeStart("components + tunnel", () => _ = EnsureComponentsThenTunnel());
 
-        SafeStart("update check", () => UpdateChecker.Shared.CheckAsync(info =>
+        // Silent auto-update: check shortly after launch and every hour, downloading
+        // any newer build to a staging file in the background. It installs itself on
+        // the NEXT launch (ApplyStagedUpdateIfPresent at the top of OnLaunched) —
+        // no prompt.
+        SafeStart("update check", () =>
         {
-            if (info != null) Log.Info($"Update available: {info.Version}");
-        }));
+            UpdateChecker.Shared.CheckAndStageSilently();
+            _updateTimer = new System.Threading.Timer(
+                _ => UpdateChecker.Shared.CheckAndStageSilently(),
+                null, TimeSpan.FromHours(1), TimeSpan.FromHours(1));
+        });
 
         SafeStart("system tray", SetupTray);
 

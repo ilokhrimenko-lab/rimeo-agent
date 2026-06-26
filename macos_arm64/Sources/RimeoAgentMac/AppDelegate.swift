@@ -3,6 +3,7 @@ import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var mainWindow: NSWindow?
+    private var updateTimer: Timer?
     private var statusItem: NSStatusItem?
     private let defaultWindowSize = NSSize(width: 1180, height: 820)
     private let minimumWindowSize = NSSize(width: 1120, height: 760)
@@ -12,6 +13,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Ignore SIGPIPE (prevents crashes on broken socket writes)
         signal(SIGPIPE, SIG_IGN)
+
+        // Silent auto-update: install a build that was staged (downloaded) in the
+        // background during the previous session BEFORE any UI/server comes up, then
+        // relaunch into it. applyZip() calls exit(0) on success, so launch stops here.
+        if UpdateChecker.shared.applyStagedUpdateIfPresent() { return }
 
         // Apply the saved appearance BEFORE any window is created so the first
         // frame renders in the correct theme (no dark flash on a light Mac).
@@ -278,20 +284,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             TunnelProvisioner.shared.provisionIfNeeded()
         }
 
-        // Apply pending update (scheduled via "Update on Next Launch")
-        if let pending = UpdateChecker.shared.pendingUpdate {
-            UpdateChecker.shared.clearPending()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                self.downloadUpdate(pending)
-            }
-        } else {
-            // Routine background update check (once per 24h)
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 4) {
-                UpdateChecker.shared.checkAsync { info in
-                    guard let info else { return }
-                    DispatchQueue.main.async { self.showUpdateBanner(info) }
-                }
-            }
+        // Silent auto-update: check shortly after launch and every hour, downloading
+        // any newer build to a staging file in the background. It installs itself on
+        // the NEXT launch (applyStagedUpdateIfPresent at the top of this method) —
+        // no banner, no prompt.
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 8) {
+            UpdateChecker.shared.checkAndStageSilently()
+        }
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { _ in
+            UpdateChecker.shared.checkAndStageSilently()
         }
     }
 

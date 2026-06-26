@@ -21,6 +21,10 @@ public sealed class RimoData
     [JsonPropertyName("cloud_token")]       public string                     CloudToken       { get; set; } = "";
     [JsonPropertyName("tunnel_url")]        public string                     TunnelUrl        { get; set; } = "";
     [JsonPropertyName("max_cache_gb")]      public double                     MaxCacheGb       { get; set; } = 3.0;
+    // Silent auto-update: hourly check downloads the new build's zip to a staging
+    // file in the background; it is applied (xcopy+restart) on the next launch.
+    // Non-empty = a staged build is ready to install. Mirrors macOS.
+    [JsonPropertyName("staged_update_tag")] public string                     StagedUpdateTag  { get; set; } = "";
 }
 
 public sealed class DataStore

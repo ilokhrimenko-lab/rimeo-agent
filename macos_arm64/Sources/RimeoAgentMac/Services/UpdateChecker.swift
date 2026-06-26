@@ -31,41 +31,104 @@ final class UpdateChecker {
         }
     }
 
-    // Download zip, extract .app, run shell script to replace current bundle + relaunch
-    func downloadAndApply(_ info: UpdateInfo, progress: @escaping (Double) -> Void) throws {
-        guard let dlURL = URL(string: info.downloadURL) else {
-            throw NSError(domain: "Updater", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL"])
-        }
+    // MARK: - Silent staging (hourly check downloads in background; apply on next launch)
 
-        let tmp    = FileManager.default.temporaryDirectory
+    private var stagedZipURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("RimeoAgent/staged_update.zip")
+    }
+
+    /// Hourly background check: if a strictly-newer build is available, download its
+    /// zip to a staging file and record the tag. No UI, no relaunch — installed on
+    /// the next launch via `applyStagedUpdateIfPresent()`.
+    func checkAndStageSilently() {
+        DispatchQueue.global(qos: .utility).async {
+            guard let info = self.fetchLatest() else { return }
+            // Same build already staged on disk? Don't re-download.
+            if DataStore.shared.data.staged_update_tag == info.version,
+               FileManager.default.fileExists(atPath: self.stagedZipURL.path) { return }
+            do {
+                try FileManager.default.createDirectory(
+                    at: self.stagedZipURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true)
+                try self.downloadZip(info, to: self.stagedZipURL) { _ in }
+                DataStore.shared.update { $0.staged_update_tag = info.version }
+                logger.info("Staged silent update: \(info.version)")
+            } catch {
+                logger.warning("Silent update staging failed: \(error)")
+            }
+        }
+    }
+
+    /// Called at launch before the UI: if a staged build is ready and strictly newer
+    /// than the running one, install it (extract+replace) and relaunch. Returns true
+    /// when applying (the process is about to exit/relaunch).
+    @discardableResult
+    func applyStagedUpdateIfPresent() -> Bool {
+        let tag = DataStore.shared.data.staged_update_tag
+        guard !tag.isEmpty,
+              parseBuild(tag) > parseBuild(AppConfig.shared.releaseTag),
+              FileManager.default.fileExists(atPath: stagedZipURL.path) else {
+            // Stale / own-build / missing zip — clear the record.
+            if !tag.isEmpty { DataStore.shared.update { $0.staged_update_tag = "" } }
+            try? FileManager.default.removeItem(at: stagedZipURL)
+            return false
+        }
+        do {
+            logger.info("Applying staged update \(tag) at launch")
+            DataStore.shared.update { $0.staged_update_tag = "" }
+            try applyZip(at: stagedZipURL)   // extract+replace+relaunch → exit(0)
+            return true
+        } catch {
+            logger.warning("Applying staged update failed: \(error)")
+            try? FileManager.default.removeItem(at: stagedZipURL)
+            return false
+        }
+    }
+
+    // Download + apply immediately (manual "Update now" flow).
+    func downloadAndApply(_ info: UpdateInfo, progress: @escaping (Double) -> Void) throws {
+        let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("rimeo_upd_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmp) }
-
         let zipPath = tmp.appendingPathComponent("update.zip")
+        try downloadZip(info, to: zipPath) { progress($0 * 0.85) }
+        progress(0.9)
+        try applyZip(at: zipPath)   // relaunches → exit(0)
+    }
 
-        // Download
+    private func downloadZip(_ info: UpdateInfo, to dest: URL, progress: @escaping (Double) -> Void) throws {
+        guard let dlURL = URL(string: info.downloadURL) else {
+            throw NSError(domain: "Updater", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL"])
+        }
         var req = URLRequest(url: dlURL, timeoutInterval: 300)
         req.setValue("RimeoAgentMac/\(AppConfig.shared.version)", forHTTPHeaderField: "User-Agent")
-
         let sema = DispatchSemaphore(value: 0)
         var dlError: Error?
         let task = URLSession.shared.downloadTask(with: req) { localURL, _, err in
             if let err { dlError = err; sema.signal(); return }
-            if let lURL = localURL { try? FileManager.default.moveItem(at: lURL, to: zipPath) }
+            if let lURL = localURL {
+                try? FileManager.default.removeItem(at: dest)
+                do { try FileManager.default.moveItem(at: lURL, to: dest) }
+                catch { dlError = error }
+            }
             sema.signal()
         }
         task.resume()
-        let obs = task.progress.observe(\.fractionCompleted) { p, _ in
-            progress(p.fractionCompleted * 0.8)
-        }
+        let obs = task.progress.observe(\.fractionCompleted) { p, _ in progress(p.fractionCompleted) }
         sema.wait()
         obs.invalidate()
         if let e = dlError { throw e }
+    }
 
-        // Extract
-        let ext = tmp.appendingPathComponent("ext")
+    // Extract zip → replace running bundle (unprivileged, osascript fallback) → relaunch → exit(0).
+    private func applyZip(at zipPath: URL) throws {
+        let ext = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rimeo_apply_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: ext, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: ext) }
+
         let unzip = Process()
         unzip.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
         unzip.arguments = ["-q", zipPath.path, "-d", ext.path]
@@ -78,29 +141,26 @@ final class UpdateChecker {
                           userInfo: [NSLocalizedDescriptionKey: "No .app in archive"])
         }
 
-        let currentApp = Bundle.main.bundleURL
-        let newAppPath = newApp.path
-        let currentPath = currentApp.path
+        let currentPath = Bundle.main.bundleURL.path
+        let newAppPath  = newApp.path
 
-        // Try unprivileged replace first (works when .app is in user-writable location)
+        // Unprivileged replace first (works when the bundle is in a user-writable
+        // location → fully silent). Fall back to osascript (admin prompt) otherwise.
         let replaced = (try? replaceApp(from: newAppPath, to: currentPath)) ?? false
-
         if !replaced {
-            // Fall back to osascript — shows Touch ID / password dialog
             let shellCmd = "rm -rf '\(currentPath)' && cp -R '\(newAppPath)' '\(currentPath)'"
             let appleScript = "do shell script \"\(shellCmd)\" with administrator privileges"
             let osascript = Process()
             osascript.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
             osascript.arguments = ["-e", appleScript]
-            try osascript.run()
-            osascript.waitUntilExit()
+            try osascript.run(); osascript.waitUntilExit()
             guard osascript.terminationStatus == 0 else {
                 throw NSError(domain: "Updater", code: 3,
-                              userInfo: [NSLocalizedDescriptionKey: "Installation cancelled or failed"])
+                              userInfo: [NSLocalizedDescriptionKey: "Installation failed"])
             }
         }
 
-        progress(1.0)
+        try? FileManager.default.removeItem(at: stagedZipURL)
         logger.info("Update installed — relaunching")
         DataStore.shared.update { $0.just_updated = true }
         let reopen = Process()
@@ -134,10 +194,22 @@ final class UpdateChecker {
 
     // MARK: - Private
 
+    // Trailing run of digits: "mac-v1.0-build214" -> 214, "214" -> 214, "dev" -> 0.
+    private func parseBuild(_ s: String?) -> Int {
+        guard let s, !s.isEmpty else { return 0 }
+        var i = s.endIndex
+        while i > s.startIndex, s[s.index(before: i)].isNumber { i = s.index(before: i) }
+        return Int(s[i...]) ?? 0
+    }
+
     private func fetchLatest() -> UpdateInfo? {
         let repo = AppConfig.shared.githubRepo
+        // Iterate ALL releases and pick the highest BUILD NUMBER that ships a mac
+        // asset. GitHub's /releases/latest is ordered by publish date and is
+        // unreliable when mac/win release tags interleave (the "seesaw": a newer
+        // win-only release made /latest carry no mac asset → no update found).
         guard repo != "your-org/rimeo",
-              let url = URL(string: "https://api.github.com/repos/\(repo)/releases/latest")
+              let url = URL(string: "https://api.github.com/repos/\(repo)/releases?per_page=50")
         else { return nil }
 
         var req = URLRequest(url: url)
@@ -152,21 +224,29 @@ final class UpdateChecker {
         sema.wait()
 
         guard let data = payload,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let tag  = json["tag_name"] as? String, !tag.isEmpty,
-              tag != AppConfig.shared.releaseTag else { return nil }
+              let releases = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return nil }
 
         let assetName = "RimeoAgent_mac.zip"
-        guard let assets = json["assets"] as? [[String: Any]],
-              let asset  = assets.first(where: { $0["name"] as? String == assetName }),
-              let dlURL  = asset["browser_download_url"] as? String else { return nil }
+        let currentBuild = parseBuild(AppConfig.shared.releaseTag)
+        var bestBuild = currentBuild
+        var best: UpdateInfo? = nil
 
-        logger.info("Update available: \(AppConfig.shared.version) → \(tag)")
-        return UpdateInfo(
-            version:     tag,
-            downloadURL: dlURL,
-            notes:       (json["body"] as? String ?? "").prefix(400).description
-        )
+        for rel in releases {
+            if (rel["draft"] as? Bool) == true || (rel["prerelease"] as? Bool) == true { continue }
+            let tag = rel["tag_name"] as? String ?? ""
+            let b = parseBuild(tag)
+            if b <= bestBuild { continue }   // only ever offer a strictly newer build
+            guard let assets = rel["assets"] as? [[String: Any]],
+                  let asset  = assets.first(where: { $0["name"] as? String == assetName }),
+                  let dlURL  = asset["browser_download_url"] as? String else { continue }
+            bestBuild = b
+            best = UpdateInfo(version: tag, downloadURL: dlURL,
+                              notes: (rel["body"] as? String ?? "").prefix(400).description)
+        }
+
+        if let best { logger.info("Update available: build\(currentBuild) → \(best.version)") }
+        return best
     }
 
     private func replaceApp(from src: String, to dst: String) throws -> Bool {

@@ -107,6 +107,54 @@ public sealed class UpdateChecker
         catch { return null; }
     }
 
+    // ── Silent staging (hourly check downloads in background; apply on next launch) ──
+
+    private static string StagedZipPath => Path.Combine(AppConfig.Shared.BaseDir, "staged_update.zip");
+
+    // Hourly background check: if a strictly-newer build is available, download its
+    // zip to a staging file and record the tag. No UI — installed on next launch.
+    public void CheckAndStageSilently()
+    {
+        try
+        {
+            var info = QueryLatest();
+            if (info == null) return;
+            if (DataStore.Shared.Data.StagedUpdateTag == info.Version && File.Exists(StagedZipPath)) return;
+            DownloadZip(info, StagedZipPath, _ => { });
+            DataStore.Shared.Update(d => d.StagedUpdateTag = info.Version);
+            Log.Info($"Staged silent update: {info.Version}");
+        }
+        catch (Exception ex) { Log.Warn($"Silent update staging failed: {ex.Message}"); }
+    }
+
+    // Called at launch before the UI: if a staged build is ready and strictly newer
+    // than the running one, install it (xcopy+restart). Returns true when applying.
+    public bool ApplyStagedUpdateIfPresent()
+    {
+        var tag = DataStore.Shared.Data.StagedUpdateTag;
+        if (string.IsNullOrEmpty(tag)) return false;
+        if (ParseBuild(tag) <= ParseBuild(AppConfig.Shared.BuildNumber) || !File.Exists(StagedZipPath))
+        {
+            DataStore.Shared.Update(d => d.StagedUpdateTag = "");
+            try { if (File.Exists(StagedZipPath)) File.Delete(StagedZipPath); } catch { }
+            return false;
+        }
+        try
+        {
+            Log.Info($"Applying staged update {tag} at launch");
+            DataStore.Shared.Update(d => d.StagedUpdateTag = "");
+            ApplyZip(StagedZipPath);   // xcopy+restart → Environment.Exit(0)
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"Applying staged update failed: {ex.Message}");
+            try { File.Delete(StagedZipPath); } catch { }
+            return false;
+        }
+    }
+
+    // Manual "Update now" flow: download + apply immediately.
     public void DownloadAndApply(UpdateInfo info, Action<double> progress)
     {
         var tmp = Path.Combine(Path.GetTempPath(), $"rimeo_upd_{Guid.NewGuid():N}");
@@ -114,65 +162,69 @@ public sealed class UpdateChecker
         try
         {
             var zipPath = Path.Combine(tmp, "update.zip");
-            using var http = new HttpClient();
-            http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent",
-                $"RimeoAgentWin/{AppConfig.Shared.Version}");
-            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
-
-            // Stream the download so the UI can show real progress (0 .. 0.85).
-            using (var resp = http.GetAsync(info.DownloadUrl, HttpCompletionOption.ResponseHeadersRead, cts.Token).GetAwaiter().GetResult())
-            {
-                resp.EnsureSuccessStatusCode();
-                var total = resp.Content.Headers.ContentLength ?? -1L;
-                using var src = resp.Content.ReadAsStreamAsync(cts.Token).GetAwaiter().GetResult();
-                using var fileOut = File.Create(zipPath);
-                var buf = new byte[81920];
-                long received = 0;
-                int read;
-                while ((read = src.Read(buf, 0, buf.Length)) > 0)
-                {
-                    fileOut.Write(buf, 0, read);
-                    received += read;
-                    if (total > 0) progress(Math.Min(0.85, received / (double)total * 0.85));
-                }
-            }
+            DownloadZip(info, zipPath, p => progress(Math.Min(0.85, p * 0.85)));
             progress(0.9);
-
-            var extDir = Path.Combine(tmp, "ext");
-            ZipFile.ExtractToDirectory(zipPath, extDir);
-            progress(0.97);
-
-            // Find the new executable
-            var exeFiles = Directory.GetFiles(extDir, "RimeoAgent.exe", SearchOption.AllDirectories);
-            if (exeFiles.Length == 0) throw new Exception("RimeoAgent.exe not found in archive");
-
-            var newExe = exeFiles[0];
-            var newDir = Path.GetDirectoryName(newExe)!;
-
-            // Create a bat that replaces files and restarts
-            var script = Path.Combine(tmp, "update.bat");
-            var current = AppContext.BaseDirectory.TrimEnd('\\');
-            var newDirEsc = newDir.TrimEnd('\\');
-            File.WriteAllText(script, $@"@echo off
-timeout /t 2 /nobreak > nul
-xcopy /E /Y /I ""{newDirEsc}\*"" ""{current}\""
-start """" ""{Path.Combine(current, "RimeoAgent.exe")}""
-");
-            progress(1.0);
-            // Launch the updater hidden — no console window flashes for the user.
-            Process.Start(new ProcessStartInfo("cmd.exe", $"/c \"{script}\"")
-            {
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden
-            });
-            Environment.Exit(0);
+            ApplyZip(zipPath);   // restarts → Environment.Exit(0)
         }
         catch
         {
             try { Directory.Delete(tmp, true); } catch { }
             throw;
         }
+    }
+
+    private static void DownloadZip(UpdateInfo info, string dest, Action<double> progress)
+    {
+        using var http = new HttpClient();
+        http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent",
+            $"RimeoAgentWin/{AppConfig.Shared.Version}");
+        using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+        Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+        using var resp = http.GetAsync(info.DownloadUrl, HttpCompletionOption.ResponseHeadersRead, cts.Token).GetAwaiter().GetResult();
+        resp.EnsureSuccessStatusCode();
+        var total = resp.Content.Headers.ContentLength ?? -1L;
+        using var src = resp.Content.ReadAsStreamAsync(cts.Token).GetAwaiter().GetResult();
+        using var fileOut = File.Create(dest);
+        var buf = new byte[81920];
+        long received = 0;
+        int read;
+        while ((read = src.Read(buf, 0, buf.Length)) > 0)
+        {
+            fileOut.Write(buf, 0, read);
+            received += read;
+            if (total > 0) progress(received / (double)total);
+        }
+    }
+
+    // Extract zip → xcopy over the install dir + restart via a detached hidden bat → exit.
+    private static void ApplyZip(string zipPath)
+    {
+        var tmp = Path.Combine(Path.GetTempPath(), $"rimeo_apply_{Guid.NewGuid():N}");
+        var extDir = Path.Combine(tmp, "ext");
+        Directory.CreateDirectory(extDir);
+        ZipFile.ExtractToDirectory(zipPath, extDir);
+
+        var exeFiles = Directory.GetFiles(extDir, "RimeoAgent.exe", SearchOption.AllDirectories);
+        if (exeFiles.Length == 0) throw new Exception("RimeoAgent.exe not found in archive");
+        var newDir = Path.GetDirectoryName(exeFiles[0])!;
+
+        var script = Path.Combine(tmp, "update.bat");
+        var current = AppContext.BaseDirectory.TrimEnd('\\');
+        var newDirEsc = newDir.TrimEnd('\\');
+        File.WriteAllText(script, $@"@echo off
+timeout /t 2 /nobreak > nul
+xcopy /E /Y /I ""{newDirEsc}\*"" ""{current}\""
+start """" ""{Path.Combine(current, "RimeoAgent.exe")}""
+");
+        try { if (File.Exists(StagedZipPath)) File.Delete(StagedZipPath); } catch { }
+        // Launch the updater hidden — no console window flashes for the user.
+        Process.Start(new ProcessStartInfo("cmd.exe", $"/c \"{script}\"")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WindowStyle = ProcessWindowStyle.Hidden
+        });
+        Environment.Exit(0);
     }
 
     private bool IsDue

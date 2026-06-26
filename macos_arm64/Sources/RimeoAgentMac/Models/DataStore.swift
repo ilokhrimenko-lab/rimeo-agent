@@ -22,6 +22,10 @@ struct RimoData: Codable {
     var just_updated:      Bool               = false
     var pending_update_url: String            = ""
     var pending_update_tag: String            = ""
+    // Silent auto-update: hourly check downloads the new build's zip to a staging
+    // file in the background; it is applied (extract+replace+relaunch) on the next
+    // launch. `staged_update_tag` non-empty = a staged build is ready to install.
+    var staged_update_tag: String             = ""
 }
 
 final class DataStore {
