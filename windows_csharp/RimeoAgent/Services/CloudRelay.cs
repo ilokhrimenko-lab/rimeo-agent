@@ -71,10 +71,14 @@ public sealed class CloudRelay
 
                 if (resp.StatusCode == System.Net.HttpStatusCode.Forbidden)
                 {
-                    Log.Warn("Cloud relay: unauthorized (bad token), retry in 60s");
-                    await Task.Delay(60_000);
-                    backoffSec = 1;
-                    continue;
+                    // 403 = this agent's cloud_token was revoked — the account signed
+                    // in on another computer (single active agent per account). Clear
+                    // the local session and drop back to the Sign In screen.
+                    Log.Warn("Cloud relay: 403 — agent signed out (signed in elsewhere). Clearing session.");
+                    DataStore.Shared.Update(dd => { dd.CloudUrl = ""; dd.CloudUserId = null; dd.CloudToken = ""; });
+                    AppState.Shared.RefreshFromData();
+                    Stop();
+                    return;
                 }
 
                 if (!resp.IsSuccessStatusCode)

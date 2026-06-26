@@ -100,6 +100,8 @@ final class APIRouter {
         case ("GET", "/api/status"):       return getStatus(req)
         case ("GET", "/api/account"):      return getAccount(req)
         case ("POST", "/api/link_account"):    return linkAccount(req)
+        case ("POST", "/api/agent_login"):     return agentSignIn(req)
+        case ("POST", "/api/agent_signup"):    return agentSignUp(req)
         case ("POST", "/api/unlink_account"):  return unlinkAccount(req)
 
         // Tunnel
@@ -911,6 +913,85 @@ final class APIRouter {
         }
 
         return .json(["status": "linked", "cloud_url": cloudURL, "result": result])
+    }
+
+    // MARK: - /api/agent_login & /api/agent_signup (login-model)
+
+    private func agentSignIn(_ req: HTTPRequest) -> HTTPResponse {
+        agentAuth(req, cloudPath: "/api/agent/login")
+    }
+
+    private func agentSignUp(_ req: HTTPRequest) -> HTTPResponse {
+        agentAuth(req, cloudPath: "/api/agent/signup")
+    }
+
+    /// Shared email+password flow for sign-in and sign-up. Posts the credentials
+    /// to the cloud, stores the returned cloud_token, and starts the relay. The
+    /// cloud enforces a single active agent per account (others are evicted).
+    private func agentAuth(_ req: HTTPRequest, cloudPath: String) -> HTTPResponse {
+        guard let body = try? JSONSerialization.jsonObject(with: req.body) as? [String: Any],
+              let email = (body["email"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let password = body["password"] as? String,
+              !email.isEmpty, !password.isEmpty else {
+            return .error("email and password required", status: 400)
+        }
+
+        let cfg      = AppConfig.shared
+        var cloudURL = cfg.rimeoAppURL
+        cloudURL = cloudURL.hasSuffix("/") ? String(cloudURL.dropLast()) : cloudURL
+        let localURL = cfg.localAgentURL()
+        let d        = DataStore.shared.data
+        let tunnel   = TunnelManager.shared.activeURL.isEmpty ? d.tunnel_url : TunnelManager.shared.activeURL
+
+        let payload: [String: Any] = [
+            "email":      email,
+            "password":   password,
+            "agent_id":   cfg.agentID,
+            "agent_url":  localURL,
+            "tunnel_url": tunnel,
+            "agent_name": cfg.appName,
+        ]
+
+        guard let payloadData = try? JSONSerialization.data(withJSONObject: payload),
+              let endpoint    = URL(string: "\(cloudURL)\(cloudPath)") else {
+            return .error("Invalid cloud URL", status: 400)
+        }
+
+        var post = URLRequest(url: endpoint)
+        post.httpMethod = "POST"; post.httpBody = payloadData
+        AppConfig.shared.applyCloudHeaders(to: &post, contentType: "application/json")
+        post.timeoutInterval = 15
+
+        let sema = DispatchSemaphore(value: 0)
+        var resultData: Data?; var httpCode = 0
+        URLSession.shared.dataTask(with: post) { data, resp, _ in
+            httpCode = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            resultData = data; sema.signal()
+        }.resume()
+        sema.wait()
+
+        guard httpCode == 200, let rd = resultData,
+              let result = try? JSONSerialization.jsonObject(with: rd) as? [String: Any],
+              let ct = result["cloud_token"] as? String, !ct.isEmpty else {
+            // Surface the cloud's own message (e.g. invalid credentials / email taken).
+            let cloudMsg = (resultData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })?["error"] as? String
+            let raw = resultData.flatMap { String(data: $0, encoding: .utf8) }
+            return .error(cloudMsg ?? raw ?? "Sign-in failed", status: httpCode > 0 ? httpCode : 502)
+        }
+
+        DataStore.shared.update { d in
+            d.cloud_url     = cloudURL
+            d.cloud_user_id = result["email"] as? String
+            d.cloud_token   = ct
+        }
+        DispatchQueue.main.async { AppState.shared.refreshFromData() }
+        CloudRelay.shared.start(cloudURL: cloudURL, token: ct)
+
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+            TunnelProvisioner.shared.provisionIfNeeded()
+        }
+
+        return .json(["status": "ok", "cloud_url": cloudURL, "email": result["email"] as? String ?? email])
     }
 
     // MARK: - /api/unlink_account

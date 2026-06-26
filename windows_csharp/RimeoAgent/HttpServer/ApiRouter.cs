@@ -138,6 +138,8 @@ public sealed class ApiRouter
                 case ("GET",  "/api/status"):              await GetStatus(req, resp); break;
                 case ("GET",  "/api/account"):             await GetAccount(req, resp); break;
                 case ("POST", "/api/link_account"):        await LinkAccount(req, resp); break;
+                case ("POST", "/api/agent_login"):         await AgentAuth(req, resp, "/api/agent/login"); break;
+                case ("POST", "/api/agent_signup"):        await AgentAuth(req, resp, "/api/agent/signup"); break;
                 case ("POST", "/api/unlink_account"):      await UnlinkAccount(req, resp); break;
                 case ("GET",  "/api/tunnel/status"):       await TunnelStatus(req, resp); break;
                 case ("POST", "/api/tunnel/start"):        await TunnelStart(req, resp); break;
@@ -764,6 +766,75 @@ public sealed class ApiRouter
             CloudRelay.Shared.Start(cloudUrl, DataStore.Shared.Data.CloudToken);
 
             await WriteJson(resp, 200, new { status = "linked", cloud_url = cloudUrl, result });
+        }
+        catch (Exception ex) { await WriteJson(resp, 502, new { error = ex.Message }); }
+    }
+
+    // ── /api/agent_login & /api/agent_signup (login-model) ─────────────────────
+
+    /// <summary>
+    /// Shared email+password flow for sign-in and sign-up. Posts the credentials
+    /// to the cloud, stores the returned cloud_token and starts the relay. The
+    /// cloud enforces a single active agent per account (others are evicted).
+    /// </summary>
+    private static async Task AgentAuth(AgentRequest req, HttpListenerResponse resp, string cloudPath)
+    {
+        var body = ParseJsonBody<Dictionary<string, object>>(req.Body);
+        var email = body != null && body.TryGetValue("email", out var eo) ? eo?.ToString()?.Trim() ?? "" : "";
+        var password = body != null && body.TryGetValue("password", out var po) ? po?.ToString() ?? "" : "";
+        if (string.IsNullOrEmpty(email) || string.IsNullOrEmpty(password))
+        { await WriteJson(resp, 400, new { error = "email and password required" }); return; }
+
+        var cloudUrl = AppConfig.RimeoAppUrl.TrimEnd('/');
+        var cfg     = AppConfig.Shared;
+        var d       = DataStore.Shared.Data;
+        var tunnel  = string.IsNullOrEmpty(TunnelManager.Shared.ActiveUrl) ? d.TunnelUrl : TunnelManager.Shared.ActiveUrl;
+        var payload = JsonSerializer.Serialize(new
+        {
+            email,
+            password,
+            agent_id   = cfg.AgentId,
+            agent_url  = cfg.LocalAgentUrl(),
+            tunnel_url = tunnel,
+            agent_name = AppConfig.AppName,
+        });
+
+        try
+        {
+            using var http = new HttpClient();
+            using var cts  = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            var content    = new StringContent(payload, Encoding.UTF8, "application/json");
+            var httpResp   = await http.PostAsync($"{cloudUrl}{cloudPath}", content, cts.Token);
+            var resultStr  = await httpResp.Content.ReadAsStringAsync();
+
+            if (!httpResp.IsSuccessStatusCode)
+            {
+                var msg = "Sign-in failed";
+                try
+                {
+                    var err = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(resultStr);
+                    if (err?.TryGetValue("error", out var errEl) == true) msg = errEl.GetString() ?? msg;
+                }
+                catch { if (!string.IsNullOrEmpty(resultStr)) msg = resultStr; }
+                await WriteJson(resp, (int)httpResp.StatusCode, new { error = msg });
+                return;
+            }
+
+            var result = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(resultStr);
+            var cloudToken = result?.TryGetValue("cloud_token", out var ctEl) == true ? ctEl.GetString() ?? "" : "";
+            if (string.IsNullOrEmpty(cloudToken))
+            { await WriteJson(resp, 502, new { error = "Sign-in failed" }); return; }
+
+            DataStore.Shared.Update(dd =>
+            {
+                dd.CloudUrl    = cloudUrl;
+                dd.CloudUserId = result?.TryGetValue("email", out var eEl) == true ? eEl.GetString() : null;
+                dd.CloudToken  = cloudToken;
+            });
+            AppState.Shared.RefreshFromData();
+            CloudRelay.Shared.Start(cloudUrl, cloudToken);
+
+            await WriteJson(resp, 200, new { status = "ok", cloud_url = cloudUrl, result });
         }
         catch (Exception ex) { await WriteJson(resp, 502, new { error = ex.Message }); }
     }

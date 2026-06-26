@@ -107,10 +107,18 @@ final class CloudRelay {
             }
 
             if httpCode == 403 {
-                logger.warning("Cloud relay: unauthorized (bad token), retry in 60s")
-                Thread.sleep(forTimeInterval: 60)
-                backoff = 1
-                continue
+                // 403 = this agent's cloud_token was revoked — i.e. the account
+                // signed in on another computer (single active agent per account).
+                // Clear the local session and drop back to the Sign In screen.
+                logger.warning("Cloud relay: 403 — agent signed out (signed in elsewhere). Clearing session.")
+                DataStore.shared.update { d in
+                    d.cloud_url = ""
+                    d.cloud_user_id = nil
+                    d.cloud_token = ""
+                }
+                DispatchQueue.main.async { AppState.shared.refreshFromData() }
+                self.stop()
+                return
             }
 
             guard httpCode == 200, let data = respData else {

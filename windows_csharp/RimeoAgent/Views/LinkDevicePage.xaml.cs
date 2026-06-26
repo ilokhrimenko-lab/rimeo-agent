@@ -1,5 +1,5 @@
 using System;
-using System.Linq;
+using System.Collections.Generic;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -10,38 +10,46 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using RimeoAgent.Config;
 using RimeoAgent.Services;
-using Windows.ApplicationModel.DataTransfer;
 using Windows.System;
 
 namespace RimeoAgent.Views;
 
-// Port of the Paper "Agent — Link Device — Win" gate (light + dark). Shown before
-// the agent is linked to a Rimeo account: a custom window titlebar, a lock emblem,
-// a 6-cell pairing-code input and a Link-device action. On a successful link it
-// hands control back to the main shell via the supplied callback.
+// Port of the Paper "Agent — Sign In / Create Account — Win" gate (light + dark).
+// Shown before the agent is signed in to a Rimeo account: a custom window
+// titlebar, an account emblem, an email + password form, and a Sign in /
+// Create account action. On success it hands control back to the main shell via
+// the supplied callback. (Renamed file kept as LinkDevicePage for call sites.)
 public sealed partial class LinkDevicePage : Page
 {
-    private const int CodeLength = 8;   // pairing token length (matches iOS / web dashboard)
-
-    // Glyph paths on a 0–24 viewBox (mirrors the SVG icons in the Paper export).
-    private static readonly string[] LinkGlyph =
-    {
-        "M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71",
-        "M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"
-    };
-
     private readonly Action _onLinked;
-    private readonly TextBlock[] _cellText = new TextBlock[CodeLength];
-    private readonly Border[]    _cellBox  = new Border[CodeLength];
-    private readonly Border[]    _cursor   = new Border[CodeLength];
-    private readonly TextBox     _input    = new();
-    private readonly TextBlock   _status   = new()
+    private bool _isSignIn = true;
+    private bool _busy;
+
+    private readonly TextBox     _emailBox    = new();
+    private readonly PasswordBox _passwordBox = new();
+
+    private readonly TextBlock _title = new()
+    {
+        FontSize = 26, FontWeight = FontWeights.ExtraBold, Foreground = UI.Text,
+        CharacterSpacing = -20, TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap
+    };
+    private readonly TextBlock _subtitle = new()
+    {
+        FontSize = 14, Foreground = UI.Secondary, CharacterSpacing = -10, LineHeight = 20,
+        TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap
+    };
+    private Button   _forgotBtn = null!;
+    private TextBlock _helper   = null!;
+    private readonly TextBlock _primaryLabel = new() { FontSize = 15, FontWeight = FontWeights.SemiBold, Foreground = UI.White };
+    private readonly TextBlock _footerLead   = new() { FontSize = 13, FontWeight = FontWeights.Medium, Foreground = UI.Secondary, VerticalAlignment = VerticalAlignment.Center };
+    private readonly TextBlock _footerLinkLabel = new() { FontSize = 13, FontWeight = FontWeights.SemiBold, Foreground = UI.AccText };
+    private Border   _sessionNote = null!;
+    private readonly TextBlock _status = new()
     {
         FontSize = 13, FontWeight = FontWeights.Medium, TextWrapping = TextWrapping.Wrap,
-        HorizontalAlignment = HorizontalAlignment.Center, Visibility = Visibility.Collapsed
+        TextAlignment = TextAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center,
+        Width = 374, Visibility = Visibility.Collapsed
     };
-
-    private bool _updatingInput;
 
     /// <summary>The draggable titlebar lane — MainWindow passes it to SetTitleBar.</summary>
     public FrameworkElement TitleBarDragRegion { get; private set; } = new Grid();
@@ -51,7 +59,8 @@ public sealed partial class LinkDevicePage : Page
         _onLinked = onLinked;
         InitializeComponent();
         Content = Build();
-        Loaded += (_, _) => _input.Focus(FocusState.Programmatic);
+        ApplyMode();
+        Loaded += (_, _) => _emailBox.Focus(FocusState.Programmatic);
     }
 
     private Grid Build()
@@ -80,11 +89,9 @@ public sealed partial class LinkDevicePage : Page
 
         var brand = new StackPanel
         {
-            Orientation = Orientation.Horizontal,
-            Spacing = 7,
-            VerticalAlignment = VerticalAlignment.Center,
+            Orientation = Orientation.Horizontal, Spacing = 7, VerticalAlignment = VerticalAlignment.Center,
             Padding = new Thickness(22, 0, 0, 0),
-            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent) // make the whole lane draggable
+            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent)
         };
         brand.Children.Add(new TextBlock { Text = "Rimeo", FontSize = 13, FontWeight = FontWeights.Bold, Foreground = UI.TitleInk, CharacterSpacing = -10 });
         brand.Children.Add(new TextBlock { Text = "Agent", FontSize = 13, FontWeight = FontWeights.Medium, Foreground = UI.TitleDim, CharacterSpacing = -10 });
@@ -110,285 +117,276 @@ public sealed partial class LinkDevicePage : Page
     {
         var b = new Button
         {
-            Width = 46, Height = 46,
-            Padding = new Thickness(0),
-            CornerRadius = new CornerRadius(0),
-            BorderThickness = new Thickness(0),
-            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+            Width = 46, Height = 46, Padding = new Thickness(0), CornerRadius = new CornerRadius(0),
+            BorderThickness = new Thickness(0), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
             Content = icon
         };
         b.Click += onClick;
         return b;
     }
 
-    // ── The centered pairing card ─────────────────────────────────────────────
+    // ── Centered sign-in / create-account card ────────────────────────────────
     private Grid BuildGate()
     {
         var host = new Grid();
-
         var gate = new StackPanel
         {
-            Orientation = Orientation.Vertical,
-            Width = 430,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center
+            Orientation = Orientation.Vertical, Width = 430,
+            HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center
         };
 
-        // Lock emblem
-        var emblem = new Border
+        // Account emblem
+        gate.Children.Add(new Border
         {
-            Width = 60, Height = 60,
-            CornerRadius = new CornerRadius(17),
-            Background = UI.LockBg,
-            BorderBrush = UI.LockBrd,
-            BorderThickness = new Thickness(1),
+            Width = 60, Height = 60, CornerRadius = new CornerRadius(17),
+            Background = UI.LockBg, BorderBrush = UI.LockBrd, BorderThickness = new Thickness(1),
             HorizontalAlignment = HorizontalAlignment.Center,
-            Child = UI.Icon(28, UI.Acc, 2, LinkGlyph)
-        };
-        gate.Children.Add(emblem);
+            Child = UI.Icon(28, UI.Acc, 2, "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z", "M5 20a7 7 0 0 1 14 0")
+        });
 
-        // Heading + subtitle
         var headingBlock = new StackPanel
         {
             Orientation = Orientation.Vertical, Spacing = 9, Width = 360,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            Margin = new Thickness(0, 22, 0, 0)
+            HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 22, 0, 0)
         };
-        headingBlock.Children.Add(new TextBlock
-        {
-            Text = "Let’s pair your device",
-            FontSize = 26, FontWeight = FontWeights.ExtraBold, Foreground = UI.Text,
-            CharacterSpacing = -20, TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap
-        });
-        headingBlock.Children.Add(new TextBlock
-        {
-            Text = "Start by linking this agent to your Rimeo account. Enter the pairing code from rimeo.app to set up the pair.",
-            FontSize = 14, Foreground = UI.Secondary, CharacterSpacing = -10,
-            LineHeight = 20, TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap
-        });
+        headingBlock.Children.Add(_title);
+        headingBlock.Children.Add(_subtitle);
         gate.Children.Add(headingBlock);
 
-        // Code cells (with an invisible TextBox overlay capturing keystrokes)
-        gate.Children.Add(BuildCells());
-
-        // Actions: Link-device button + paste hint + inline status
-        var actions = new StackPanel
+        var form = new StackPanel
         {
-            Orientation = Orientation.Vertical, Spacing = 14, Width = 374,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            Margin = new Thickness(0, 20, 0, 0)
+            Orientation = Orientation.Vertical, Spacing = 16, Width = 374,
+            HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 28, 0, 0)
         };
-        actions.Children.Add(BuildLinkButton());
-        actions.Children.Add(BuildPasteHint());
-        actions.Children.Add(_status);
-        gate.Children.Add(actions);
-
-        // Info chip
-        gate.Children.Add(BuildInfoChip());
+        form.Children.Add(BuildEmailField());
+        form.Children.Add(BuildPasswordField());
+        form.Children.Add(BuildPrimaryButton());
+        form.Children.Add(BuildFooter());
+        _sessionNote = BuildSessionNote();
+        form.Children.Add(_sessionNote);
+        form.Children.Add(_status);
+        gate.Children.Add(form);
 
         host.Children.Add(gate);
         return host;
     }
 
-    private Grid BuildCells()
+    private StackPanel BuildEmailField()
     {
-        var overlay = new Grid { Margin = new Thickness(0, 26, 0, 0), HorizontalAlignment = HorizontalAlignment.Center };
+        var label = new TextBlock { Text = "Email", FontSize = 13, FontWeight = FontWeights.Medium, Foreground = UI.Secondary };
 
-        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Center };
-        for (int i = 0; i < CodeLength; i++)
-        {
-            var glyph = new TextBlock
-            {
-                FontSize = 22, FontWeight = FontWeights.SemiBold,
-                FontFamily = new FontFamily("Consolas"), Foreground = UI.Text,
-                HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center
-            };
-            var caret = new Border
-            {
-                Width = 2, Height = 24, CornerRadius = new CornerRadius(2), Background = UI.Acc,
-                HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
-                Visibility = Visibility.Collapsed
-            };
-            var inner = new Grid();
-            inner.Children.Add(caret);
-            inner.Children.Add(glyph);
+        _emailBox.PlaceholderText = "you@email.com";
+        _emailBox.FontSize = 14;
+        _emailBox.Foreground = UI.Text;
+        _emailBox.Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        _emailBox.BorderThickness = new Thickness(0);
+        _emailBox.Padding = new Thickness(0);
+        _emailBox.VerticalAlignment = VerticalAlignment.Center;
+        _emailBox.KeyDown += (_, e) => { if (e.Key == VirtualKey.Enter) Submit(); };
 
-            var box = new Border
-            {
-                Width = 46, Height = 58, CornerRadius = new CornerRadius(12),
-                Background = UI.Surf, BorderBrush = UI.CellBrd, BorderThickness = new Thickness(1),
-                Child = inner
-            };
-            _cellText[i] = glyph;
-            _cursor[i]   = caret;
-            _cellBox[i]  = box;
-            row.Children.Add(box);
-        }
-        overlay.Children.Add(row);
+        var icon = UI.Icon(17, UI.Dim, 2,
+            "M4 5H20A1 1 0 0 1 21 6V18A1 1 0 0 1 20 19H4A1 1 0 0 1 3 18V6A1 1 0 0 1 4 5Z", "M3 7l9 6 9-6");
 
-        // Invisible input that owns the keyboard; sits on top so a tap focuses it.
-        _input.MaxLength = CodeLength;
-        _input.Opacity = 0;
-        _input.Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-        _input.BorderThickness = new Thickness(0);
-        _input.HorizontalAlignment = HorizontalAlignment.Stretch;
-        _input.VerticalAlignment = VerticalAlignment.Stretch;
-        _input.TextChanged += Input_TextChanged;
-        _input.KeyDown += (_, e) => { if (e.Key == VirtualKey.Enter) Submit(); };
-        overlay.Children.Add(_input);
-
-        RenderCells();
-        return overlay;
+        var stack = new StackPanel { Orientation = Orientation.Vertical, Spacing = 7, Width = 374 };
+        stack.Children.Add(label);
+        stack.Children.Add(InputRow(icon, _emailBox));
+        return stack;
     }
 
-    private void Input_TextChanged(object sender, TextChangedEventArgs e)
+    private StackPanel BuildPasswordField()
     {
-        if (_updatingInput) return;
+        var headerRow = new Grid();
+        headerRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        headerRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-        var clean = new string(_input.Text.Where(char.IsLetterOrDigit).ToArray())
-            .ToUpperInvariant();
-        if (clean.Length > CodeLength) clean = clean.Substring(0, CodeLength);
+        var pwLabel = new TextBlock { Text = "Password", FontSize = 13, FontWeight = FontWeights.Medium, Foreground = UI.Secondary, VerticalAlignment = VerticalAlignment.Center };
+        Grid.SetColumn(pwLabel, 0);
+        headerRow.Children.Add(pwLabel);
 
-        if (clean != _input.Text)
+        _forgotBtn = new Button
         {
-            _updatingInput = true;
-            _input.Text = clean;
-            _input.Select(clean.Length, 0);
-            _updatingInput = false;
-        }
-        RenderCells();
+            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0), Padding = new Thickness(0),
+            Content = new TextBlock { Text = "Forgot password?", FontSize = 13, FontWeight = FontWeights.Medium, Foreground = UI.AccText }
+        };
+        _forgotBtn.Click += (_, _) => OpenForgot();
+        _helper = new TextBlock { Text = "Use 8+ characters", FontSize = 13, Foreground = UI.Dim, VerticalAlignment = VerticalAlignment.Center, Visibility = Visibility.Collapsed };
+
+        var right = new Grid { HorizontalAlignment = HorizontalAlignment.Right };
+        right.Children.Add(_forgotBtn);
+        right.Children.Add(_helper);
+        Grid.SetColumn(right, 1);
+        headerRow.Children.Add(right);
+
+        _passwordBox.PlaceholderText = "Your password";
+        _passwordBox.FontSize = 14;
+        _passwordBox.Foreground = UI.Text;
+        _passwordBox.Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        _passwordBox.BorderThickness = new Thickness(0);
+        _passwordBox.Padding = new Thickness(0);
+        _passwordBox.VerticalAlignment = VerticalAlignment.Center;
+        _passwordBox.KeyDown += (_, e) => { if (e.Key == VirtualKey.Enter) Submit(); };
+
+        var lockIcon = UI.Icon(17, UI.Dim, 2,
+            "M5 11H19A1 1 0 0 1 20 12V20A1 1 0 0 1 19 21H5A1 1 0 0 1 4 20V12A1 1 0 0 1 5 11Z", "M8 11V8a4 4 0 0 1 8 0v3");
+
+        var stack = new StackPanel { Orientation = Orientation.Vertical, Spacing = 7, Width = 374 };
+        stack.Children.Add(headerRow);
+        stack.Children.Add(InputRow(lockIcon, _passwordBox));
+        return stack;
     }
 
-    private void RenderCells()
+    // Field shell: leading icon + control inside a rounded, bordered box.
+    private static Border InputRow(FrameworkElement icon, FrameworkElement control)
     {
-        var text = _input.Text;
-        int active = text.Length < CodeLength ? text.Length : -1;
-        for (int i = 0; i < CodeLength; i++)
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+        icon.Margin = new Thickness(0, 0, 10, 0);
+        icon.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetColumn(icon, 0);
+        grid.Children.Add(icon);
+
+        control.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetColumn(control, 1);
+        grid.Children.Add(control);
+
+        return new Border
         {
-            _cellText[i].Text = i < text.Length ? text[i].ToString() : "";
-            bool isActive = i == active;
-            _cellBox[i].BorderBrush = isActive ? UI.Acc : UI.CellBrd;
-            _cellBox[i].BorderThickness = new Thickness(isActive ? 2 : 1);
-            _cursor[i].Visibility = isActive ? Visibility.Visible : Visibility.Collapsed;
-        }
+            Height = 46, CornerRadius = new CornerRadius(10),
+            Background = UI.Field, BorderBrush = UI.Brd, BorderThickness = new Thickness(1),
+            Padding = new Thickness(14, 0, 12, 0),
+            Child = grid
+        };
     }
 
-    private Button BuildLinkButton()
+    private Button BuildPrimaryButton()
     {
         var content = new StackPanel
         {
             Orientation = Orientation.Horizontal, Spacing = 9,
             HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center
         };
-        content.Children.Add(UI.Icon(17, UI.White, 2.1, LinkGlyph));
-        content.Children.Add(new TextBlock { Text = "Link device", FontSize = 15, FontWeight = FontWeights.SemiBold, Foreground = UI.White });
+        content.Children.Add(_primaryLabel);
+        content.Children.Add(UI.Icon(17, UI.White, 2.1, "M5 12H19", "M13 6l6 6-6 6"));
 
         var b = new Button
         {
-            Width = 374, Height = 46,
-            CornerRadius = new CornerRadius(12),
-            BorderThickness = new Thickness(0),
-            Background = UI.Acc,
-            HorizontalContentAlignment = HorizontalAlignment.Center,
-            VerticalContentAlignment = VerticalAlignment.Center,
+            Width = 374, Height = 46, CornerRadius = new CornerRadius(12), BorderThickness = new Thickness(0),
+            Background = UI.Acc, HorizontalContentAlignment = HorizontalAlignment.Center, VerticalContentAlignment = VerticalAlignment.Center,
             Content = content
         };
         b.Click += (_, _) => Submit();
         return b;
     }
 
-    private Button BuildPasteHint()
+    private StackPanel BuildFooter()
     {
-        var content = new StackPanel
+        var stack = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 5, HorizontalAlignment = HorizontalAlignment.Center };
+        stack.Children.Add(_footerLead);
+        var linkBtn = new Button
         {
-            Orientation = Orientation.Horizontal, Spacing = 7,
-            HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center
+            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0), Padding = new Thickness(0),
+            Content = _footerLinkLabel
         };
-        content.Children.Add(UI.Icon(14, UI.Secondary, 2,
-            "M8 2H16A1 1 0 0 1 17 3V5A1 1 0 0 1 16 6H8A1 1 0 0 1 7 5V3A1 1 0 0 1 8 2Z",
-            "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"));
-        content.Children.Add(new TextBlock { Text = "Paste from clipboard", FontSize = 13, FontWeight = FontWeights.Medium, Foreground = UI.Secondary });
-
-        var b = new Button
-        {
-            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
-            BorderThickness = new Thickness(0),
-            Padding = new Thickness(6, 2, 6, 2),
-            HorizontalAlignment = HorizontalAlignment.Center,
-            Content = content
-        };
-        b.Click += async (_, _) => await PasteFromClipboard();
-        return b;
+        linkBtn.Click += (_, _) => ToggleMode();
+        stack.Children.Add(linkBtn);
+        return stack;
     }
 
-    private Border BuildInfoChip()
+    private Border BuildSessionNote()
     {
-        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, VerticalAlignment = VerticalAlignment.Center };
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 9, VerticalAlignment = VerticalAlignment.Center };
         row.Children.Add(UI.Icon(15, UI.Dim, 2, "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z", "M12 16v-4", "M12 8h.01"));
         row.Children.Add(new TextBlock
         {
-            Text = "Find your code at rimeo.app › Account › Pair a device",
-            FontSize = 13, Foreground = UI.Acc, CharacterSpacing = -10, VerticalAlignment = VerticalAlignment.Center
+            Text = "One agent per account — signing in here signs out any other.",
+            FontSize = 13, Foreground = UI.Secondary, TextWrapping = TextWrapping.Wrap,
+            VerticalAlignment = VerticalAlignment.Center, Width = 320
         });
         return new Border
         {
-            Background = UI.Surf,
-            BorderBrush = UI.CardBrd,
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(12),
-            Padding = new Thickness(15, 11, 15, 11),
-            HorizontalAlignment = HorizontalAlignment.Center,
-            Margin = new Thickness(0, 22, 0, 0),
+            Background = UI.Surf, BorderBrush = UI.CardBrd, BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(12), Padding = new Thickness(15, 11, 15, 11),
             Child = row
         };
     }
 
-    private async System.Threading.Tasks.Task PasteFromClipboard()
+    private void ApplyMode()
     {
-        try
-        {
-            var view = Clipboard.GetContent();
-            if (!view.Contains(StandardDataFormats.Text)) return;
-            var text = await view.GetTextAsync();
-            var clean = new string((text ?? "").Where(char.IsLetterOrDigit).ToArray()).ToUpperInvariant();
-            if (clean.Length > CodeLength) clean = clean.Substring(0, CodeLength);
-            _input.Text = clean;
-            _input.Select(clean.Length, 0);
-            _input.Focus(FocusState.Programmatic);
-        }
-        catch (Exception ex) { Log.Error($"Clipboard paste failed: {ex.Message}"); }
+        _title.Text = _isSignIn ? "Sign in to Rimeo" : "Create your account";
+        _subtitle.Text = _isSignIn
+            ? "Use your Rimeo account to connect this agent. Your library stays in sync everywhere you listen."
+            : "Set up a Rimeo account to sync your library everywhere you listen.";
+        _forgotBtn.Visibility = _isSignIn ? Visibility.Visible : Visibility.Collapsed;
+        _helper.Visibility    = _isSignIn ? Visibility.Collapsed : Visibility.Visible;
+        _passwordBox.PlaceholderText = _isSignIn ? "Your password" : "Create a password";
+        _primaryLabel.Text = _busy
+            ? (_isSignIn ? "Signing in…" : "Creating…")
+            : (_isSignIn ? "Sign in" : "Create account");
+        _footerLead.Text = _isSignIn ? "New to Rimeo?" : "Already have an account?";
+        _footerLinkLabel.Text = _isSignIn ? "Create account" : "Sign in";
+        _sessionNote.Visibility = _isSignIn ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void ToggleMode()
+    {
+        _isSignIn = !_isSignIn;
+        _status.Visibility = Visibility.Collapsed;
+        ApplyMode();
+    }
+
+    private async void OpenForgot()
+    {
+        try { await Launcher.LaunchUriAsync(new Uri($"{AppConfig.RimeoAppUrl}/forgot-password")); }
+        catch (Exception ex) { Log.Error($"Open forgot-password failed: {ex.Message}"); }
     }
 
     private async void Submit()
     {
-        var token = _input.Text.Trim();
-        if (token.Length < CodeLength)
-        {
-            ShowStatus("Enter the full 8-character pairing code from rimeo.app.", ok: false);
-            return;
-        }
+        if (_busy) return;
 
-        ShowStatus("Linking…", ok: true);
+        var email = _emailBox.Text.Trim().ToLowerInvariant();
+        var password = _passwordBox.Password;
+        if (!email.Contains('@') || string.IsNullOrEmpty(password))
+        { ShowStatus("Enter your email and password.", ok: false); return; }
+        if (!_isSignIn && password.Length < 8)
+        { ShowStatus("Password must be at least 8 characters.", ok: false); return; }
+
+        _busy = true;
+        ApplyMode();
+        ShowStatus(_isSignIn ? "Signing in…" : "Creating account…", ok: true);
+
+        var path = _isSignIn ? "/api/agent_login" : "/api/agent_signup";
         try
         {
             using var http = new HttpClient();
-            var payload = JsonSerializer.Serialize(new { token, cloud_url = AppConfig.RimeoAppUrl });
-            var resp = await http.PostAsync($"http://127.0.0.1:{AppConfig.Port}/api/link_account",
+            var payload = JsonSerializer.Serialize(new { email, password });
+            var resp = await http.PostAsync($"http://127.0.0.1:{AppConfig.Port}{path}",
                 new StringContent(payload, Encoding.UTF8, "application/json"));
+            var resultStr = await resp.Content.ReadAsStringAsync();
 
             if (resp.IsSuccessStatusCode)
             {
                 AppState.Shared.RefreshFromData();
                 _onLinked();
+                return;
             }
-            else
+
+            var msg = _isSignIn ? "Sign-in failed. Check your email and password." : "Could not create the account.";
+            try
             {
-                ShowStatus($"Couldn’t link (error {(int)resp.StatusCode}). Check the code and try again.", ok: false);
+                var err = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(resultStr);
+                if (err?.TryGetValue("error", out var errEl) == true) msg = errEl.GetString() ?? msg;
             }
+            catch { }
+            _busy = false; ApplyMode();
+            ShowStatus(msg, ok: false);
         }
         catch (Exception ex)
         {
-            Log.Error($"Link device failed: {ex.Message}");
+            Log.Error($"Agent sign-in failed: {ex.Message}");
+            _busy = false; ApplyMode();
             ShowStatus($"Error: {ex.Message}", ok: false);
         }
     }
