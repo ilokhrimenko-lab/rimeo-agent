@@ -60,7 +60,15 @@ public sealed class DataStore
             try
             {
                 var json = JsonSerializer.Serialize(data, new JsonSerializerOptions { WriteIndented = true });
-                File.WriteAllText(AppConfig.Shared.DataFile, json);
+                // Atomic write: a crash/shutdown mid-write must not leave a truncated
+                // JSON that throws on the next Load() and resets the store (→ unpair).
+                // System.Text.Json already tolerates missing keys (new fields keep
+                // their C# defaults), so schema evolution alone is safe here; the temp
+                // + Move guards the corrupt-file path.
+                var path = AppConfig.Shared.DataFile;
+                var tmp  = path + ".tmp";
+                File.WriteAllText(tmp, json);
+                File.Move(tmp, path, overwrite: true);
             }
             catch (Exception ex) { Log.Error($"DataStore save failed: {ex.Message}"); }
         });

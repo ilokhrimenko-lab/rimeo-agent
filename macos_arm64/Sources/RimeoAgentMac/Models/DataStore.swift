@@ -28,6 +28,35 @@ struct RimoData: Codable {
     var staged_update_tag: String             = ""
 }
 
+// Resilient decoding. The synthesized `Codable.init(from:)` calls `decode` (not
+// `decodeIfPresent`) for every non-optional field and IGNORES the struct's
+// default values — so an older `rimo_data.json` that predates a newly-added
+// field would throw `keyNotFound`, get swallowed by `load()`'s `try?`, and reset
+// the whole store to empty → the agent would silently unpair on every update
+// that introduced a field. Decoding each key with `decodeIfPresent ?? default`
+// makes schema evolution forward/backward compatible. (Defined in an extension
+// so the memberwise `init()` used by `RimoData()` stays synthesized.)
+extension RimoData {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init()
+        notes              = try c.decodeIfPresent([String: String].self, forKey: .notes)             ?? notes
+        history_names      = try c.decodeIfPresent([String: String].self, forKey: .history_names)     ?? history_names
+        global_exclusions  = try c.decodeIfPresent([String].self,         forKey: .global_exclusions) ?? global_exclusions
+        pairing_code       = try c.decodeIfPresent(String.self,           forKey: .pairing_code)      ?? pairing_code
+        lan_secret         = try c.decodeIfPresent(String.self,           forKey: .lan_secret)        ?? lan_secret
+        cloud_url          = try c.decodeIfPresent(String.self,           forKey: .cloud_url)         ?? cloud_url
+        cloud_user_id      = try c.decodeIfPresent(String.self,           forKey: .cloud_user_id)     ?? cloud_user_id
+        cloud_token        = try c.decodeIfPresent(String.self,           forKey: .cloud_token)       ?? cloud_token
+        tunnel_url         = try c.decodeIfPresent(String.self,           forKey: .tunnel_url)        ?? tunnel_url
+        max_cache_gb       = try c.decodeIfPresent(Double.self,           forKey: .max_cache_gb)      ?? max_cache_gb
+        just_updated       = try c.decodeIfPresent(Bool.self,             forKey: .just_updated)      ?? just_updated
+        pending_update_url = try c.decodeIfPresent(String.self,           forKey: .pending_update_url) ?? pending_update_url
+        pending_update_tag = try c.decodeIfPresent(String.self,           forKey: .pending_update_tag) ?? pending_update_tag
+        staged_update_tag  = try c.decodeIfPresent(String.self,           forKey: .staged_update_tag) ?? staged_update_tag
+    }
+}
+
 final class DataStore {
     static let shared = DataStore()
 
@@ -53,7 +82,9 @@ final class DataStore {
         queue.sync { _data = data }
         DispatchQueue.global(qos: .utility).async {
             if let raw = try? JSONEncoder().encode(data) {
-                try? raw.write(to: AppConfig.shared.dataFile)
+                // Atomic: a crash/shutdown mid-write must not leave a truncated
+                // JSON that fails to decode and resets the store (→ unpair).
+                try? raw.write(to: AppConfig.shared.dataFile, options: .atomic)
             }
         }
     }
