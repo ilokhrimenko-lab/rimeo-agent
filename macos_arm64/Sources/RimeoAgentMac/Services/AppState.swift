@@ -28,6 +28,10 @@ final class AppState: ObservableObject {
     @Published var cloudLinked:  Bool   = false
     @Published var cloudEmail:   String = ""
 
+    // Whether a phone is signed in to this account (pushed by the cloud relay
+    // heartbeat). Drives the live "Your phone" status in the Devices tab.
+    @Published var phoneConnected: Bool = false
+
     // Full Disk Access banner
     @Published var showDiskAccessBanner:   Bool = false
     @Published var fdaResetAfterUpdate:    Bool = false
@@ -84,6 +88,7 @@ final class AppState: ObservableObject {
             self.cloudLinked  = !d.cloud_url.isEmpty
             self.cloudEmail   = d.cloud_user_id ?? ""
             self.tunnelURL    = d.tunnel_url
+            if d.cloud_url.isEmpty { self.phoneConnected = false }
         }
     }
 

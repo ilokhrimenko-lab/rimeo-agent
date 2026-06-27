@@ -129,7 +129,6 @@ struct MainLayout: View {
     var tabContent: some View {
         switch appState.selectedTab {
         case 0:  LibraryTabView()
-        case 2:  PairingTabView()
         case 3:  AccountTabView()
         case 4:  LogsTabView()
         default: LibraryTabView()
@@ -144,22 +143,39 @@ struct SidebarView: View {
 
     private let items: [(icon: String, label: String, idx: Int)] = [
         ("folder",    "Library",  0),
-        ("macbook.and.iphone", "Devices", 2),
-        ("cloud",     "Account",  3),
+        ("macbook.and.iphone", "Account", 3),
         ("gearshape", "Settings", 4),
     ]
+
+    // Real Rimeo logo asset (rimeo1024.png, bundled into the .app Resources by
+    // build_local_mac.sh) — never a CSS/code-drawn "R". Falls back to a drawn
+    // badge only for bare `swift build` runs where there is no .app bundle.
+    @ViewBuilder
+    private var logoMark: some View {
+        if let path = Bundle.main.path(forResource: "rimeo1024", ofType: "png"),
+           let nsimg = NSImage(contentsOfFile: path) {
+            Image(nsImage: nsimg)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 30, height: 30)
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .shadow(color: C.acc.opacity(0.32), radius: 6, y: 3)
+        } else {
+            Text("R")
+                .font(.system(size: 17, weight: .heavy))
+                .foregroundColor(.white)
+                .frame(width: 30, height: 30)
+                .background(C.acc)
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .shadow(color: C.acc.opacity(0.32), radius: 6, y: 3)
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             // Leave room for the window traffic lights, then the wordmark.
             HStack(spacing: 10) {
-                Text("R")
-                    .font(.system(size: 17, weight: .heavy))
-                    .foregroundColor(.white)
-                    .frame(width: 30, height: 30)
-                    .background(C.acc)
-                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                    .shadow(color: C.acc.opacity(0.32), radius: 6, y: 3)
+                logoMark
                 Text("Rimeo")
                     .font(.system(size: 17, weight: .heavy))
                     .foregroundColor(C.text)

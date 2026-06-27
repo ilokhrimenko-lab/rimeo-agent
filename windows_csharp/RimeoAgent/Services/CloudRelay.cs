@@ -100,7 +100,14 @@ public sealed class CloudRelay
                 backoffSec = 1;
 
                 if (msg.TryGetValue("type", out var typeEl) && typeEl.GetString() == "ping")
+                {
+                    // The cloud piggybacks whether a phone is signed in to this
+                    // account on the idle heartbeat, for the Devices tab status.
+                    if (msg.TryGetValue("phone", out var phoneEl) &&
+                        (phoneEl.ValueKind == JsonValueKind.True || phoneEl.ValueKind == JsonValueKind.False))
+                        AppState.Shared.PhoneConnected = phoneEl.GetBoolean();
                     continue;
+                }
 
                 // Handle command on a separate task
                 _ = Task.Run(() => HandleCommand(msg, cloudUrl));

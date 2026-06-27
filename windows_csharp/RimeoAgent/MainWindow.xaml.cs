@@ -109,10 +109,9 @@ public sealed partial class MainWindow : Window
             Content = _contentFrame,
             RequestedTheme = theme
         };
-        // Mirror the macOS rail: Library / Pairing / Account / Settings (no Analysis).
+        // Mirror the macOS rail: Library / Account / Settings (Devices merged into Account).
         _navView.MenuItems.Add(CreateNavItem("Library", "Library")); // Folder
-        _navView.MenuItems.Add(CreateNavItem("Devices", "Pairing")); // Link (route tag kept)
-        _navView.MenuItems.Add(CreateNavItem("Account", "Account")); // Cloud
+        _navView.MenuItems.Add(CreateNavItem("Account", "Account")); // Cloud (Devices merged in)
         _navView.MenuItems.Add(CreateNavItem("Settings", "Logs"));    // Settings gear
         _navView.SelectionChanged += NavView_SelectionChanged;
         ApplyPaneTheme();
@@ -174,12 +173,28 @@ public sealed partial class MainWindow : Window
 
     private static StackPanel BuildBrand()
     {
-        var badge = new Microsoft.UI.Xaml.Controls.Border
+        // Real Rimeo logo asset (Assets/rimeo1024.png, copied to output by the build).
+        // Falls back to the drawn "R" badge only if the asset is missing, so the
+        // brand mark is never blank.
+        Microsoft.UI.Xaml.UIElement badge;
+        var logoPath = System.IO.Path.Combine(System.AppContext.BaseDirectory, "Assets", "rimeo1024.png");
+        if (System.IO.File.Exists(logoPath))
         {
-            Width = 30, Height = 30, CornerRadius = new CornerRadius(9), Background = UI.Acc,
-            VerticalAlignment = VerticalAlignment.Center,
-            Child = new TextBlock { Text = "R", FontSize = 17, FontWeight = Microsoft.UI.Text.FontWeights.ExtraBold, Foreground = UI.White, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center }
-        };
+            badge = new Microsoft.UI.Xaml.Controls.Image
+            {
+                Width = 30, Height = 30, VerticalAlignment = VerticalAlignment.Center,
+                Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(logoPath))
+            };
+        }
+        else
+        {
+            badge = new Microsoft.UI.Xaml.Controls.Border
+            {
+                Width = 30, Height = 30, CornerRadius = new CornerRadius(9), Background = UI.Acc,
+                VerticalAlignment = VerticalAlignment.Center,
+                Child = new TextBlock { Text = "R", FontSize = 17, FontWeight = Microsoft.UI.Text.FontWeights.ExtraBold, Foreground = UI.White, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center }
+            };
+        }
         var name = new TextBlock { Text = "Rimeo", FontSize = 17, FontWeight = Microsoft.UI.Text.FontWeights.ExtraBold, Foreground = UI.Text, VerticalAlignment = VerticalAlignment.Center };
         var tag = new TextBlock { Text = "Agent", FontSize = 11, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = UI.Dim, VerticalAlignment = VerticalAlignment.Center };
         var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Margin = new Thickness(14, 8, 14, 10) };
@@ -205,7 +220,6 @@ public sealed partial class MainWindow : Window
         switch (tag)
         {
             case "Library":  NavigateSafely(typeof(LibraryPage), "Library");   break;
-            case "Pairing":  NavigateSafely(typeof(PairingPage), "Pairing");   break;
             case "Account":  NavigateSafely(typeof(AccountPage), "Account");   break;
             case "Logs":     NavigateSafely(typeof(LogsPage), "Logs");         break;
         }

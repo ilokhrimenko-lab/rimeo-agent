@@ -66,6 +66,7 @@ jobs:
           cp "$ICON_ICNS" "$APP/Contents/Resources/RimeoAgent.icns"
           cp "$GITHUB_WORKSPACE/build_info.py" "$APP/Contents/Resources/build_info.py"
           cp "$GITHUB_WORKSPACE/similarity_config.json" "$APP/Contents/Resources/similarity_config.json"
+          cp "$GITHUB_WORKSPACE/rimeo1024.png" "$APP/Contents/Resources/rimeo1024.png"
 
       - name: Sign macOS app (Developer ID + hardened runtime)
         env:
@@ -188,8 +189,12 @@ jobs:
       - name: Create icon
         shell: pwsh
         run: |
-          python -m pip install pillow --quiet
+          python -m pip install pillow "qrcode[pil]" --quiet
           python -c "from PIL import Image; img=Image.open('rimeo1024-bigsur.icns').convert('RGBA'); img.save(r'windows_csharp\RimeoAgent\Assets\rimeo.ico', format='ICO', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+          # Sidebar brand logo (real asset, not a drawn "R") — copied into Assets so the build packages it.
+          Copy-Item rimeo1024.png windows_csharp\RimeoAgent\Assets\rimeo1024.png -Force
+          # QR for the "Get the app" flyout — encodes rimeo.app/open (static URL).
+          python -c "import qrcode; qrcode.make('https://rimeo.app/open').save(r'windows_csharp\RimeoAgent\Assets\qr_open.png')"
 
       - name: Show .NET environment
         shell: pwsh

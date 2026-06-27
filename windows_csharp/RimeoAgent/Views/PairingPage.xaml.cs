@@ -1,8 +1,12 @@
+using System;
+using System.ComponentModel;
 using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using RimeoAgent.Config;
 using RimeoAgent.Services;
+using Windows.System;
 
 namespace RimeoAgent.Views;
 
@@ -21,6 +25,15 @@ public sealed partial class PairingPage : Page
     {
         InitializeComponent();
         Content = Build();
+        AppState.Shared.PropertyChanged += OnAppStateChanged;
+        Unloaded += (_, _) => AppState.Shared.PropertyChanged -= OnAppStateChanged;
+    }
+
+    private void OnAppStateChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(AppState.PhoneConnected) ||
+            e.PropertyName == nameof(AppState.CloudLinked))
+            DispatcherQueue.TryEnqueue(() => Content = Build());
     }
 
     private ScrollViewer Build()
@@ -41,8 +54,10 @@ public sealed partial class PairingPage : Page
             linked ? "Connected" : "Not connected", linked));
         list.Children.Add(Divider());
 
-        list.Children.Add(DeviceRow(PhoneIcon, "Your phone", "Sign in with the Rimeo app to connect",
-            "Not signed in", false));
+        var phone = AppState.Shared.PhoneConnected;
+        list.Children.Add(DeviceRow(PhoneIcon, "Your phone",
+            phone ? "Signed in to the Rimeo app" : "Sign in with the Rimeo app to connect",
+            phone ? "Connected" : "Not connected", phone));
 
         stack.Children.Add(new Border
         {
@@ -50,7 +65,34 @@ public sealed partial class PairingPage : Page
             CornerRadius = new CornerRadius(18), Child = list
         });
 
+        if (!phone)
+            stack.Children.Add(GetAppButton());
+
         return scroll;
+    }
+
+    private static FrameworkElement GetAppButton()
+    {
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 7 };
+        row.Children.Add(UI.Icon(13, UI.AccText, 2,
+            "M12 3v12M7 11l5 5 5-5", "M5 21h14"));  // download glyph
+        row.Children.Add(new TextBlock
+        {
+            Text = "Get the app for your phone", FontSize = 13,
+            FontWeight = FontWeights.SemiBold, Foreground = UI.AccText,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        var btn = new Button
+        {
+            Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent),
+            BorderThickness = new Thickness(0), Padding = new Thickness(2, 6, 2, 0), Content = row
+        };
+        btn.Click += async (_, _) =>
+        {
+            try { await Launcher.LaunchUriAsync(new Uri($"{AppConfig.RimeoAppUrl}/open")); }
+            catch (Exception ex) { Log.Error($"Open phone-app link failed: {ex.Message}"); }
+        };
+        return btn;
     }
 
     private static Border Divider() => new() { Height = 1, Background = UI.CardBrd };

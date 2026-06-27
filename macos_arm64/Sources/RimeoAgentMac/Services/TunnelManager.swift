@@ -291,6 +291,41 @@ final class TunnelManager {
         return NamedTunnelConfig(uuid: uuid, hostname: hostname, configPath: path)
     }
 
+    /// Kill stray `tunnel-runtime` processes left over from a previous agent
+    /// instance (crash, force-quit, or silent self-update that replaced the app
+    /// without our `stop()` running). We own this named tunnel exclusively, so any
+    /// pre-existing tunnel-runtime is by definition orphaned. Two cloudflared
+    /// connectors registering the SAME tunnel make Cloudflare round-robin across
+    /// the duplicate registrations — which surfaces to the user as audio stutter
+    /// and "http2: stream closed" errors. Called right before we launch our own
+    /// process; at that point our previous child (if any) has already exited, so
+    /// we additionally skip any still-running child we own.
+    private func reapStrayTunnelRuntimes() {
+        let runtimePath = ComponentManager.shared.componentURL(id: "tunnel-runtime").path
+        lock.lock(); let ownPid = (proc?.isRunning == true) ? proc?.processIdentifier : nil; lock.unlock()
+
+        let pgrep = Process()
+        pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        pgrep.arguments = ["-f", runtimePath]
+        let pipe = Pipe()
+        pgrep.standardOutput = pipe
+        pgrep.standardError  = Pipe()
+        do { try pgrep.run() } catch {
+            logger.warning("Stray-tunnel reap skipped: pgrep launch failed: \(error)")
+            return
+        }
+        pgrep.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let out = String(data: data, encoding: .utf8) else { return }
+
+        for line in out.split(whereSeparator: \.isNewline) {
+            guard let pid = Int32(line.trimmingCharacters(in: .whitespaces)) else { continue }
+            if pid == ownPid { continue }
+            logger.warning("Reaping stray tunnel-runtime pid=\(pid) before launching ours (orphaned duplicate on the same named tunnel — cause of stream stutter)")
+            kill(pid, SIGTERM)
+        }
+    }
+
     private func runTunnel() {
         defer {
             lock.lock(); _loopRunning = false; lock.unlock()
@@ -304,6 +339,10 @@ final class TunnelManager {
                 logger.error("cloudflared not found in bundle or system paths")
                 return
             }
+
+            // Clear any orphaned cloudflared from a prior agent run before we add
+            // ours — duplicates on the same tunnel cause playback stutter.
+            reapStrayTunnelRuntimes()
 
             let namedConfig = parseNamedTunnelConfig()
             let p = Process()

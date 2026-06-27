@@ -122,6 +122,8 @@ cp "$MAC_DIR/build/Info.plist" "$APP_DIR/Contents/Info.plist"
 cp "$ICON_ICNS" "$APP_DIR/Contents/Resources/RimeoAgent.icns"
 cp "$ROOT_DIR/build_info.py" "$APP_DIR/Contents/Resources/build_info.py"
 cp "$ROOT_DIR/similarity_config.json" "$APP_DIR/Contents/Resources/similarity_config.json"
+# Real Rimeo logo (sidebar wordmark loads this from the bundle — never a drawn "R").
+cp "$ROOT_DIR/rimeo1024.png" "$APP_DIR/Contents/Resources/rimeo1024.png"
 
 echo "==> Runtime components are not bundled"
 echo "    tunnel-runtime, ffmpeg, and ffprobe are installed by Component Gate from rimeo.app"

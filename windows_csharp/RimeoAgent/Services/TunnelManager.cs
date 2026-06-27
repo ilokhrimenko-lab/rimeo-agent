@@ -108,6 +108,43 @@ public sealed class TunnelManager
         return null;
     }
 
+    /// <summary>
+    /// Kill stray cloudflared processes left by a previous agent instance (crash,
+    /// force-quit, or silent self-update that replaced the app before Stop() ran).
+    /// Windows does not auto-kill child processes when the parent dies, so an old
+    /// cloudflared survives and the next launch adds a second connector on the SAME
+    /// named tunnel — Cloudflare then round-robins across the duplicate
+    /// registrations, which the user hears as audio stutter / "stream closed". We
+    /// own this tunnel exclusively, so any pre-existing cloudflared from our own
+    /// binary path is orphaned. Matched by executable path to avoid touching an
+    /// unrelated cloudflared the user might run. Called right before we launch ours.
+    /// </summary>
+    private void ReapStrayTunnelRuntimes(string ownExePath)
+    {
+        int ownPid;
+        lock (_lock) { ownPid = (_proc != null && !_proc.HasExited) ? _proc.Id : -1; }
+
+        Process[] procs;
+        try { procs = Process.GetProcessesByName("cloudflared"); }
+        catch (Exception ex) { Log.Warn($"Stray-tunnel reap skipped: {ex.Message}"); return; }
+
+        foreach (var sp in procs)
+        {
+            try
+            {
+                if (sp.Id == ownPid) continue;
+                string? path = null;
+                try { path = sp.MainModule?.FileName; } catch { /* access denied / bitness mismatch — can't verify, skip */ }
+                if (path == null) continue;
+                if (!string.Equals(path, ownExePath, StringComparison.OrdinalIgnoreCase)) continue;
+                Log.Warn($"Reaping stray cloudflared pid={sp.Id} before launching ours (orphaned duplicate on the same named tunnel — cause of stream stutter)");
+                sp.Kill(true);
+            }
+            catch { /* race: process already gone */ }
+            finally { sp.Dispose(); }
+        }
+    }
+
     private bool ShouldKeepRunning() { lock (_lock) return _shouldRun; }
 
     private (string uuid, string hostname, string configPath)? ParseNamedTunnelConfig()
@@ -154,6 +191,10 @@ public sealed class TunnelManager
             {
                 var cmd = FindCloudflared();
                 if (cmd == null) { Log.Error("cloudflared not found"); return; }
+
+                // Clear any orphaned cloudflared from a prior agent run before we
+                // add ours — duplicates on the same tunnel cause playback stutter.
+                ReapStrayTunnelRuntimes(cmd);
 
                 var named = ParseNamedTunnelConfig();
 

@@ -189,9 +189,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func openFromMenu() { showWindow() }
     @objc private func quitApp()      { NSApp.terminate(nil) }
 
-    // Draw the Rimeo logo (blue square + white R) at 18×18 for the status bar.
+    // Rimeo logo for the status bar. Prefer the real bundled asset (rimeo1024.png);
+    // fall back to the drawn badge only for bare swift-build runs without a bundle.
     private static func makeStatusBarIcon() -> NSImage? {
         let size = NSSize(width: 18, height: 18)
+        if let path = Bundle.main.path(forResource: "rimeo1024", ofType: "png"),
+           let logo = NSImage(contentsOfFile: path) {
+            let icon = NSImage(size: size)
+            icon.lockFocus()
+            logo.draw(in: NSRect(origin: .zero, size: size),
+                      from: .zero, operation: .sourceOver, fraction: 1.0)
+            icon.unlockFocus()
+            icon.isTemplate = false   // keep the brand blue, not a monochrome template
+            return icon
+        }
         let image = NSImage(size: size, flipped: false) { rect in
             // Blue background matching the logo (#0019C8)
             NSColor(red: 0/255, green: 25/255, blue: 200/255, alpha: 1).setFill()

@@ -61,6 +61,11 @@ public sealed class AppState : INotifyPropertyChanged
     public bool   CloudLinked { get => _cloudLinked; set => Set(ref _cloudLinked, value); }
     public string CloudEmail  { get => _cloudEmail;  set => Set(ref _cloudEmail, value); }
 
+    // Whether a phone is signed in to this account (pushed by the cloud relay
+    // heartbeat). Drives the live "Your phone" status in the Devices tab.
+    private bool _phoneConnected;
+    public bool PhoneConnected { get => _phoneConnected; set => Set(ref _phoneConnected, value); }
+
     private AppState()
     {
         var cfg = AppConfig.Shared;
@@ -79,6 +84,7 @@ public sealed class AppState : INotifyPropertyChanged
         CloudLinked = !string.IsNullOrEmpty(d.CloudUrl);
         CloudEmail  = d.CloudUserId ?? "";
         TunnelUrl   = d.TunnelUrl;
+        if (string.IsNullOrEmpty(d.CloudUrl)) PhoneConnected = false;
     }
 
     public void FinishOnboarding(string xmlPath)

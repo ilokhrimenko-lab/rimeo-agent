@@ -138,6 +138,11 @@ final class CloudRelay {
             backoff = 1
 
             if (msg["type"] as? String) == "ping" {
+                // The cloud piggybacks whether a phone is signed in to this account
+                // on the idle heartbeat, so the Devices tab can show a real status.
+                if let phone = msg["phone"] as? Bool {
+                    DispatchQueue.main.async { AppState.shared.phoneConnected = phone }
+                }
                 continue
             }
 

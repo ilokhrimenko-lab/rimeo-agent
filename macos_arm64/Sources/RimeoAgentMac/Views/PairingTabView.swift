@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // Devices tab (login model): everything signed in to the account connects
 // automatically — no pairing codes, no QR. Replaces the old token/QR pairing UI.
@@ -27,9 +28,27 @@ struct PairingTabView: View {
                             divider
                             deviceRow(icon: "iphone",
                                       title: "Your phone",
-                                      subtitle: "Sign in with the Rimeo app to connect",
-                                      pill: ("Not signed in", false))
+                                      subtitle: appState.phoneConnected
+                                          ? "Signed in to the Rimeo app"
+                                          : "Sign in with the Rimeo app to connect",
+                                      pill: appState.phoneConnected
+                                          ? ("Connected", true)
+                                          : ("Not connected", false))
                         }
+                    }
+
+                    if !appState.phoneConnected {
+                        Button(action: openPhoneApp) {
+                            HStack(spacing: 7) {
+                                Image(systemName: "arrow.down.circle")
+                                    .font(.system(size: 13, weight: .semibold))
+                                Text("Get the app for your phone")
+                                    .font(.system(size: 13, weight: .semibold))
+                            }
+                            .foregroundColor(C.accText)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 2)
                     }
                 }
             }
@@ -44,6 +63,12 @@ struct PairingTabView: View {
 
     private var divider: some View {
         Rectangle().fill(C.cardBrd).frame(height: 1)
+    }
+
+    private func openPhoneApp() {
+        if let url = URL(string: "\(AppConfig.shared.rimeoAppURL)/open") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     private func deviceRow(icon: String, title: String, subtitle: String,
