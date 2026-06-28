@@ -36,6 +36,11 @@ public sealed class CloudRelay
     private async Task Loop(string initialCloudUrl, string initialToken)
     {
         int backoffSec = 1;
+        // Consecutive non-definitive 403s (token_mismatch / unknown). A single 403
+        // is no longer treated as proof of "signed in elsewhere" — it can be a
+        // transient race (a quick re-login, server blip). Only a definitive
+        // `evicted` reason, or N consecutive non-definitive 403s, signs us out.
+        int consecutive403 = 0;
         using var http = new HttpClient();
 
         while (IsRunning())
@@ -71,14 +76,43 @@ public sealed class CloudRelay
 
                 if (resp.StatusCode == System.Net.HttpStatusCode.Forbidden)
                 {
-                    // 403 = this agent's cloud_token was revoked — the account signed
-                    // in on another computer (single active agent per account). Clear
-                    // the local session and drop back to the Sign In screen.
-                    Log.Warn("Cloud relay: 403 — agent signed out (signed in elsewhere). Clearing session.");
-                    DataStore.Shared.Update(dd => { dd.CloudUrl = ""; dd.CloudUserId = null; dd.CloudToken = ""; });
-                    AppState.Shared.RefreshFromData();
-                    Stop();
-                    return;
+                    string? reason = null;
+                    try
+                    {
+                        var err = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body);
+                        if (err != null && err.TryGetValue("reason", out var rEl) &&
+                            rEl.ValueKind == JsonValueKind.String)
+                            reason = rEl.GetString();
+                    }
+                    catch { /* body not JSON — treat as unknown reason */ }
+
+                    // `evicted` = the binding is gone → the account signed in on
+                    // another computer (single active agent per account). Definitive:
+                    // sign out.
+                    if (reason == "evicted")
+                    {
+                        Log.Warn("Cloud relay: 403 evicted — signed in elsewhere. Clearing session.");
+                        DataStore.Shared.Update(dd => { dd.CloudUrl = ""; dd.CloudUserId = null; dd.CloudToken = ""; });
+                        AppState.Shared.RefreshFromData();
+                        Stop();
+                        return;
+                    }
+                    // `token_mismatch` / unknown: token superseded — usually a transient
+                    // race (a quick re-login). Retry; only sign out if it persists, so
+                    // a single racy 403 no longer kicks the user out.
+                    consecutive403++;
+                    if (consecutive403 >= 3)
+                    {
+                        Log.Warn($"Cloud relay: 403 ({reason ?? "no reason"}) persisted x{consecutive403} — clearing session.");
+                        DataStore.Shared.Update(dd => { dd.CloudUrl = ""; dd.CloudUserId = null; dd.CloudToken = ""; });
+                        AppState.Shared.RefreshFromData();
+                        Stop();
+                        return;
+                    }
+                    Log.Warn($"Cloud relay: 403 ({reason ?? "no reason"}) — retry {consecutive403}/3 in {backoffSec}s");
+                    await Task.Delay(backoffSec * 1000);
+                    backoffSec = Math.Min(backoffSec * 2, 30);
+                    continue;
                 }
 
                 if (!resp.IsSuccessStatusCode)
@@ -98,6 +132,7 @@ public sealed class CloudRelay
                 }
 
                 backoffSec = 1;
+                consecutive403 = 0;
 
                 if (msg.TryGetValue("type", out var typeEl) && typeEl.GetString() == "ping")
                 {

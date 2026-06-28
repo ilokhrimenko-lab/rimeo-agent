@@ -47,6 +47,11 @@ final class CloudRelay {
 
     private func loop(initialCloudURL: String, initialToken: String) {
         var backoff: TimeInterval = 1
+        // Consecutive non-definitive 403s (token_mismatch / unknown). A single 403
+        // is no longer treated as proof of "signed in elsewhere" — it can be a
+        // transient race (a quick re-login, server blip). Only a definitive
+        // `evicted` reason, or N consecutive non-definitive 403s, signs us out.
+        var consecutive403 = 0
 
         while isRunning() {
             let data = DataStore.shared.data
@@ -107,18 +112,44 @@ final class CloudRelay {
             }
 
             if httpCode == 403 {
-                // 403 = this agent's cloud_token was revoked — i.e. the account
-                // signed in on another computer (single active agent per account).
-                // Clear the local session and drop back to the Sign In screen.
-                logger.warning("Cloud relay: 403 — agent signed out (signed in elsewhere). Clearing session.")
-                DataStore.shared.update { d in
-                    d.cloud_url = ""
-                    d.cloud_user_id = nil
-                    d.cloud_token = ""
+                var reason: String?
+                if let respData,
+                   let json = try? JSONSerialization.jsonObject(with: respData),
+                   let obj = json as? [String: Any] {
+                    reason = obj["reason"] as? String
                 }
-                DispatchQueue.main.async { AppState.shared.refreshFromData() }
-                self.stop()
-                return
+                // `evicted` = the binding is gone → the account signed in on another
+                // computer (single active agent per account). Definitive: sign out.
+                if reason == "evicted" {
+                    logger.warning("Cloud relay: 403 evicted — signed in elsewhere. Clearing session.")
+                    DataStore.shared.update { d in
+                        d.cloud_url = ""
+                        d.cloud_user_id = nil
+                        d.cloud_token = ""
+                    }
+                    DispatchQueue.main.async { AppState.shared.refreshFromData() }
+                    self.stop()
+                    return
+                }
+                // `token_mismatch` / unknown: the token was superseded — usually a
+                // transient race (a quick re-login). Retry; only sign out if it
+                // persists, so a single racy 403 no longer kicks the user out.
+                consecutive403 += 1
+                if consecutive403 >= 3 {
+                    logger.warning("Cloud relay: 403 (\(reason ?? "no reason")) persisted ×\(consecutive403) — clearing session.")
+                    DataStore.shared.update { d in
+                        d.cloud_url = ""
+                        d.cloud_user_id = nil
+                        d.cloud_token = ""
+                    }
+                    DispatchQueue.main.async { AppState.shared.refreshFromData() }
+                    self.stop()
+                    return
+                }
+                logger.warning("Cloud relay: 403 (\(reason ?? "no reason")) — retry \(consecutive403)/3 in \(Int(backoff))s")
+                Thread.sleep(forTimeInterval: backoff)
+                backoff = min(backoff * 2, 30)
+                continue
             }
 
             guard httpCode == 200, let data = respData else {
@@ -127,6 +158,7 @@ final class CloudRelay {
                 backoff = min(backoff * 2, 30)
                 continue
             }
+            consecutive403 = 0
 
             guard let msg = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 logger.warning("Cloud relay error: invalid JSON payload, retry in \(Int(backoff))s")
