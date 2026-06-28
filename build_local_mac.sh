@@ -5,10 +5,24 @@
 
 set -euo pipefail
 
-BUILD_NUMBER="${1:-local}"
-TAG_NAME="v1.0-build${BUILD_NUMBER}"
-APP_VERSION_BASE="${APP_VERSION_BASE:-1.0}"
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+APP_VERSION_BASE="${APP_VERSION_BASE:-1.0}"
+
+# Build number. Pass one explicitly (e.g. "./build_local_mac.sh 230") to pin it.
+# With no argument we derive the NEXT mac build number from local git tags, so the
+# in-app version reads as a real number (e.g. "build 226") instead of "local".
+if [[ -n "${1:-}" ]]; then
+    BUILD_NUMBER="$1"
+else
+    _latest_build="$(git -C "$ROOT_DIR" tag -l 'mac-v1.0-build*' 2>/dev/null \
+        | sed -E 's/.*build//' | grep -E '^[0-9]+$' | sort -n | tail -n 1 || true)"
+    if [[ -n "${_latest_build:-}" ]]; then
+        BUILD_NUMBER="$((_latest_build + 1))"
+    else
+        BUILD_NUMBER="$(date +%Y%m%d%H%M)"
+    fi
+fi
+TAG_NAME="v1.0-build${BUILD_NUMBER}"
 MAC_DIR="$ROOT_DIR/macos_arm64"
 DIST_DIR="$ROOT_DIR/dist"
 
@@ -51,6 +65,11 @@ pick_codesign_identity() {
 
     identity="$(printf '%s\n' "$identities" | sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | head -n 1)"
     if [[ -n "$identity" ]]; then
+        printf 'WARNING: no "Developer ID Application" cert in keychain — falling back to a\n' >&2
+        printf '         Development cert (%s).\n' "$identity" >&2
+        printf '         OK for local testing, but NOT the production identity\n' >&2
+        printf '         (Developer ID Application, team MM3Q8TJL85). Import the Developer ID\n' >&2
+        printf '         cert into your keychain to sign local builds like production.\n' >&2
         printf '%s\n' "$identity"
         return
     fi

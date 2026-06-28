@@ -154,7 +154,6 @@ public sealed partial class MainWindow : Window
 
     private static Type PageTypeFor(string tag) => tag switch
     {
-        "Pairing" => typeof(PairingPage),
         "Account" => typeof(AccountPage),
         "Logs"    => typeof(LogsPage),
         _         => typeof(LibraryPage),
@@ -313,7 +312,6 @@ public sealed partial class MainWindow : Window
         var symbol = tag switch
         {
             "Library" => Symbol.Library,
-            "Pairing" => Symbol.Link,
             "Account" => Symbol.Contact,
             _         => Symbol.Setting,
         };
