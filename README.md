@@ -1,32 +1,96 @@
+<div align="center">
+
 # Rimeo Agent
 
-Нативные desktop-агенты Rimeo: читают DJ-библиотеку (Rekordbox), стримят треки в iOS/web-приложение через локальную сеть или Cloudflare Tunnel.
+### Turn the DJ library on your computer into a private streaming server.
 
-Репозиторий содержит **двух агентов** — по одному на каждую ОС:
+Native **macOS** & **Windows** companion apps that securely expose your **Rekordbox** library to the Rimeo iOS and web players — on your local network, or from anywhere via Cloudflare Tunnel. Your files never leave your machine.
 
-| ОС | Папка | Стек |
-|----|-------|------|
-| **macOS** (Apple Silicon + Intel, universal) | [`macos_arm64/`](macos_arm64/) | Swift + SwiftPM, SQLCipher |
-| **Windows** (x64 + arm64) | [`windows_csharp/`](windows_csharp/) | C# / .NET 8, WinUI 3 |
+[![Build](https://github.com/ilokhrimenko-lab/rimeo-agent/actions/workflows/build.yml/badge.svg)](https://github.com/ilokhrimenko-lab/rimeo-agent/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/ilokhrimenko-lab/rimeo-agent?label=release&color=success)](https://github.com/ilokhrimenko-lab/rimeo-agent/releases)
+![macOS](https://img.shields.io/badge/macOS-12%2B%20Universal-000000?logo=apple&logoColor=white)
+![Windows](https://img.shields.io/badge/Windows-10%2F11%20x64%20%2B%20arm64-0078D4?logo=windows&logoColor=white)
+![Swift](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)
+![.NET](https://img.shields.io/badge/.NET-8-512BD4?logo=dotnet&logoColor=white)
 
-## Сборка и релиз
+**[⬇️ Download](https://rimeo.app/open)** · **[Releases](https://github.com/ilokhrimenko-lab/rimeo-agent/releases)** · **[rimeo.app](https://rimeo.app)**
 
-Сборка идёт в GitHub Actions ([`.github/workflows/build.yml`](.github/workflows/build.yml)) и **запускается только пушем тега**:
+</div>
 
-| Тег | Что собирается |
-|-----|----------------|
-| `v1.0-buildNNN` | macOS + Windows |
-| `mac-v1.0-buildNNN` | только macOS |
-| `win-v1.0-buildNNN` | только Windows |
+---
 
-Артефакты (`.zip` для mac, `.exe`-инсталлятор + `.zip` для win) автоматически прикрепляются к GitHub Release.
+## Overview
 
-Локальная сборка macOS-агента: `./release_mac.sh` (или `./build_local_mac.sh`).
+**Rimeo Agent** runs on the computer that holds your music. It reads your existing **Rekordbox** database — no re-import, no re-tagging — serves your tracks and waveforms through a local REST API, and lets the Rimeo app stream them: at home on the same Wi‑Fi, or remotely through an auto‑provisioned Cloudflare Tunnel.
 
-## Структура корня
+Everything stays on your machine. Audio is streamed straight from your drive, and every request is authenticated against your Rimeo account — only you can reach your library.
 
-- `macos_arm64/`, `windows_csharp/` — исходники двух агентов
-- `build_info.py` — версия и номер билда (перезаписывается CI из тега)
-- `similarity_config.json` — конфиг анализа схожести треков
-- `rimeo1024*.png` / `*.icns` — иконки приложения (используются CI)
-- `release_mac.sh`, `release_win.sh`, `build_local_mac.sh` — скрипты сборки
+## Features
+
+- 🎚️ **Reads Rekordbox directly** — decrypts the encrypted Rekordbox `master.db` (SQLCipher) and mirrors your playlists, hot cues, ratings, BPM/key and metadata. Zero import step.
+- 🔊 **Stream & transcode on the fly** — HTTP range‑request streaming with ffmpeg transcoding and pre‑rendered waveforms for instant scrubbing.
+- 🌐 **Play from anywhere** — one‑click **Cloudflare Tunnel** provisioning for secure remote access; **Bonjour / mDNS** for zero‑config discovery on the LAN.
+- 🔐 **Private & account‑bound** — single‑session login tied to your Rimeo cloud account, JWT‑verified on every call. Files never leave the host.
+- 🧠 **Analysis & similarity** — background audio analysis powers "find similar tracks" suggestions.
+- ♻️ **Silent auto‑update** — checks GitHub Releases, stages the new build and applies it on the next launch.
+- 🧩 **Self‑provisioning runtime** — fetches its own helper binaries (`cloudflared`, `ffmpeg`) on first launch. Nothing to install by hand.
+
+## How it works
+
+```mermaid
+flowchart LR
+    subgraph host["🖥️  Your computer"]
+        RB[("Rekordbox<br/>master.db")] --> AG
+        FILES[("Local audio<br/>files")] --> AG
+        AG["Rimeo Agent<br/>(local REST API)"]
+    end
+
+    AG -- "Wi‑Fi / LAN" --> APP["📱  Rimeo<br/>iOS · Web"]
+    AG -- "Cloudflare Tunnel" --> CF(("☁️ Cloudflare")) --> APP
+    AG <-- "auth · relay" --> CLOUD["rimeo.app cloud"]
+```
+
+1. The agent opens the Rekordbox library and mirrors it into a fast in‑memory index.
+2. A local HTTP server exposes endpoints such as `/api/data`, `/stream`, `/waveform`, plus tunnel and account controls.
+3. The Rimeo player finds the agent on the LAN, or connects through the Cloudflare Tunnel when you're away.
+4. Audio is streamed on demand, transcoded as needed — your collection stays on your disk.
+
+## Repository layout
+
+| Path | Platform | Stack |
+|------|----------|-------|
+| [`macos_arm64/`](macos_arm64) | macOS 12+ — Universal (Apple Silicon + Intel) | Swift 6 toolchain · SwiftPM · SQLCipher · sandboxed `RekordboxDBHelper` |
+| [`windows_csharp/`](windows_csharp) | Windows 10/11 — x64 + arm64 | C# / .NET 8 · WinUI 3 · NSIS installer |
+| [`.github/workflows/build.yml`](.github/workflows/build.yml) | CI | Build · code‑sign · notarize · package · publish to Releases |
+| `build_info.py`, `similarity_config.json`, `rimeo1024*.{png,icns}` | — | Build metadata, analysis config and app icons consumed by CI |
+
+Both agents are feature‑parallel — each ships a local HTTP server, an audio/streaming service, a Cloudflare tunnel manager, a runtime component manager, an analysis/similarity engine, and a GitHub‑Releases auto‑updater.
+
+## Building & releasing
+
+Builds run in **GitHub Actions** and are triggered by pushing a tag:
+
+| Tag | Builds |
+|-----|--------|
+| `v1.0-buildNNN` | macOS **+** Windows |
+| `mac-v1.0-buildNNN` | macOS only |
+| `win-v1.0-buildNNN` | Windows only |
+
+CI produces a Developer‑ID‑signed, **notarized** macOS `.app` and **NSIS** installers for Windows x64 & arm64, then attaches all artifacts to a GitHub Release.
+
+Build the macOS agent locally:
+
+```bash
+cd macos_arm64
+swift build -c release --arch arm64 --arch x86_64
+# or run the full packaging script:
+./release_mac.sh
+```
+
+## Download & updates
+
+End users get the correct installer automatically at **[rimeo.app/open](https://rimeo.app/open)**, which serves the latest [GitHub Release](https://github.com/ilokhrimenko-lab/rimeo-agent/releases). Installed agents keep themselves current from that same Releases feed — no manual upgrades.
+
+## License
+
+© Rimeo. All rights reserved. This source is published for transparency and distribution; it is **not** open‑source and may not be reused, redistributed or modified without prior written permission.
