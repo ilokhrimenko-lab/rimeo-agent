@@ -51,6 +51,12 @@ final class APIRouter {
         "/stream", "/waveform", "/artwork", "/api/data", "/api/logs"
     ]
 
+    // Tracks with a Rekordbox bitrate above this (kbps) are "hi-res" (≈24-bit PCM):
+    // their sustained bitrate overruns the Cloudflare-tunnel bandwidth and stalls the
+    // player, so /stream serves a 16-bit/44.1/stereo WAV down-convert instead. A
+    // bitrate of 0/unknown is treated as NOT hi-res (served unchanged).
+    private static let hiResBitrateThreshold = 2000
+
     func route(_ req: HTTPRequest) -> HTTPResponse {
         let path = req.path
 
@@ -141,6 +147,9 @@ final class APIRouter {
         let resolvedPath = resolveTrackPath(filePath)
         let trackID = req.queryParams["id"] ?? ""
         let preload = req.queryParams["preload"] == "1" || req.queryParams["preload"] == "true"
+        // raw=1 → byte-for-byte ORIGINAL (download / offline must stay lossless):
+        // no 16-bit down-convert and no AIFF→WAV.
+        let raw     = req.queryParams["raw"] == "1" || req.queryParams["raw"] == "true"
         let ext     = (resolvedPath as NSString).pathExtension.lowercased()
         let rangeHeader = req.headers["range"] ?? "(none)"
         let src = req.queryParams["src"] ?? "unknown"
@@ -180,33 +189,63 @@ final class APIRouter {
         }
 
         var finalPath = resolvedPath
-        // AIFF needs WAV conversion only for the web player (wavesurfer.js can't decode AIFF).
-        // iOS AVPlayer plays AIFF natively, so skip the ffmpeg step entirely for src=ios —
-        // saves ~1-3s per track and removes ffmpeg/Pipe pressure on the agent.
-        let needsAIFFConversion = (ext == "aif" || ext == "aiff") && src != "ios"
-        if needsAIFFConversion {
+
+        // Hi-res down-convert (applies to ALL clients): a Rekordbox bitrate above the
+        // threshold (≈24-bit PCM) overruns the sustained Cloudflare-tunnel bandwidth and
+        // stalls the player, so serve a 16-bit/44.1/stereo WAV instead. Bypassed by raw=1
+        // (download/offline must stay byte-for-byte lossless) and when bitrate is unknown.
+        let bitrate = RekordboxParser.shared.track(byID: trackID)?.bitrate ?? 0
+        let isHiRes = !raw && bitrate > APIRouter.hiResBitrateThreshold
+
+        if isHiRes {
             if preload {
                 DispatchQueue.global(qos: .utility).async {
-                    _ = try? AudioService.shared.ensureWAV(path: resolvedPath, trackID: trackID)
+                    _ = try? AudioService.shared.ensure16BitWAV(path: resolvedPath, trackID: trackID)
                 }
                 StreamDiag.record(trackID: trackID, path: filePath, resolvedPath: resolvedPath,
-                                  status: 200, range: rangeHeader, preload: true, note: "preloading_aiff")
+                                  status: 200, range: rangeHeader, preload: true, note: "preloading_16bit")
                 return .json(["status": "preloading"])
             }
-            logger.info("Stream request: converting AIFF for web, track=\(trackID), path=\(resolvedPath)")
+            logger.info("Stream request: down-converting hi-res to 16-bit, track=\(trackID), bitrate=\(bitrate), path=\(resolvedPath)")
             do {
-                finalPath = try AudioService.shared.ensureWAV(path: resolvedPath, trackID: trackID)
-                logger.info("Stream request: AIFF ready, track=\(trackID), wav=\(finalPath)")
+                finalPath = try AudioService.shared.ensure16BitWAV(path: resolvedPath, trackID: trackID)
+                logger.info("Stream request: 16-bit ready, track=\(trackID), wav=\(finalPath)")
             } catch {
-                logger.warning("Stream request failed during AIFF conversion: track=\(trackID), error=\(error)")
+                logger.warning("Stream request failed during 16-bit conversion: track=\(trackID), error=\(error)")
                 StreamDiag.record(trackID: trackID, path: filePath, resolvedPath: resolvedPath,
-                                  status: 503, range: rangeHeader, preload: preload, note: "aiff_conversion_failed")
+                                  status: 503, range: rangeHeader, preload: preload, note: "conv16_failed")
                 return .error("Audio conversion failed — retry in a moment", status: 503)
             }
-        } else if preload {
-            StreamDiag.record(trackID: trackID, path: filePath, resolvedPath: resolvedPath,
-                              status: 200, range: rangeHeader, preload: true, note: "preloading")
-            return .json(["status": "preloading"])
+        } else {
+            // AIFF needs WAV conversion only for the web player (wavesurfer.js can't decode AIFF).
+            // iOS AVPlayer plays AIFF natively, so skip the ffmpeg step entirely for src=ios —
+            // saves ~1-3s per track and removes ffmpeg/Pipe pressure on the agent.
+            // raw=1 also skips this — the download must be the byte-for-byte original.
+            let needsAIFFConversion = !raw && (ext == "aif" || ext == "aiff") && src != "ios"
+            if needsAIFFConversion {
+                if preload {
+                    DispatchQueue.global(qos: .utility).async {
+                        _ = try? AudioService.shared.ensureWAV(path: resolvedPath, trackID: trackID)
+                    }
+                    StreamDiag.record(trackID: trackID, path: filePath, resolvedPath: resolvedPath,
+                                      status: 200, range: rangeHeader, preload: true, note: "preloading_aiff")
+                    return .json(["status": "preloading"])
+                }
+                logger.info("Stream request: converting AIFF for web, track=\(trackID), path=\(resolvedPath)")
+                do {
+                    finalPath = try AudioService.shared.ensureWAV(path: resolvedPath, trackID: trackID)
+                    logger.info("Stream request: AIFF ready, track=\(trackID), wav=\(finalPath)")
+                } catch {
+                    logger.warning("Stream request failed during AIFF conversion: track=\(trackID), error=\(error)")
+                    StreamDiag.record(trackID: trackID, path: filePath, resolvedPath: resolvedPath,
+                                      status: 503, range: rangeHeader, preload: preload, note: "aiff_conversion_failed")
+                    return .error("Audio conversion failed — retry in a moment", status: 503)
+                }
+            } else if preload {
+                StreamDiag.record(trackID: trackID, path: filePath, resolvedPath: resolvedPath,
+                                  status: 200, range: rangeHeader, preload: true, note: "preloading")
+                return .json(["status": "preloading"])
+            }
         }
 
         let mime    = mimeType(for: finalPath)

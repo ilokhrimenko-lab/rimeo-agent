@@ -9,6 +9,12 @@ namespace RimeoAgent.HttpServer;
 
 public sealed class ApiRouter
 {
+    // A track counts as "hi-res" when its Rekordbox bitrate exceeds this (kbps).
+    // Such tracks (≈24-bit PCM) overrun the sustained tunnel bandwidth and stall the
+    // web/stream player, so /stream serves them a 16-bit WAV down-convert. Bitrate
+    // 0/unknown → NOT hi-res. Parity with macOS APIRouter. raw=1 bypasses this.
+    private const int HiResBitrateThreshold = 2000;
+
     // Endpoints reachable over the public named tunnel that must carry a valid
     // ES256 token. Mirrors macOS APIRouter.jwtProtectedPaths.
     private static readonly HashSet<string> JwtProtectedPaths = new()
@@ -182,9 +188,12 @@ public sealed class ApiRouter
         var path    = rawPath;
         var trackId = req.QueryParams.GetValueOrDefault("id", "");
         var preload = req.QueryParams.GetValueOrDefault("preload", "") is "1" or "true";
+        // raw=1 → byte-for-byte ORIGINAL (download / offline must stay lossless):
+        // no 16-bit down-convert and no AIFF→WAV.
+        var raw     = req.QueryParams.GetValueOrDefault("raw", "") is "1" or "true";
         var ext     = Path.GetExtension(path).TrimStart('.').ToLower();
 
-        Log.Info($"Stream request: track={trackId}, preload={preload}, path={path}");
+        Log.Info($"Stream request: track={trackId}, preload={preload}, raw={raw}, path={path}");
 
         if (!File.Exists(path))
         {
@@ -203,7 +212,28 @@ public sealed class ApiRouter
         catch (IOException) { /* sharing/transient lock — let the normal flow handle it */ }
 
         string finalPath = path;
-        if (ext is "aif" or "aiff")
+        // Hi-res discriminator: Rekordbox bitrate > 2000 kbps. raw=1 forces the lossless
+        // original, so skip the lookup/down-convert entirely in that case.
+        var bitrate = raw ? 0 : (RekordboxParser.Shared.TrackById(trackId)?.Bitrate ?? 0);
+        var isHiRes = !raw && bitrate > HiResBitrateThreshold;
+
+        if (raw)
+        {
+            // Lossless original — no conversion. A preload probe has nothing to warm.
+            if (preload) { await WriteJson(resp, 200, new { status = "preloading" }); return; }
+        }
+        else if (isHiRes)
+        {
+            // Hi-res → 16-bit/44.1kHz/stereo WAV for ALL clients. ffmpeg auto-detects the
+            // container, so this covers both 24-bit WAV and 24-bit AIFF sources.
+            if (preload)
+            {
+                _ = Task.Run(() => AudioService.Shared.Ensure16BitWav(path, trackId));
+                await WriteJson(resp, 200, new { status = "preloading" }); return;
+            }
+            finalPath = await AudioService.Shared.Ensure16BitWav(path, trackId);
+        }
+        else if (ext is "aif" or "aiff")
         {
             if (preload)
             {

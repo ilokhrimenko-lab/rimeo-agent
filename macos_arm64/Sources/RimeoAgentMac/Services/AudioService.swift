@@ -61,6 +61,51 @@ final class AudioService {
         return cached.path
     }
 
+    // Returns path to a 16-bit / 44.1kHz / stereo WAV down-convert (from cache or
+    // freshly converted). Used for hi-res tracks (Rekordbox bitrate > 2000 kbps),
+    // whose 24-bit PCM exceeds the sustained Cloudflare-tunnel bandwidth and stalls
+    // the web/stream player. ffmpeg auto-detects the input container, so this works
+    // for both 24-bit WAV and 24-bit AIFF sources.
+    func ensure16BitWAV(path: String, trackID: String) throws -> String {
+        let cached = AppConfig.shared.cacheDir.appendingPathComponent("conv16_\(trackID).wav")
+        if FileManager.default.fileExists(atPath: cached.path) {
+            logger.info("16-bit conversion cache hit: track=\(trackID), wav=\(cached.path)")
+            return cached.path
+        }
+
+        let lock = convLock(for: trackID)
+        lock.lock(); defer { lock.unlock() }
+        if FileManager.default.fileExists(atPath: cached.path) {
+            logger.info("16-bit conversion cache hit after lock: track=\(trackID), wav=\(cached.path)")
+            return cached.path
+        }
+
+        convSemaphore.wait()
+        defer { convSemaphore.signal() }
+
+        logger.info("Converting hi-res → 16-bit WAV: \(trackID)")
+        TCCDiagnostics.logPathAccess("convert-16bit", path: path)
+        let exists = FileManager.default.fileExists(atPath: path)
+        let readable = FileManager.default.isReadableFile(atPath: path)
+        TCCDiagnostics.logPathResult("convert-16bit", path: path, exists: exists, readable: readable)
+        logger.info("16-bit conversion input: track=\(trackID), exists=\(exists), readable=\(readable), path=\(path)")
+        if let ffmpegPath = findBinary("ffmpeg") {
+            logger.info("16-bit conversion ffmpeg: track=\(trackID), binary=\(ffmpegPath)")
+        } else {
+            logger.warning("16-bit conversion ffmpeg missing: track=\(trackID)")
+        }
+        let result = runFFmpegWithStdin(["-i", "pipe:0", "-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2", "-f", "wav", cached.path, "-y"],
+                                       inputPath: path, timeout: 120)
+        guard result.success, FileManager.default.fileExists(atPath: cached.path) else {
+            logger.warning("16-bit conversion failed: track=\(trackID), stderr=\(result.stderr)")
+            throw AudioError.conversionFailed(result.stderr)
+        }
+        let size = (try? FileManager.default.attributesOfItem(atPath: cached.path))?[.size] as? Int ?? 0
+        logger.info("16-bit conversion complete: track=\(trackID), wav=\(cached.path), bytes=\(size)")
+        CacheManager.shared.scheduleEnforce()
+        return cached.path
+    }
+
     // Generate waveform JSON: {duration, peaks}
     func waveform(path: String, trackID: String) -> [String: Any] {
         let cacheURL = AppConfig.shared.cacheDir.appendingPathComponent("wave_\(trackID).json")

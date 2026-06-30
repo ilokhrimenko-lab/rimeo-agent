@@ -440,6 +440,16 @@ public sealed class RekordboxParser
         return s;
     }
 
+    // Lookup of a track by Rekordbox id from the (cached) library. Used by the stream
+    // route to read a track's bitrate for the hi-res down-convert decision. Parse() is
+    // cached/debounced, so this stays cheap on repeated /stream hits. Parity with macOS
+    // RekordboxParser.track(byID:).
+    public Track? TrackById(string id)
+    {
+        if (string.IsNullOrEmpty(id)) return null;
+        return Parse().Tracks.FirstOrDefault(t => t.Id == id);
+    }
+
     public void InvalidateCache()
     {
         lock (_lock)

@@ -45,6 +45,35 @@ public sealed class AudioService
         finally { sem.Release(); }
     }
 
+    // Returns the path to a 16-bit / 44.1kHz / stereo WAV down-convert (cached or freshly
+    // converted). Used for hi-res tracks (Rekordbox bitrate > 2000 kbps): their 24-bit PCM
+    // exceeds the sustained Cloudflare-tunnel bandwidth and stalls the web/stream player.
+    // ffmpeg auto-detects the input container, so this covers both 24-bit WAV and AIFF.
+    // Parity with macOS AudioService.ensure16BitWAV.
+    public async Task<string> Ensure16BitWav(string path, string trackId)
+    {
+        var cached = Path.Combine(AppConfig.Shared.CacheDir, $"conv16_{trackId}.wav");
+        if (File.Exists(cached)) return cached;
+
+        var sem = ConvLock(trackId);
+        await sem.WaitAsync();
+        try
+        {
+            if (File.Exists(cached)) return cached;
+
+            Log.Info($"Converting hi-res → 16-bit WAV: {trackId}");
+            var result = RunProcess("ffmpeg",
+                new[] { "-i", path, "-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2", "-f", "wav", cached, "-y" }, 120);
+            if (!result.Success || !File.Exists(cached))
+                throw new Exception($"16-bit conversion failed: {result.Stderr}");
+
+            Log.Info($"16-bit conversion complete: track={trackId}, wav={cached}");
+            CacheManager.Shared.ScheduleEnforce();
+            return cached;
+        }
+        finally { sem.Release(); }
+    }
+
     public Dictionary<string, object> Waveform(string path, string trackId)
     {
         var cacheFile = Path.Combine(AppConfig.Shared.CacheDir, $"wave_{trackId}.json");
