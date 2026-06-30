@@ -143,6 +143,11 @@ cp "$ROOT_DIR/build_info.py" "$APP_DIR/Contents/Resources/build_info.py"
 cp "$ROOT_DIR/similarity_config.json" "$APP_DIR/Contents/Resources/similarity_config.json"
 # Real Rimeo logo (sidebar wordmark loads this from the bundle — never a drawn "R").
 cp "$ROOT_DIR/rimeo1024.png" "$APP_DIR/Contents/Resources/rimeo1024.png"
+# Built-in royalty-free review library (15 tracks + audio). The agent switches to
+# it at runtime when signed in as the demo/review account (demo@rimeo.app) — see
+# AppConfig.activateReviewMode(). Lets App Review see a working library straight
+# from the agent downloaded off rimeo.app, with no real Rekordbox install.
+cp -R "$ROOT_DIR/review_library" "$APP_DIR/Contents/Resources/review_library"
 
 echo "==> Runtime components are not bundled"
 echo "    tunnel-runtime, ffmpeg, and ffprobe are installed by Component Gate from rimeo.app"

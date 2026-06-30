@@ -39,6 +39,10 @@ final class AppConfig {
     private(set) var dbSourceEnabled:  Bool = true
     /// Whether the exported XML source is enabled (Library toggle). Default on.
     private(set) var xmlSourceEnabled: Bool = true
+    /// Runtime review mode: the agent serves the bundled 15-track royalty-free
+    /// demo library instead of the real Rekordbox. Activated when signed in as the
+    /// demo/review account (demo@rimeo.app). See activateReviewMode().
+    private(set) var reviewMode: Bool = false
 
     private let queue = DispatchQueue(label: "rimeo.config", qos: .utility)
 
@@ -104,6 +108,47 @@ final class AppConfig {
                 }
             }
         }
+
+        // Restored review session: if the persisted XML points at our generated
+        // review library, stay in review mode across restarts.
+        if xmlPath.hasSuffix("review_active.xml") { reviewMode = true }
+    }
+
+    /// Switch the agent to the built-in royalty-free review library (15 tracks),
+    /// used when signed in as the demo/review account. The bundled XML carries
+    /// build-time absolute audio paths, so we rewrite each Location to the audio
+    /// files inside THIS app bundle before pointing the parser at it. The real
+    /// Rekordbox DB is never touched (DB source disabled).
+    func activateReviewMode() {
+        guard let resURL = Bundle.main.resourceURL else { return }
+        let srcXML   = resURL.appendingPathComponent("review_library/rimeo_review.xml")
+        let audioDir = resURL.appendingPathComponent("review_library/audio")
+        guard let raw = try? String(contentsOf: srcXML, encoding: .utf8) else { return }
+
+        // Rewrite Location="file://localhost/.../audio/<file>.mp3" → this bundle.
+        var rewritten = raw
+        if let re = try? NSRegularExpression(pattern: #"Location="file://localhost[^"]*?/([^"/]+\.mp3)""#) {
+            let ns = NSMutableString(string: raw)
+            for m in re.matches(in: raw, range: NSRange(location: 0, length: (raw as NSString).length)).reversed() {
+                let fn  = (raw as NSString).substring(with: m.range(at: 1))
+                let enc = audioDir.appendingPathComponent(fn).path
+                    .addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? ""
+                ns.replaceCharacters(in: m.range, with: "Location=\"file://localhost\(enc)\"")
+            }
+            rewritten = ns as String
+        }
+
+        let activeXML = baseDir.appendingPathComponent("review_active.xml")
+        try? rewritten.write(to: activeXML, atomically: true, encoding: .utf8)
+
+        queue.sync {
+            xmlPath = activeXML.path
+            reviewMode = true
+        }
+        // Persist so a restart stays in review mode; XML-only, never the real DB.
+        updateEnvVar(key: "RIMEO_XML_PATH", value: activeXML.path)
+        setXMLSourceEnabled(true)
+        setDBSourceEnabled(false)
     }
 
     func setXMLPath(_ path: String) {

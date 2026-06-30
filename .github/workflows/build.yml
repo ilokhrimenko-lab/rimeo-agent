@@ -67,6 +67,11 @@ jobs:
           cp "$GITHUB_WORKSPACE/build_info.py" "$APP/Contents/Resources/build_info.py"
           cp "$GITHUB_WORKSPACE/similarity_config.json" "$APP/Contents/Resources/similarity_config.json"
           cp "$GITHUB_WORKSPACE/rimeo1024.png" "$APP/Contents/Resources/rimeo1024.png"
+          # Built-in royalty-free review library (15 tracks + audio). The agent
+          # switches to it at runtime when signed in as demo@rimeo.app — see
+          # AppConfig.activateReviewMode(). Lets App Review see a working library
+          # straight from the downloaded agent, with no real Rekordbox install.
+          cp -R "$GITHUB_WORKSPACE/review_library" "$APP/Contents/Resources/review_library"
 
       - name: Sign macOS app (Developer ID + hardened runtime)
         env:

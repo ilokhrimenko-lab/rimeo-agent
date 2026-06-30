@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DJ_PLAYLISTS Version="1.0.0">
+  <PRODUCT Name="rekordbox" Version="6.0.0" Company="AlphaTheta"/>
+  <COLLECTION Entries="15">
+    <TRACK TrackID="1" Name="Aggressive Brazilian Phonk" Artist="Absolutesound" Genre="Brazilian Phonk" Kind="MP3 File" TotalTime="96" AverageBpm="129" Tonality="8A" BitRate="255" Year="2024" DateAdded="2024-02-02" PlayCount="0" Location="file://localhost/Volumes/KODAK/AI%20stuff/xcode/Rimeo/RimeoAgent/review_library/audio/absolutesound-aggressive-brazilian-phonk-3-514615.mp3"/>
+    <TRACK TrackID="2" Name="Technology Presentation" Artist="Alexgrohl" Genre="Corporate" Kind="MP3 File" TotalTime="137" AverageBpm="118" Tonality="9A" BitRate="256" Year="2024" DateAdded="2024-03-03" PlayCount="0" Location="file://localhost/Volumes/KODAK/AI%20stuff/xcode/Rimeo/RimeoAgent/review_library/audio/alexgrohl-technology-presentation-491834.mp3"/>
+    <TRACK TrackID="3" Name="Deep House Instrumental" Artist="Arnaud136" Genre="Deep House" Kind="MP3 File" TotalTime="231" AverageBpm="123" Tonality="5A" BitRate="256" Year="2024" DateAdded="2024-04-04" PlayCount="0" Location="file://localhost/Volumes/KODAK/AI%20stuff/xcode/Rimeo/RimeoAgent/review_library/audio/arnaud136-deep-house-instrumental-354596.mp3"/>
+    <TRACK TrackID="4" Name="Beat" Artist="Lemonmusiclab" Genre="Lo-Fi Beats" Kind="MP3 File" TotalTime="62" AverageBpm="90" Tonality="11B" BitRate="256" Year="2024" DateAdded="2024-05-05" PlayCount="0" Location="file://localhost/Volumes/KODAK/AI%20stuff/xcode/Rimeo/RimeoAgent/review_library/audio/lemonmusiclab-background-beat-524649.mp3"/>
+    <TRACK TrackID="5" Name="Background Music" Artist="Mondamusic" Genre="Electronic" Kind="MP3 File" TotalTime="130" AverageBpm="125" Tonality="4A" BitRate="256" Year="2024" DateAdded="2024-06-06" PlayCount="0" Location="file://localhost/Volumes/KODAK/AI%20stuff/xcode/Rimeo/RimeoAgent/review_library/audio/mondamusic-background-music-491692.mp3"/>
+    <TRACK TrackID="6" Name="House" Artist="Monume" Genre="House" Kind="MP3 File" TotalTime="147" AverageBpm="123" Tonality="7B" BitRate="255" Year="2024" DateAdded="2024-07-07" PlayCount="0" Location="file://localhost/Volumes/KODAK/AI%20stuff/xcode/Rimeo/RimeoAgent/review_library/audio/monume-house-509467.mp3"/>
+    <TRACK TrackID="7" Name="Techno House" Artist="Monume" Genre="Techno House" Kind="MP3 File" TotalTime="100" AverageBpm="126" Tonality="2A" BitRate="256" Year="2024" DateAdded="2024-08-08" PlayCount="0" Location="file://localhost/Volumes/KODAK/AI%20stuff/xcode/Rimeo/RimeoAgent/review_library/audio/monume-techno-house-2-519279.mp3"/>
+    <TRACK TrackID="8" Name="Deep House" Artist="Nastelbom" Genre="Deep House" Kind="MP3 File" TotalTime="98" AverageBpm="123" Tonality="10A" BitRate="256" Year="2024" DateAdded="2024-09-09" PlayCount="0" Location="file://localhost/Volumes/KODAK/AI%20stuff/xcode/Rimeo/RimeoAgent/review_library/audio/nastelbom-deep-house-351574.mp3"/>
+    <TRACK TrackID="9" Name="Eine Kleine Nachtmusik Phonk House" Artist="Pink Sound" Genre="Phonk" Kind="MP3 File" TotalTime="50" AverageBpm="147" Tonality="6A" BitRate="256" Year="2024" DateAdded="2024-10-10" PlayCount="0" Location="file://localhost/Volumes/KODAK/AI%20stuff/xcode/Rimeo/RimeoAgent/review_library/audio/pink_sound-eine-kleine-nachtmusik-phonk-house-background-music-49-second-520812.mp3"/>
+    <TRACK TrackID="10" Name="Phonk" Artist="Solarflex" Genre="Phonk" Kind="MP3 File" TotalTime="64" AverageBpm="143" Tonality="12B" BitRate="255" Year="2024" DateAdded="2024-11-11" PlayCount="0" Location="file://localhost/Volumes/KODAK/AI%20stuff/xcode/Rimeo/RimeoAgent/review_library/audio/solarflex-phonk-music-515549.mp3"/>
+    <TRACK TrackID="11" Name="Meeting In Berlin House" Artist="White Records" Genre="House" Kind="MP3 File" TotalTime="54" AverageBpm="123" Tonality="1A" BitRate="255" Year="2024" DateAdded="2024-12-12" PlayCount="0" Location="file://localhost/Volumes/KODAK/AI%20stuff/xcode/Rimeo/RimeoAgent/review_library/audio/white_records-meeting-in-berlin-background-house-music-for-video-stories-short-401040.mp3"/>
+    <TRACK TrackID="12" Name="Relax Your Thoughts Deep House" Artist="White Records" Genre="Deep House" Kind="MP3 File" TotalTime="57" AverageBpm="122" Tonality="3B" BitRate="256" Year="2024" DateAdded="2024-01-13" PlayCount="0" Location="file://localhost/Volumes/KODAK/AI%20stuff/xcode/Rimeo/RimeoAgent/review_library/audio/white_records-relax-your-thoughts-background-deep-house-music-for-video-60-second-309416.mp3"/>
+    <TRACK TrackID="13" Name="Summer Vibes Florida Tropical House" Artist="White Records" Genre="Tropical House" Kind="MP3 File" TotalTime="63" AverageBpm="109" Tonality="8B" BitRate="256" Year="2024" DateAdded="2024-02-14" PlayCount="0" Location="file://localhost/Volumes/KODAK/AI%20stuff/xcode/Rimeo/RimeoAgent/review_library/audio/white_records-summer-vibes-florida-background-tropical-house-music-for-video-60-sec-296444.mp3"/>
+    <TRACK TrackID="14" Name="Summer Vibes Florida Tropical" Artist="White Records" Genre="Tropical House" Kind="MP3 File" TotalTime="76" AverageBpm="110" Tonality="9B" BitRate="255" Year="2024" DateAdded="2024-03-15" PlayCount="0" Location="file://localhost/Volumes/KODAK/AI%20stuff/xcode/Rimeo/RimeoAgent/review_library/audio/white_records-summer-vibes-florida-background-tropical-music-for-video-short-2-403069.mp3"/>
+    <TRACK TrackID="15" Name="Too Deep In Your Eyes Summer" Artist="White Records" Genre="Electronic" Kind="MP3 File" TotalTime="76" AverageBpm="123" Tonality="5B" BitRate="255" Year="2024" DateAdded="2024-04-16" PlayCount="0" Location="file://localhost/Volumes/KODAK/AI%20stuff/xcode/Rimeo/RimeoAgent/review_library/audio/white_records-too-deep-in-your-eyes-summer-background-music-for-video-stories-380264.mp3"/>
+  </COLLECTION>
+  <PLAYLISTS>
+    <NODE Type="0" Name="ROOT" Count="10">
+      <NODE Name="All Tracks" Type="1" KeyType="0" Entries="15">
+        <TRACK Key="1"/>
+        <TRACK Key="2"/>
+        <TRACK Key="3"/>
+        <TRACK Key="4"/>
+        <TRACK Key="5"/>
+        <TRACK Key="6"/>
+        <TRACK Key="7"/>
+        <TRACK Key="8"/>
+        <TRACK Key="9"/>
+        <TRACK Key="10"/>
+        <TRACK Key="11"/>
+        <TRACK Key="12"/>
+        <TRACK Key="13"/>
+        <TRACK Key="14"/>
+        <TRACK Key="15"/>
+      </NODE>
+      <NODE Name="Brazilian Phonk" Type="1" KeyType="0" Entries="1">
+        <TRACK Key="1"/>
+      </NODE>
+      <NODE Name="Corporate" Type="1" KeyType="0" Entries="1">
+        <TRACK Key="2"/>
+      </NODE>
+      <NODE Name="Deep House" Type="1" KeyType="0" Entries="3">
+        <TRACK Key="3"/>
+        <TRACK Key="8"/>
+        <TRACK Key="12"/>
+      </NODE>
+      <NODE Name="Electronic" Type="1" KeyType="0" Entries="2">
+        <TRACK Key="5"/>
+        <TRACK Key="15"/>
+      </NODE>
+      <NODE Name="House" Type="1" KeyType="0" Entries="2">
+        <TRACK Key="6"/>
+        <TRACK Key="11"/>
+      </NODE>
+      <NODE Name="Lo-Fi Beats" Type="1" KeyType="0" Entries="1">
+        <TRACK Key="4"/>
+      </NODE>
+      <NODE Name="Phonk" Type="1" KeyType="0" Entries="2">
+        <TRACK Key="9"/>
+        <TRACK Key="10"/>
+      </NODE>
+      <NODE Name="Techno House" Type="1" KeyType="0" Entries="1">
+        <TRACK Key="7"/>
+      </NODE>
+      <NODE Name="Tropical House" Type="1" KeyType="0" Entries="2">
+        <TRACK Key="13"/>
+        <TRACK Key="14"/>
+      </NODE>
+    </NODE>
+  </PLAYLISTS>
+</DJ_PLAYLISTS>

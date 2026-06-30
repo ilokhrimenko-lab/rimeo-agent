@@ -984,6 +984,17 @@ final class APIRouter {
             d.cloud_user_id = result["email"] as? String
             d.cloud_token   = ct
         }
+
+        // Demo/review account → serve the bundled 15-track royalty-free library
+        // from this agent (the real Rekordbox DB is never read). Lets App Review
+        // see a working library straight from the agent downloaded off rimeo.app.
+        let signedInEmail = (result["email"] as? String ?? email).lowercased()
+        if signedInEmail == "demo@rimeo.app" {
+            AppConfig.shared.activateReviewMode()
+            RekordboxParser.shared.invalidateCache()
+            DispatchQueue.main.async { AppState.shared.refreshLibrarySource() }
+        }
+
         DispatchQueue.main.async { AppState.shared.refreshFromData() }
         CloudRelay.shared.start(cloudURL: cloudURL, token: ct)
 
