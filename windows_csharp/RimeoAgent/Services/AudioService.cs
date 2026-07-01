@@ -83,7 +83,17 @@ public sealed class AudioService
             {
                 var cached = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, object>>(
                     File.ReadAllText(cacheFile));
-                if (cached != null) return cached;
+                // Only trust a cache hit that carries a real duration. Earlier
+                // builds could cache duration=0 (ffprobe returns "N/A" for WAV
+                // over a non-seekable pipe on macOS; kept in parity here), and a
+                // zero duration forces the web player into a full-file decode
+                // (buks). Recompute below instead of serving the bad value.
+                if (cached != null
+                    && cached.TryGetValue("duration", out var dv)
+                    && dv is System.Text.Json.JsonElement je
+                    && je.ValueKind == System.Text.Json.JsonValueKind.Number
+                    && je.GetDouble() > 0)
+                    return cached;
             }
             catch { }
         }
@@ -110,6 +120,10 @@ public sealed class AudioService
         }
 
         var bytes = result.RawOutput;
+        // The peak stream is mono s8 at aresample=100 → exactly 100 samples/sec,
+        // so its byte count IS the duration in centiseconds (verified exact vs
+        // the true file duration). Use it whenever the probe came back empty/zero.
+        if (duration <= 0) duration = bytes.Length / 100.0;
         var samples = bytes.Select(b => Math.Abs(b < 128 ? (int)b : (int)b - 256) / 128.0).ToArray();
         var step = Math.Max(1, samples.Length / 8000);
         var peaks = new List<double>();

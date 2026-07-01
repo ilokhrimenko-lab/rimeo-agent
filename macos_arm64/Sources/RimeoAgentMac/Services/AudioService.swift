@@ -109,8 +109,14 @@ final class AudioService {
     // Generate waveform JSON: {duration, peaks}
     func waveform(path: String, trackID: String) -> [String: Any] {
         let cacheURL = AppConfig.shared.cacheDir.appendingPathComponent("wave_\(trackID).json")
+        // Self-heal poisoned entries: earlier builds cached duration=0 for WAV
+        // sources (ffprobe can't read WAV duration from a non-seekable stdin
+        // pipe → "N/A"). Only trust a cache hit that carries a real duration;
+        // a zero duration forces the web player into a full-file decode (buks),
+        // so recompute it below rather than serving the bad value.
         if let data = try? Data(contentsOf: cacheURL),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           (json["duration"] as? Double ?? 0) > 0 {
             return json
         }
 
@@ -129,7 +135,7 @@ final class AudioService {
             binary: "ffprobe",
             timeout: 12
         )
-        let duration = Double(probeResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0.0
+        var duration = Double(probeResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0.0
 
         // Downsample to 8000 peaks via s8 raw PCM
         let cmd = ["-v", "error", "-i", "pipe:0", "-ac", "1",
@@ -141,6 +147,13 @@ final class AudioService {
         }
 
         let bytes  = result.rawOutput
+        // ffprobe returns "N/A" for WAV duration over a non-seekable stdin pipe
+        // (it needs to seek to EOF; the header's data-chunk size isn't final on
+        // many DAW/Rekordbox exports). The peak stream above is mono s8 at
+        // aresample=100 → exactly 100 samples/sec, so its byte count IS the
+        // duration in centiseconds. Verified exact (delta < 0.01s) vs the true
+        // file duration. Use it whenever the probe came back empty/zero.
+        if duration <= 0 { duration = Double(bytes.count) / 100.0 }
         let samples = bytes.map { b -> Double in
             let signed = b < 128 ? Int(b) : Int(b) - 256
             return Double(abs(signed)) / 128.0
