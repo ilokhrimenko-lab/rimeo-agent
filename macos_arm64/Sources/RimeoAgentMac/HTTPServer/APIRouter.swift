@@ -257,6 +257,13 @@ final class APIRouter {
             return .error("File empty", status: 404)
         }
 
+        // A request WITHOUT a Range header must get 200 (full body), NOT 206. Chrome's
+        // <audio>/MediaElement treats "a 206 that spans the whole file" as a single
+        // non-seekable blob and drains it all before it plays; a 200 + Accept-Ranges lets
+        // it buffer progressively and range-fetch as needed. Real Range requests still get
+        // a proper 206 below. (iOS AVPlayer / Cast / downloads always send Range → 206.)
+        let hasRange = req.headers["range"] != nil
+
         var start = 0
         var end   = size - 1
 
@@ -283,18 +290,22 @@ final class APIRouter {
 
         let length    = end - start + 1
         let server    = HTTPServer(port: 0)   // reuse writeAll helper
-        logger.info("Stream response: track=\(trackID), status=206, mime=\(mime), bytes=\(start)-\(end)/\(size), length=\(length), final_path=\(finalPath)")
+        let respStatus = hasRange ? 206 : 200
+        logger.info("Stream response: track=\(trackID), status=\(respStatus), mime=\(mime), bytes=\(start)-\(end)/\(size), length=\(length), final_path=\(finalPath)")
         StreamDiag.record(trackID: trackID, path: filePath, resolvedPath: resolvedPath,
-                          status: 206, range: rangeHeader, preload: preload, bytes: length, note: "ok")
+                          status: respStatus, range: rangeHeader, preload: preload, bytes: length, note: "ok")
 
+        var headers = [
+            "Content-Type":   mime,
+            "Content-Length": "\(length)",
+            "Accept-Ranges":  "bytes",
+        ]
+        if hasRange {
+            headers["Content-Range"] = "bytes \(start)-\(end)/\(size)"
+        }
         return HTTPResponse(
-            status: 206,
-            headers: [
-                "Content-Type":   mime,
-                "Content-Length": "\(length)",
-                "Content-Range":  "bytes \(start)-\(end)/\(size)",
-                "Accept-Ranges":  "bytes",
-            ],
+            status: respStatus,
+            headers: headers,
             body: .stream { fd in
                 guard let fh = FileHandle(forReadingAtPath: finalPath) else { return }
                 defer { fh.closeFile() }
