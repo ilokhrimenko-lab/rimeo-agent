@@ -55,7 +55,10 @@ public static class JwtValidator
     /// Never throws — parse/crypto errors map to a Failure.
     public static Failure? Validate(string? rawToken, string expectedAudience)
     {
-        if (!IsConfigured) return null;                              // dev / pre-rollout: no-op
+        // 6006 fix: no key ⇒ REFUSE (fail-CLOSED). Was `return null` (accept ANY
+        // token). The key is a baked-in const, so production behaviour is unchanged;
+        // this only removes the dangerous fail-open pattern.
+        if (!IsConfigured) return Failure.NotConfigured;
         if (string.IsNullOrEmpty(expectedAudience)) return Failure.WrongAudience;
         if (string.IsNullOrEmpty(rawToken)) return Failure.Missing;
 

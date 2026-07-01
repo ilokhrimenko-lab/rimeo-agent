@@ -91,6 +91,17 @@ swift build -c release --arch arm64 --arch x86_64
 
 End users get the correct installer automatically at **[rimeo.app/open](https://rimeo.app/open)**, which serves the latest [GitHub Release](https://github.com/ilokhrimenko-lab/rimeo-agent/releases). Installed agents keep themselves current from that same Releases feed — no manual upgrades.
 
+## Security model & trust boundaries
+
+The agent runs a local HTTP server that can read files from your machine, so access is gated defensively (fail‑closed — an unknown or misconfigured state denies rather than grants):
+
+- **Authentication.** Data endpoints (`/stream`, `/waveform`, `/artwork`, `/api/data`, `/api/logs`) and every mutating/control endpoint (`/api/link_account`, `/api/tunnel/*`, `/reveal`, notes, …) require either a per‑device **LAN pre‑shared key** (exchanged in the pairing QR) or a valid server‑signed **ES256 JWT** (issued only over the provisioned named tunnel). With neither a PSK nor a named tunnel, requests are **refused**. The agent's own desktop UI is trusted in‑process and never crosses the socket.
+- **File access is library‑scoped.** File‑serving endpoints canonicalize the requested path (resolving `..` and symlinks) and serve it only if it lives inside a **library directory** (a folder that holds your tracks, the agent's cache, or the Rekordbox share folder). Arbitrary paths — `~/.ssh/id_rsa`, `/etc/passwd`, traversal, symlink escapes — are rejected with `403`.
+- **CORS is allow‑listed.** Only the Rimeo web player origin may read responses cross‑origin; there is no wildcard `Access-Control-Allow-Origin: *`, which blocks browser drive‑by requests from other sites.
+- **Signed auto‑updates.** On macOS an update is applied only after its `.app` is verified as **Developer‑ID signed by the Rimeo team** (`codesign` + Team ID) — a compromised release cannot ship our signature.
+- **Pinned helper downloads.** `cloudflared` / `ffmpeg` are fetched only from Rimeo‑controlled hosts (rimeo.app / GitHub releases) and checksum‑verified before execution.
+- **Cloud relay.** When you're away, the rimeo.app cloud relays requests to the agent over a long‑poll channel. The cloud is a trusted first‑party component and signs its own JWT, so relayed requests clear authentication by design; their file reach is nonetheless **bounded by the library‑scoping above** — a relayed request can never read files outside your library.
+
 ## License
 
 © Rimeo. All rights reserved. This source is published for transparency and distribution; it is **not** open‑source and may not be reused, redistributed or modified without prior written permission.

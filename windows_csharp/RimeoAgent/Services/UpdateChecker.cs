@@ -3,6 +3,7 @@ using System.IO.Compression;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using RimeoAgent.Config;
+using RimeoAgent.HttpServer;
 using RimeoAgent.Models;
 
 namespace RimeoAgent.Services;
@@ -195,11 +196,38 @@ public sealed class UpdateChecker
             received += read;
             if (total > 0) progress(received / (double)total);
         }
+        fileOut.Flush();
+
+        // 6005: fetch the detached signature next to the archive. Best-effort — a
+        // missing .sig makes ApplyZip's fail-closed check reject the update.
+        DownloadSignatureBestEffort(info.DownloadUrl + ".sig", dest + ".sig");
+    }
+
+    private static void DownloadSignatureBestEffort(string sigUrl, string sigDest)
+    {
+        try
+        {
+            using var http = new HttpClient();
+            http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent",
+                $"RimeoAgentWin/{AppConfig.Shared.Version}");
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            using var resp = http.GetAsync(sigUrl, cts.Token).GetAwaiter().GetResult();
+            if (!resp.IsSuccessStatusCode) return;
+            var bytes = resp.Content.ReadAsByteArrayAsync(cts.Token).GetAwaiter().GetResult();
+            File.WriteAllBytes(sigDest, bytes);
+        }
+        catch (Exception ex) { Log.Warn($"Update signature download failed: {ex.Message}"); }
     }
 
     // Extract zip → xcopy over the install dir + restart via a detached hidden bat → exit.
     private static void ApplyZip(string zipPath)
     {
+        // 6005: verify the archive's detached ECDSA-P256/SHA-256 signature with the
+        // baked update public key BEFORE extracting. Fail-closed — a missing or
+        // invalid .sig aborts the update. Identical check runs on macOS.
+        UpdateSignatureVerifier.VerifyZipSignature(zipPath, zipPath + ".sig");
+        Log.Info("Update archive signature verified (detached ES256)");
+
         var tmp = Path.Combine(Path.GetTempPath(), $"rimeo_apply_{Guid.NewGuid():N}");
         var extDir = Path.Combine(tmp, "ext");
         Directory.CreateDirectory(extDir);

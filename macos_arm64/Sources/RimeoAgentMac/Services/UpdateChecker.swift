@@ -120,10 +120,35 @@ final class UpdateChecker {
         sema.wait()
         obs.invalidate()
         if let e = dlError { throw e }
+
+        // 6005: fetch the detached signature alongside the archive. Best-effort —
+        // if it is absent, applyZip's fail-closed verification rejects the update.
+        downloadSignatureBestEffort(zipURL: dlURL, sigDest: dest.appendingPathExtension("sig"))
+    }
+
+    private func downloadSignatureBestEffort(zipURL: URL, sigDest: URL) {
+        guard let sigURL = URL(string: zipURL.absoluteString + ".sig") else { return }
+        var req = URLRequest(url: sigURL, timeoutInterval: 60)
+        req.setValue("RimeoAgentMac/\(AppConfig.shared.version)", forHTTPHeaderField: "User-Agent")
+        let sema = DispatchSemaphore(value: 0)
+        URLSession.shared.downloadTask(with: req) { localURL, resp, _ in
+            defer { sema.signal() }
+            guard let localURL, (resp as? HTTPURLResponse)?.statusCode == 200 else { return }
+            try? FileManager.default.removeItem(at: sigDest)
+            try? FileManager.default.moveItem(at: localURL, to: sigDest)
+        }.resume()
+        sema.wait()
     }
 
     // Extract zip → replace running bundle (unprivileged, osascript fallback) → relaunch → exit(0).
     private func applyZip(at zipPath: URL) throws {
+        // 6005: verify the archive's detached ECDSA-P256/SHA-256 signature with the
+        // baked update public key BEFORE extracting it. Fail-closed — a missing or
+        // invalid .sig aborts the update. Identical check runs on Windows.
+        try UpdateSignatureVerifier.verifyZipSignature(
+            zipPath: zipPath.path, sigPath: zipPath.path + ".sig")
+        logger.info("Update archive signature verified (detached ES256)")
+
         let ext = FileManager.default.temporaryDirectory
             .appendingPathComponent("rimeo_apply_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: ext, withIntermediateDirectories: true)
@@ -144,10 +169,24 @@ final class UpdateChecker {
         let currentPath = Bundle.main.bundleURL.path
         let newAppPath  = newApp.path
 
+        // 6005: verify the downloaded .app is Developer-ID signed by OUR team
+        // (codesign --verify --strict + TeamIdentifier == MM3Q8TJL85) BEFORE it can
+        // replace the running bundle. A compromised GitHub release can serve a zip
+        // but cannot forge our signature, so verification throws here → no replace,
+        // no silent RCE. Fail-closed: any error aborts the update.
+        try UpdateSignatureVerifier.verify(appPath: newAppPath)
+        logger.info("Update signature verified (Developer ID team \(UpdateSignatureVerifier.expectedTeamID))")
+
         // Unprivileged replace first (works when the bundle is in a user-writable
         // location → fully silent). Fall back to osascript (admin prompt) otherwise.
         let replaced = (try? replaceApp(from: newAppPath, to: currentPath)) ?? false
         if !replaced {
+            // 6005: never interpolate a path with shell metacharacters into the
+            // privileged `do shell script` (command-injection hardening).
+            guard UpdateSignatureVerifier.isSafeShellPath(currentPath),
+                  UpdateSignatureVerifier.isSafeShellPath(newAppPath) else {
+                throw UpdateSignatureError.unsafePath("update bundle path contains unsafe characters")
+            }
             let shellCmd = "rm -rf '\(currentPath)' && cp -R '\(newAppPath)' '\(currentPath)'"
             let appleScript = "do shell script \"\(shellCmd)\" with administrator privileges"
             let osascript = Process()

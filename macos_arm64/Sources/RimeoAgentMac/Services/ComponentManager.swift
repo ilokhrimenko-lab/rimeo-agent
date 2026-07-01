@@ -63,7 +63,12 @@ final class ComponentManager {
         try FileManager.default.createDirectory(at: componentsDir, withIntermediateDirectories: true)
 
         for (index, component) in components.enumerated() {
-            guard allowedIDs.contains(component.id), let url = URL(string: component.url) else {
+            // 6006: pin the download host. A compromised manifest cannot point the
+            // fetch at an attacker server to drop an executable we then chmod +x.
+            guard allowedIDs.contains(component.id),
+                  ComponentHostPolicy.isAllowed(urlString: component.url),
+                  let url = URL(string: component.url) else {
+                logger.error("Runtime component rejected (untrusted host/id): id=\(component.id), url=\(component.url)")
                 throw ComponentError.invalidManifest
             }
 

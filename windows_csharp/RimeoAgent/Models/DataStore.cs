@@ -81,4 +81,17 @@ public sealed class DataStore
         action(copy);
         Save(copy);
     }
+
+    /// Generate the per-device LAN PSK at startup if none exists yet, so the
+    /// agent's own WinUI control calls — which authenticate over 127.0.0.1 with
+    /// ?lan_token= — work before the pairing QR has ever been shown (task 6004).
+    /// Idempotent: a no-op once a secret is present.
+    public void EnsureLanSecret()
+    {
+        if (!string.IsNullOrEmpty(Data.LanSecret)) return;
+        var raw = new byte[32];
+        System.Security.Cryptography.RandomNumberGenerator.Fill(raw);
+        var psk = Convert.ToBase64String(raw).Replace("+", "-").Replace("/", "_").Replace("=", "");
+        Update(d => { if (string.IsNullOrEmpty(d.LanSecret)) d.LanSecret = psk; });
+    }
 }

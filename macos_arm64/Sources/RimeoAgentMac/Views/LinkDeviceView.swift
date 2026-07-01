@@ -270,7 +270,8 @@ struct LinkDeviceView: View {
                 path: path,
                 queryParams: [:],
                 headers: [:],
-                body: payload ?? Data()
+                body: payload ?? Data(),
+                trusted: true   // in-process UI call — not socket traffic
             ))
 
             DispatchQueue.main.async {

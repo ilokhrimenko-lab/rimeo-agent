@@ -251,7 +251,7 @@ public sealed partial class LogsPage : Page
         {
             using var http = new HttpClient();
             var payload = JsonSerializer.Serialize(new { description = desc });
-            var resp = await http.PostAsync($"http://127.0.0.1:{AppConfig.Port}/api/report_bug",
+            var resp = await http.PostAsync($"http://127.0.0.1:{AppConfig.Port}/api/report_bug?lan_token={Uri.EscapeDataString(RimeoAgent.Models.DataStore.Shared.Data.LanSecret)}",
                 new StringContent(payload, Encoding.UTF8, "application/json"));
             if (resp.IsSuccessStatusCode)
             {

@@ -23,3 +23,11 @@ dist/
 # AppleDouble files created by the SanDisk/exFAT volume — never commit these
 ._*
 .omx/
+
+# Secrets — private signing keys must NEVER be committed. The update-signing
+# private key lives only in CI (secret UPDATE_SIGNING_KEY); update_pub.pem is
+# baked into the agent source. (update_pub.pem itself is public and safe.)
+*_priv.pem
+update_priv.pem
+*.p12
+*.pfx

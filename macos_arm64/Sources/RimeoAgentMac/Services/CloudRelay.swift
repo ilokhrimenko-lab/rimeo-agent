@@ -222,6 +222,13 @@ final class CloudRelay {
         }
     }
 
+    /// Replays a cloud-relayed request against the local HTTP server (127.0.0.1).
+    /// THREAT MODEL (6006): the cloud signs its own JWT, so a relayed request clears
+    /// authGate — a compromised cloud could reach protected endpoints. This is now
+    /// BOUNDED by 6002 (LibraryPathGuard): the file endpoints only ever serve files
+    /// inside the library's own directories, so even a hostile relay can NOT read
+    /// arbitrary host files (e.g. ~/.ssh/id_rsa). Remote control via relay-JWT is a
+    /// deliberate feature; see README "Threat model & trust boundaries".
     private func handleCommand(_ cmd: [String: Any], cloudURL: String) {
         let reqID = cmd["req_id"] as? String ?? ""
         let method = cmd["method"] as? String ?? "GET"

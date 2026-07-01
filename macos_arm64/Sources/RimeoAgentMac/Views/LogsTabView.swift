@@ -506,7 +506,8 @@ struct LogsTabView: View {
                 path: "/api/report_bug",
                 queryParams: [:],
                 headers: [:],
-                body: payload ?? Data()
+                body: payload ?? Data(),
+                trusted: true   // in-process UI call — not socket traffic
             ))
 
             DispatchQueue.main.async {

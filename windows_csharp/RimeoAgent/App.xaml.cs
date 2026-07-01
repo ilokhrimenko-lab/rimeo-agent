@@ -94,6 +94,10 @@ public partial class App : Application
     {
         Log.Info("Starting background services");
 
+        // 6004: make sure the LAN PSK exists before the server accepts requests, so
+        // the WinUI control calls (127.0.0.1 with ?lan_token=) can authenticate.
+        SafeStart("lan secret", () => RimeoAgent.Models.DataStore.Shared.EnsureLanSecret());
+
         SafeStart("HTTP server", () =>
         {
             _server = new AgentHttpServer();

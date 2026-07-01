@@ -205,7 +205,8 @@ struct AccountTabView: View {
                 path: "/api/unlink_account",
                 queryParams: [:],
                 headers: [:],
-                body: Data()
+                body: Data(),
+                trusted: true   // in-process UI call — not socket traffic
             ))
         }
     }

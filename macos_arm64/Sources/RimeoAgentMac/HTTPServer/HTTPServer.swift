@@ -136,15 +136,19 @@ final class HTTPServer {
 
         guard let req = readRequest(fd) else { return }
 
-        // CORS preflight
+        // CORS preflight. 6003: reflect an allow-listed Origin only, never "*".
+        let cors = CORSPolicy.headers(forOrigin: req.headers["origin"])
         if req.method == "OPTIONS" {
-            let resp = HTTPResponse(status: 200, headers: corsHeaders(), body: .empty)
+            let resp = HTTPResponse(status: 200, headers: cors, body: .empty)
             sendResponse(fd, resp)
             return
         }
 
         guard let router = router else { return }
-        let resp = router(req)
+        var resp = router(req)
+        // Merge CORS onto whatever the handler returned (handler headers win on key
+        // collisions, but CORS keys never collide with handler content headers).
+        for (k, v) in cors { resp.headers[k] = v }
         sendResponse(fd, resp)
     }
 
@@ -198,11 +202,10 @@ final class HTTPServer {
     }
 
     private func sendResponse(_ fd: Int32, _ resp: HTTPResponse) {
+        // 6003: CORS is applied per-request in handleConnection from an explicit
+        // Origin allow-list. No wildcard Access-Control-Allow-Origin here.
         var hdrs = resp.headers
-        hdrs["Access-Control-Allow-Origin"]  = "*"
-        hdrs["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-        hdrs["Access-Control-Allow-Headers"] = "*"
-        hdrs["Connection"]                   = "close"
+        hdrs["Connection"] = "close"
 
         switch resp.body {
         case .empty:
@@ -262,12 +265,6 @@ final class HTTPServer {
         return (path, query)
     }
 
-    private func corsHeaders() -> [String: String] {
-        ["Access-Control-Allow-Origin":  "*",
-         "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-         "Access-Control-Allow-Headers": "*"]
-    }
-
     private func statusText(_ code: Int) -> String {
         switch code {
         case 200: return "OK"
@@ -291,6 +288,11 @@ struct HTTPRequest {
     let queryParams: [String: String]
     let headers:     [String: String]
     let body:        Data
+    /// True only for requests synthesised in-process by the agent's own SwiftUI
+    /// (e.g. the Sign-in / Account / Logs tabs call APIRouter.route directly). The
+    /// network path (readRequest) always leaves this false, so socket traffic —
+    /// including a same-machine browser drive-by on 127.0.0.1 — is never trusted.
+    var trusted: Bool = false
 }
 
 struct HTTPResponse {

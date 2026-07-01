@@ -15,40 +15,39 @@ public sealed class ApiRouter
     // 0/unknown → NOT hi-res. Parity with macOS APIRouter. raw=1 bypasses this.
     private const int HiResBitrateThreshold = 2000;
 
-    // Endpoints reachable over the public named tunnel that must carry a valid
-    // ES256 token. Mirrors macOS APIRouter.jwtProtectedPaths.
-    private static readonly HashSet<string> JwtProtectedPaths = new()
-    {
-        "/stream", "/waveform", "/artwork", "/api/data", "/api/logs",
-    };
+    // Protected endpoints (data + mutating/control) live in AccessControl
+    // (SecurityGates.cs): AccessControl.DataProtectedPaths + ControlProtectedPaths.
 
-    // Enforce JWT only once migrated onto the named tunnel: while on a quick /
-    // local tunnel (NamedHostname empty) the server does not sign tokens, so
-    // enforcing here would lock the agent out of its own /stream. Returns true
-    // when the request was rejected (a 401 has already been written to resp).
-    private static async Task<bool> JwtGate(AgentRequest req, HttpListenerResponse resp)
+    // PSK-or-JWT (mirrors macOS authGate). Policy lives in AccessControl.Decide.
+    //  • A valid per-device LAN PSK authorises a local client (no JWT needed).
+    //  • 6001 fix: when there is neither a PSK nor a named tunnel, DENY (was allow
+    //    = fail-open). Without a named tunnel the server signs no JWT, so the PSK is
+    //    the only trusted remote credential.
+    // Returns true when the request was rejected (a 401 has been written to resp).
+    private static async Task<bool> AuthGate(AgentRequest req, HttpListenerResponse resp)
     {
-        var aud = TunnelManager.Shared.NamedHostname;
-        if (string.IsNullOrEmpty(aud)) return false;
+        var secret   = DataStore.Shared.Data.LanSecret;
+        var provided = req.QueryParams.GetValueOrDefault("lan_token", "");
+        if (string.IsNullOrEmpty(provided)) provided = BearerToken(req) ?? "";
+        var aud      = TunnelManager.Shared.NamedHostname;
+        var jwtToken = JwtValidator.ExtractToken(req);
 
-        var token = JwtValidator.ExtractToken(req);
-        JwtValidator.Failure? failure;
-        try
+        var decision = AccessControl.Decide(secret, provided, aud, jwtToken, SafeValidate);
+        if (decision == AccessDecision.Allow)
         {
-            failure = JwtValidator.Validate(token, aud);
-        }
-        catch (Exception ex)
-        {
-            // Fail OPEN on an unexpected validator bug — never break audio because
-            // of a crypto/parse exception. Genuinely invalid tokens come back as a
-            // Failure (handled below); only truly unexpected exceptions land here.
-            Log.Warn($"JWT validator exception on {req.Path}: {ex.Message} — allowing request");
+            Log.Info($"authGate: allow path={req.Path}");
             return false;
         }
-        if (failure == null) return false;
 
-        var reason = JwtValidator.FailureReason(failure.Value);
-        Log.Warn($"JWT rejected: path={req.Path}, reason={reason}, aud={aud}, token_present={token != null}");
+        string reason;
+        if (string.IsNullOrEmpty(aud))
+            reason = string.IsNullOrEmpty(provided) ? "no_credentials" : "psk_invalid_no_tunnel";
+        else
+        {
+            var f = SafeValidate(jwtToken, aud);
+            reason = f.HasValue ? JwtValidator.FailureReason(f.Value) : "unauthorized";
+        }
+        Log.Warn($"Auth rejected: path={req.Path}, reason={reason}, aud={aud}, token_present={jwtToken != null}, psk_present={!string.IsNullOrEmpty(provided)}");
 
         var bytes = Encoding.UTF8.GetBytes(
             JsonSerializer.Serialize(new { error = "unauthorized", reason }));
@@ -61,28 +60,16 @@ public sealed class ApiRouter
         return true;
     }
 
-    // PSK-or-JWT (mirrors macOS authGate). A valid per-device LAN PSK authorises a
-    // local client without the server JWT; otherwise fall back to the JWT gate
-    // (remote / relay). We do NOT try to detect "is this via the tunnel?" — the
-    // relay presents requests without consistent cf-* headers / Host, and that
-    // mis-detection broke remote on macOS (build 207/208). Premium gating stays
-    // server-side: a free user gets neither a tunnel nor a JWT, so they can only
-    // ever reach us directly on the LAN.
-    private static async Task<bool> AuthGate(AgentRequest req, HttpListenerResponse resp)
+    // A validator that never throws: an unexpected crypto/parse bug maps to an
+    // InvalidSignature failure (fail-CLOSED), not to "allow".
+    private static JwtValidator.Failure? SafeValidate(string? token, string audience)
     {
-        var secret = DataStore.Shared.Data.LanSecret;
-        if (!string.IsNullOrEmpty(secret))
+        try { return JwtValidator.Validate(token, audience); }
+        catch (Exception ex)
         {
-            var provided = req.QueryParams.GetValueOrDefault("lan_token", "");
-            if (string.IsNullOrEmpty(provided)) provided = BearerToken(req) ?? "";
-            if (provided == secret)
-            {
-                Log.Info($"authGate: LAN/psk path={req.Path}");
-                return false; // authorised local client
-            }
+            Log.Warn($"JWT validator exception: {ex.Message} — treating as invalid (fail-closed)");
+            return JwtValidator.Failure.InvalidSignature;
         }
-        Log.Info($"authGate: remote/jwt path={req.Path}");
-        return await JwtGate(req, resp);
     }
 
     private static string? BearerToken(AgentRequest req)
@@ -114,10 +101,10 @@ public sealed class ApiRouter
                 return;
             }
 
-            // JWT gate for endpoints reachable over the public named tunnel.
-            // Enforced only once on a named tunnel (NamedHostname non-empty) —
-            // see JwtGate. Returns true (and writes 401) when rejected.
-            if (JwtProtectedPaths.Contains(req.Path) && await AuthGate(req, resp))
+            // Auth gate for data-exposing (6001) and mutating/control (6004)
+            // endpoints. Returns true (and writes 401) when rejected. The WinUI UI
+            // authenticates its own /127.0.0.1 control calls with the LAN PSK.
+            if (AccessControl.RequiresAuth(req.Path) && await AuthGate(req, resp))
                 return;
 
             switch ((req.Method, req.Path))
@@ -186,6 +173,10 @@ public sealed class ApiRouter
         { await WriteJson(resp, 400, new { error = "path required" }); return; }
 
         var path    = rawPath;
+        // 6002: only serve files that live inside the library's own directories.
+        // Blocks ?path=C:\Users\<u>\.ssh\id_rsa, ..\ traversal and junction escapes.
+        if (!LibraryPathGuard.IsAllowed(path))
+        { await WriteJson(resp, 403, new { error = "Forbidden" }); return; }
         var trackId = req.QueryParams.GetValueOrDefault("id", "");
         var preload = req.QueryParams.GetValueOrDefault("preload", "") is "1" or "true";
         // raw=1 → byte-for-byte ORIGINAL (download / offline must stay lossless):
@@ -299,6 +290,8 @@ public sealed class ApiRouter
     {
         if (!req.QueryParams.TryGetValue("path", out var path) || !req.QueryParams.TryGetValue("id", out var id))
         { await WriteJson(resp, 400, new { error = "path and id required" }); return; }
+        if (!LibraryPathGuard.IsAllowed(path))   // 6002
+        { await WriteJson(resp, 403, new { error = "Forbidden" }); return; }
 
         var preload = req.QueryParams.GetValueOrDefault("preload", "") is "1" or "true";
         if (preload)
@@ -316,6 +309,8 @@ public sealed class ApiRouter
     {
         if (!req.QueryParams.TryGetValue("path", out var path) || !req.QueryParams.TryGetValue("id", out var id))
         { await WriteJson(resp, 400, new { error = "path and id required" }); return; }
+        if (!LibraryPathGuard.IsAllowed(path))   // 6002
+        { await WriteJson(resp, 403, new { error = "Forbidden" }); return; }
 
         var preload = req.QueryParams.GetValueOrDefault("preload", "") is "1" or "true";
         if (preload)
@@ -341,6 +336,8 @@ public sealed class ApiRouter
     {
         if (!req.QueryParams.TryGetValue("path", out var path) || !File.Exists(path))
         { await WriteJson(resp, 404, new { error = "File not found" }); return; }
+        if (!LibraryPathGuard.IsAllowed(path))   // 6002 + 6004
+        { await WriteJson(resp, 403, new { error = "Forbidden" }); return; }
 
         System.Diagnostics.Process.Start("explorer.exe", $"/select,\"{path}\"");
         await WriteJson(resp, 200, new { status = "ok" });

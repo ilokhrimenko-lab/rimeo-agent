@@ -333,6 +333,43 @@ jobs:
         with:
           path: artifacts
 
+      # 6005: sign each update archive with the release private key. Agents verify
+      # this detached signature (DER ECDSA-P256/SHA-256) against the baked
+      # update_pub.pem BEFORE applying an update — fail-closed. A compromised
+      # release cannot produce a valid .sig without this private key.
+      - name: Sign update archives (detached ES256)
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${UPDATE_SIGNING_KEY:-}" ]; then
+            echo "::error::UPDATE_SIGNING_KEY secret is empty — agents reject unsigned updates (fail-closed)."
+            exit 1
+          fi
+          KEY="$RUNNER_TEMP/update_priv.pem"
+          PUB="$RUNNER_TEMP/update_pub.pem"
+          printf '%s\n' "$UPDATE_SIGNING_KEY" > "$KEY"
+          openssl pkey -in "$KEY" -pubout -out "$PUB"
+          # Guard: the signing key MUST match the public key baked into the agents,
+          # otherwise every agent would reject these updates.
+          FPR=$(openssl pkey -in "$KEY" -pubout -outform DER | openssl dgst -sha256 | sed 's/^.*= //')
+          EXPECTED=88fcdfc8ce77178eb7f8b5e0c1c7474c1246fd183d042427fbc80083c25dca9b
+          if [ "$FPR" != "$EXPECTED" ]; then
+            echo "::error::UPDATE_SIGNING_KEY does not match the baked update_pub.pem ($FPR != $EXPECTED)."
+            exit 1
+          fi
+          sign() {
+            [ -f "$1" ] || return 0
+            openssl dgst -sha256 -sign "$KEY" -out "$1.sig" "$1"
+            openssl dgst -sha256 -verify "$PUB" -signature "$1.sig" "$1" >/dev/null \
+              || { echo "::error::self-verify failed for $1"; exit 1; }
+            echo "signed + verified: $1 -> $1.sig"
+          }
+          sign artifacts/mac/RimeoAgent_mac.zip
+          sign artifacts/windows-x64/RimeoAgent_win.zip
+          sign artifacts/windows-arm64/RimeoAgent_win-arm64.zip
+          rm -f "$KEY"
+
       - name: Prepare release title
         run: |
           TAG_NAME="${GITHUB_REF_NAME}"
@@ -351,10 +388,13 @@ jobs:
           name: ${{ env.RELEASE_NAME }}
           files: |
             artifacts/mac/RimeoAgent_mac.zip
+            artifacts/mac/RimeoAgent_mac.zip.sig
             artifacts/windows-x64/RimeoAgentSetup_win.exe
             artifacts/windows-x64/RimeoAgent_win.zip
+            artifacts/windows-x64/RimeoAgent_win.zip.sig
             artifacts/windows-arm64/RimeoAgentSetup_win-arm64.exe
             artifacts/windows-arm64/RimeoAgent_win-arm64.zip
+            artifacts/windows-arm64/RimeoAgent_win-arm64.zip.sig
 
       - name: Upload to release (macOS only)
         if: env.MAC_ONLY == 'true'
@@ -363,6 +403,7 @@ jobs:
           name: ${{ env.RELEASE_NAME }}
           files: |
             artifacts/mac/RimeoAgent_mac.zip
+            artifacts/mac/RimeoAgent_mac.zip.sig
 
       - name: Upload to release (Windows only)
         if: env.WIN_ONLY == 'true'
@@ -372,5 +413,7 @@ jobs:
           files: |
             artifacts/windows-x64/RimeoAgentSetup_win.exe
             artifacts/windows-x64/RimeoAgent_win.zip
+            artifacts/windows-x64/RimeoAgent_win.zip.sig
             artifacts/windows-arm64/RimeoAgentSetup_win-arm64.exe
             artifacts/windows-arm64/RimeoAgent_win-arm64.zip
+            artifacts/windows-arm64/RimeoAgent_win-arm64.zip.sig

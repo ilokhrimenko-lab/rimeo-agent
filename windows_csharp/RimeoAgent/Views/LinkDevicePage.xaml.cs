@@ -362,7 +362,7 @@ public sealed partial class LinkDevicePage : Page
         {
             using var http = new HttpClient();
             var payload = JsonSerializer.Serialize(new { email, password });
-            var resp = await http.PostAsync($"http://127.0.0.1:{AppConfig.Port}{path}",
+            var resp = await http.PostAsync($"http://127.0.0.1:{AppConfig.Port}{path}?lan_token={Uri.EscapeDataString(RimeoAgent.Models.DataStore.Shared.Data.LanSecret)}",
                 new StringContent(payload, Encoding.UTF8, "application/json"));
             var resultStr = await resp.Content.ReadAsStringAsync();
 

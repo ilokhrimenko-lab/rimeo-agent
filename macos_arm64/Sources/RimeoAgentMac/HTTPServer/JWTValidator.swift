@@ -46,15 +46,26 @@ enum JWTValidator {
     }
 
     static func validate(token rawToken: String?, expectedAudience: String) -> Failure? {
-        guard isConfigured() else {
+        validate(token: rawToken, expectedAudience: expectedAudience, publicKeyPEM: publicKeyPEM)
+    }
+
+    /// Overload with an injectable key so the fail-closed path (6006) is unit
+    /// testable. Callers in production use the baked-in `publicKeyPEM`.
+    static func validate(token rawToken: String?, expectedAudience: String, publicKeyPEM: String) -> Failure? {
+        let trimmedPEM = publicKeyPEM.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPEM.isEmpty else {
+            // 6006 fix: no key ⇒ REFUSE (fail-CLOSED). This previously returned nil
+            // (allow), so a build that ever shipped without a key would have
+            // accepted ANY token. The key is baked in, so prod behaviour is
+            // unchanged; this only removes the dangerous fail-open pattern.
             logLock.lock()
             let shouldLog = !loggedNotConfigured
             loggedNotConfigured = true
             logLock.unlock()
             if shouldLog {
-                logger.warning("JWT validation disabled: public key not configured (dev build / pre-rollout)")
+                logger.warning("JWT validation refused: public key not configured (fail-closed)")
             }
-            return nil
+            return .notConfigured
         }
         guard expectedAudience.isEmpty == false else {
             // Named tunnel hostname unknown — refuse rather than trust a
@@ -92,7 +103,6 @@ enum JWTValidator {
         guard let aud = payload["aud"] as? String, !aud.isEmpty else { return .wrongAudience }
         if !audienceMatches(aud, expected: expectedAudience) { return .wrongAudience }
 
-        let trimmedPEM = publicKeyPEM.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let pubKey = try? P256.Signing.PublicKey(pemRepresentation: trimmedPEM) else {
             return .notConfigured
         }

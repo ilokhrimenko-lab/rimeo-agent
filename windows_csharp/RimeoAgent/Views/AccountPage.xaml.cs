@@ -270,7 +270,7 @@ public sealed partial class AccountPage : Page
         try
         {
             using var http = new HttpClient();
-            await http.PostAsync($"http://127.0.0.1:{AppConfig.Port}/api/unlink_account", new StringContent(""));
+            await http.PostAsync($"http://127.0.0.1:{AppConfig.Port}/api/unlink_account?lan_token={Uri.EscapeDataString(RimeoAgent.Models.DataStore.Shared.Data.LanSecret)}", new StringContent(""));
             await RefreshAccount();
         }
         catch (Exception ex) { Log.Error($"Sign out failed: {ex.Message}"); }

@@ -193,6 +193,11 @@ public sealed class CloudRelay
             Log.Info($"Cloud relay advertising tunnel URL: {tunnel}");
     }
 
+    /// Replays a cloud-relayed request against the local HTTP server (127.0.0.1).
+    /// THREAT MODEL (6006): the cloud signs its own JWT, so a relayed request clears
+    /// AuthGate. This is now BOUNDED by 6002 (LibraryPathGuard): the file endpoints
+    /// only serve files inside the library's own directories, so even a hostile
+    /// relay cannot read arbitrary host files. See README "Threat model".
     private static async Task HandleCommand(Dictionary<string, JsonElement> cmd, string cloudUrl)
     {
         var reqId  = cmd.TryGetValue("req_id",  out var r) ? r.GetString() ?? "" : "";

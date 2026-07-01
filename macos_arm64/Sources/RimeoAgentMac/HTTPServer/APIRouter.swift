@@ -43,13 +43,8 @@ final class APIRouter {
     static let shared = APIRouter()
     private init() {}
 
-    // Endpoints reachable through the public named tunnel that expose user data
-    // (audio bytes, waveform pre-computes, cover art, the full library JSON).
-    // All other routes are either local-network only or are authenticated by
-    // their own pairing/account flow.
-    private static let jwtProtectedPaths: Set<String> = [
-        "/stream", "/waveform", "/artwork", "/api/data", "/api/logs"
-    ]
+    // Protected endpoints (data + mutating/control) live in AccessControl
+    // (SecurityGates.swift): AccessControl.dataProtectedPaths + controlProtectedPaths.
 
     // Tracks with a Rekordbox bitrate above this (kbps) are "hi-res" (≈24-bit PCM):
     // their sustained bitrate overruns the Cloudflare-tunnel bandwidth and stalls the
@@ -60,7 +55,10 @@ final class APIRouter {
     func route(_ req: HTTPRequest) -> HTTPResponse {
         let path = req.path
 
-        if APIRouter.jwtProtectedPaths.contains(path) {
+        // Auth gate for data-exposing (6001) and mutating/control (6004) endpoints.
+        // In-process UI calls (req.trusted) bypass; every socket request is gated,
+        // including a same-machine browser hitting 127.0.0.1.
+        if !req.trusted, AccessControl.requiresAuth(path: path) {
             if let failure = authGate(req) { return failure }
         }
 
@@ -145,6 +143,12 @@ final class APIRouter {
             return .error("path required", status: 400)
         }
         let resolvedPath = resolveTrackPath(filePath)
+        // 6002: only serve files that live inside the library's own directories.
+        // Blocks ?path=/Users/<u>/.ssh/id_rsa, ../ traversal and symlink escapes.
+        guard LibraryPathGuard.isAllowed(resolvedPath) else {
+            logger.warning("Blocked non-library stream path: raw=\(filePath), resolved=\(resolvedPath)")
+            return .error("Forbidden", status: 403)
+        }
         let trackID = req.queryParams["id"] ?? ""
         let preload = req.queryParams["preload"] == "1" || req.queryParams["preload"] == "true"
         // raw=1 → byte-for-byte ORIGINAL (download / offline must stay lossless):
@@ -330,6 +334,10 @@ final class APIRouter {
             return .error("path and id required", status: 400)
         }
         let resolvedPath = resolveTrackPath(path)
+        guard LibraryPathGuard.isAllowed(resolvedPath) else {   // 6002
+            logger.warning("Blocked non-library waveform path: \(resolvedPath)")
+            return .error("Forbidden", status: 403)
+        }
         TCCDiagnostics.logPathAccess("waveform", path: resolvedPath)
         let preload = req.queryParams["preload"] == "1" || req.queryParams["preload"] == "true"
         if preload {
@@ -350,6 +358,10 @@ final class APIRouter {
             return .error("path and id required", status: 400)
         }
         let resolvedPath = resolveTrackPath(path)
+        guard LibraryPathGuard.isAllowed(resolvedPath) else {   // 6002
+            logger.warning("Blocked non-library artwork path: \(resolvedPath)")
+            return .error("Forbidden", status: 403)
+        }
         TCCDiagnostics.logPathAccess("artwork", path: resolvedPath)
         let preload = req.queryParams["preload"] == "1" || req.queryParams["preload"] == "true"
         if preload {
@@ -411,6 +423,10 @@ final class APIRouter {
             return .error("File not found", status: 404)
         }
         let resolvedPath = resolveTrackPath(path)
+        guard LibraryPathGuard.isAllowed(resolvedPath) else {   // 6002 + 6004
+            logger.warning("Blocked non-library reveal path: \(resolvedPath)")
+            return .error("Forbidden", status: 403)
+        }
         TCCDiagnostics.logPathAccess("reveal", path: resolvedPath)
         let exists = FileManager.default.fileExists(atPath: resolvedPath)
         let readable = FileManager.default.isReadableFile(atPath: resolvedPath)
@@ -1154,47 +1170,41 @@ final class APIRouter {
     ///    so a directly-paired iOS device can load the library / stream on the LAN.
     ///    This is what fixes "scanning the QR didn't open the library".
     /// If no PSK has been provisioned yet, falls back to the legacy JWT gate.
+    /// Auth for protected paths. A valid per-device PSK authorises a LOCAL client
+    /// without the server JWT (the LAN path); otherwise a valid server JWT is
+    /// required, which the server only signs once the agent is on its NAMED tunnel.
+    ///
+    /// 6001 fix: when there is neither a PSK nor a named tunnel, this now DENIES
+    /// (fail-closed) instead of returning nil (fail-open). The policy lives in the
+    /// pure, unit-tested AccessControl.decide so the exploit/legit cases are
+    /// exercised directly in tests.
     private func authGate(_ req: HTTPRequest) -> HTTPResponse? {
-        // A valid per-device PSK authorises a LOCAL client without the server JWT
-        // (the LAN path). Otherwise fall back to the JWT gate (remote / relay /
-        // tunnel path), exactly as before. PSK-or-JWT avoids fragile "is this via
-        // the tunnel?" detection — the relay presents requests without consistent
-        // cf-* headers/Host, so detection mis-fired and broke remote access. The
-        // premium gate is enforced server-side anyway: a free user gets neither a
-        // tunnel nor a JWT, so they can only ever reach us directly on the LAN.
-        let secret = DataStore.shared.data.lan_secret
-        if !secret.isEmpty {
-            let provided = req.queryParams["lan_token"] ?? bearerToken(req)
-            if let provided = provided, provided == secret {
-                logger.info("authGate: LAN/psk path=\(req.path)")
-                return nil
-            }
-        }
-        logger.info("authGate: remote/jwt path=\(req.path)")
-        return jwtGate(req)
-    }
+        let secret   = DataStore.shared.data.lan_secret
+        let provided = req.queryParams["lan_token"] ?? bearerToken(req)
+        let aud      = TunnelManager.shared.namedHostname
+        let jwtToken = JWTValidator.extractToken(from: req)
 
-    private func bearerToken(_ req: HTTPRequest) -> String? {
-        guard let auth = req.headers["authorization"],
-              auth.lowercased().hasPrefix("bearer ") else { return nil }
-        return String(auth.dropFirst("bearer ".count))
-    }
-
-    private func jwtGate(_ req: HTTPRequest) -> HTTPResponse? {
-        let aud = TunnelManager.shared.namedHostname
-        // П8 safety: enforce JWT only once migrated onto the named tunnel.
-        // While still on a quick tunnel (namedHostname empty) the server does
-        // not sign tokens for this binding, so enforcing here would lock the
-        // agent out of its own /stream before provisioning completes.
-        guard !aud.isEmpty else { return nil }
-        let token = JWTValidator.extractToken(from: req)
-        guard let failure = JWTValidator.validate(token: token, expectedAudience: aud) else {
+        let decision = AccessControl.decide(
+            lanSecret: secret,
+            providedToken: provided,
+            namedHostname: aud,
+            jwtToken: jwtToken,
+            validate: { JWTValidator.validate(token: $0, expectedAudience: $1) }
+        )
+        if decision == .allow {
+            logger.info("authGate: allow path=\(req.path) via=\(provided != nil && !secret.isEmpty ? "psk_or_jwt" : "jwt")")
             return nil
         }
-        let reason = failure.rawValue
-        logger.warning("JWT rejected: path=\(req.path), reason=\(reason), aud=\(aud), token_present=\(token != nil)")
+
+        let reason: String
+        if aud.isEmpty {
+            reason = (provided == nil) ? "no_credentials" : "psk_invalid_no_tunnel"
+        } else {
+            reason = JWTValidator.validate(token: jwtToken, expectedAudience: aud)?.rawValue ?? "unauthorized"
+        }
+        logger.warning("Auth rejected: path=\(req.path), reason=\(reason), aud=\(aud), token_present=\(jwtToken != nil), psk_present=\(provided != nil)")
         return HTTPResponse(
-            status: failure.status,
+            status: 401,
             headers: [
                 "Content-Type": "application/json",
                 "WWW-Authenticate": "Bearer realm=\"rimeo-agent\", error=\"\(reason)\"",
@@ -1204,6 +1214,12 @@ final class APIRouter {
                 "reason": reason,
             ])) ?? Data())
         )
+    }
+
+    private func bearerToken(_ req: HTTPRequest) -> String? {
+        guard let auth = req.headers["authorization"],
+              auth.lowercased().hasPrefix("bearer ") else { return nil }
+        return String(auth.dropFirst("bearer ".count))
     }
 
     // MARK: - Helpers

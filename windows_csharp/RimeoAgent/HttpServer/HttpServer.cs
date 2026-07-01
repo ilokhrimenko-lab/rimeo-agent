@@ -74,10 +74,10 @@ public sealed class AgentHttpServer
 
         try
         {
-            // CORS for browser requests
-            resp.Headers.Add("Access-Control-Allow-Origin", "*");
-            resp.Headers.Add("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-            resp.Headers.Add("Access-Control-Allow-Headers", "Content-Type, Range");
+            // 6003: reflect an allow-listed Origin only, never "*". A wildcard let
+            // ANY page the user opened fetch /api/data and /stream.
+            foreach (var kv in CorsPolicy.Headers(req.Headers["Origin"]))
+                resp.Headers[kv.Key] = kv.Value;
 
             if (req.HttpMethod == "OPTIONS")
             {

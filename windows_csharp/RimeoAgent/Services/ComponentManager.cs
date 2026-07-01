@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using RimeoAgent.Config;
+using RimeoAgent.HttpServer;
 
 namespace RimeoAgent.Services;
 
@@ -72,6 +73,11 @@ public sealed class ComponentManager
 
     private async Task DownloadComponentAsync(ComponentInfo comp, Action<string> onProgress)
     {
+        // 6006: pin the download host. A compromised manifest cannot point the
+        // fetch at an attacker server to drop an executable we then run.
+        if (!ComponentHostPolicy.IsAllowed(comp.Url))
+            throw new Exception($"Untrusted component host, refusing download: {comp.Url}");
+
         var dest = Path.Combine(_componentsDir, $"{comp.Id}.exe");
         var tmp  = dest + ".tmp";
 
