@@ -20,6 +20,7 @@ struct LinkDeviceView: View {
     @State private var showPassword = false
     @State private var isBusy = false
     @State private var statusMsg = ""
+    @State private var infoMsg = ""
     @FocusState private var emailFocused: Bool
 
     private let formWidth: CGFloat = 374
@@ -38,7 +39,18 @@ struct LinkDeviceView: View {
 
             gate.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .onAppear { emailFocused = true }
+        .onAppear {
+            // If the account was signed out involuntarily (claimed on another
+            // computer, or a relay eviction cleared the token), cloud_user_id is
+            // kept — prefill the email so reconnecting is a one-tap password re-entry.
+            // An explicit Sign out clears it, so this only appears after an
+            // involuntary de-auth.
+            if email.isEmpty, let last = DataStore.shared.data.cloud_user_id, !last.isEmpty {
+                email = last
+                infoMsg = "Your session ended — sign in to reconnect this agent."
+            }
+            emailFocused = true
+        }
     }
 
     // MARK: - Gate column
@@ -70,6 +82,15 @@ struct LinkDeviceView: View {
             .frame(width: formWidth)
             .padding(.top, 28)
 
+            if !infoMsg.isEmpty {
+                Text(infoMsg)
+                    .font(.system(size: 13))
+                    .foregroundColor(C.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: formWidth)
+                    .padding(.top, 14)
+            }
             if !statusMsg.isEmpty {
                 Text(statusMsg)
                     .font(.system(size: 13))

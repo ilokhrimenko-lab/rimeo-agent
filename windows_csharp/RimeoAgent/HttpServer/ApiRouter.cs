@@ -244,7 +244,16 @@ public sealed class ApiRouter
         long size  = info.Length;
         long start = 0, end = size - 1;
 
-        if (req.Headers.TryGetValue("Range", out var rangeHeader) && !string.IsNullOrEmpty(rangeHeader))
+        // A media element that wants the whole resource sends NO Range header.
+        // Answering that with a 206 + whole-file Content-Range is illegal and makes
+        // Chrome drain the ENTIRE body before playback starts — the "first play of a
+        // freshly-converted hi-res/AIFF track downloads the whole file" bug. Serve a
+        // no-Range request as 200 + Accept-Ranges (the file on disk is already a
+        // complete, seekable WAV), so the browser then range-fetches and streams
+        // progressively. Real Range requests (iOS AVPlayer, Cast, download) still 206.
+        // Mirrors the macOS APIRouter.streamAudio fix shipped in build 233.
+        bool hasRange = req.Headers.TryGetValue("Range", out var rangeHeader) && !string.IsNullOrEmpty(rangeHeader);
+        if (hasRange)
         {
             var cleaned = rangeHeader.Replace("bytes=", "");
             var parts   = cleaned.Split('-');
@@ -255,14 +264,14 @@ public sealed class ApiRouter
             }
         }
 
-        if (start > end || start >= size) { resp.StatusCode = 416; resp.Close(); return; }
+        if (start > end || start >= size) { resp.StatusCode = 416; resp.Headers.Add("Content-Range", $"bytes */{size}"); resp.Close(); return; }
         end = Math.Min(end, size - 1);
         long length = end - start + 1;
 
-        resp.StatusCode  = 206;
+        resp.StatusCode  = hasRange ? 206 : 200;
         resp.ContentType = mime;
         resp.Headers.Add("Accept-Ranges",  "bytes");
-        resp.Headers.Add("Content-Range",  $"bytes {start}-{end}/{size}");
+        if (hasRange) resp.Headers.Add("Content-Range",  $"bytes {start}-{end}/{size}");
         resp.ContentLength64 = length;
 
         try

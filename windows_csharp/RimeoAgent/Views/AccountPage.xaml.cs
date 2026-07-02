@@ -132,8 +132,11 @@ public sealed partial class AccountPage : Page
     }
 
     // QR popover mirroring macOS: a code that points at rimeo.app/open so the user
-    // scans it with a phone. Falls back to just the browser link if the bundled
-    // QR asset is missing (e.g. a local dev build that didn't generate it).
+    // scans it with a phone. macOS generates this QR at runtime (CIQRCodeGenerator);
+    // Windows has no local encoder, so we use the bundled PNG when present and
+    // otherwise the same remote QR service the pairing QR already uses — so the QR
+    // is NEVER a hard dependency on a bundled asset that may not ship. The browser
+    // button below stays as the offline fallback.
     private static FrameworkElement BuildQRFlyout()
     {
         var panel = new StackPanel { Spacing = 12, Width = 220, HorizontalAlignment = HorizontalAlignment.Center };
@@ -141,20 +144,21 @@ public sealed partial class AccountPage : Page
         panel.Children.Add(new TextBlock { Text = "Scan with your phone's camera", FontSize = 12, Foreground = UI.Secondary, HorizontalAlignment = HorizontalAlignment.Center, TextWrapping = TextWrapping.Wrap, TextAlignment = TextAlignment.Center });
 
         var qrPath = System.IO.Path.Combine(System.AppContext.BaseDirectory, "Assets", "qr_open.png");
-        if (System.IO.File.Exists(qrPath))
+        var qrSource = System.IO.File.Exists(qrPath)
+            ? new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(qrPath))
+            : new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(
+                new Uri($"https://api.qrserver.com/v1/create-qr-code/?size=360x360&data={Uri.EscapeDataString(PhoneAppUrl)}"));
+        panel.Children.Add(new Border
         {
-            panel.Children.Add(new Border
+            Background = new SolidColorBrush(Microsoft.UI.Colors.White),
+            CornerRadius = new CornerRadius(10), Padding = new Thickness(8),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Child = new Microsoft.UI.Xaml.Controls.Image
             {
-                Background = new SolidColorBrush(Microsoft.UI.Colors.White),
-                CornerRadius = new CornerRadius(10), Padding = new Thickness(8),
-                HorizontalAlignment = HorizontalAlignment.Center,
-                Child = new Microsoft.UI.Xaml.Controls.Image
-                {
-                    Width = 180, Height = 180,
-                    Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(qrPath))
-                }
-            });
-        }
+                Width = 180, Height = 180,
+                Source = qrSource
+            }
+        });
 
         var openBtn = new Button
         {

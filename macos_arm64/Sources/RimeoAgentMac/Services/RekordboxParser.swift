@@ -661,7 +661,7 @@ try:
         """
         SELECT ID, COALESCE(Name, ''), COALESCE(DateCreated, ''), COALESCE(created_at, '')
         FROM djmdHistory
-        WHERE rb_local_deleted = 0
+        WHERE rb_local_deleted = 0 AND COALESCE(Attribute, 0) = 0
         """
     )
     hist_meta = {}

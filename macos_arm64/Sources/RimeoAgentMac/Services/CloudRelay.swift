@@ -122,9 +122,12 @@ final class CloudRelay {
                 // computer (single active agent per account). Definitive: sign out.
                 if reason == "evicted" {
                     logger.warning("Cloud relay: 403 evicted — signed in elsewhere. Clearing session.")
+                    // Keep cloud_user_id (email): the account is de-authed but we
+                    // prefill the sign-in gate with the email so reconnecting is a
+                    // one-tap password re-entry, not a blank cold gate. An explicit
+                    // Sign out still clears the email.
                     DataStore.shared.update { d in
                         d.cloud_url = ""
-                        d.cloud_user_id = nil
                         d.cloud_token = ""
                     }
                     DispatchQueue.main.async { AppState.shared.refreshFromData() }
@@ -137,9 +140,12 @@ final class CloudRelay {
                 consecutive403 += 1
                 if consecutive403 >= 3 {
                     logger.warning("Cloud relay: 403 (\(reason ?? "no reason")) persisted ×\(consecutive403) — clearing session.")
+                    // Keep cloud_user_id (email): the account is de-authed but we
+                    // prefill the sign-in gate with the email so reconnecting is a
+                    // one-tap password re-entry, not a blank cold gate. An explicit
+                    // Sign out still clears the email.
                     DataStore.shared.update { d in
                         d.cloud_url = ""
-                        d.cloud_user_id = nil
                         d.cloud_token = ""
                     }
                     DispatchQueue.main.async { AppState.shared.refreshFromData() }

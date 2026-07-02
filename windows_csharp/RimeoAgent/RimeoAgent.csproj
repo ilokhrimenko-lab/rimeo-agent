@@ -43,5 +43,17 @@
     <None Update="Assets\**">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- WinUI (UseWinUI) auto-classifies *.png as Content/PRIResource (embedded into
+         resources.pri), so the <None Update> above never copies them as LOOSE files
+         next to the exe. BuildBrand (sidebar logo) and BuildQRFlyout load them via a
+         filesystem path (AppContext.BaseDirectory\Assets\*.png), so force a loose-file
+         copy here regardless of the default item classification. The real PNGs are now
+         committed under Assets/; CI's "Create icon" step may overwrite them. -->
+    <Content Remove="Assets\*.png" />
+    <PRIResource Remove="Assets\*.png" />
+    <None Remove="Assets\*.png" />
+    <Content Include="Assets\*.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 </Project>

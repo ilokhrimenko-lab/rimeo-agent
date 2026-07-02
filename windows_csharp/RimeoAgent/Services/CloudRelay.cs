@@ -92,7 +92,11 @@ public sealed class CloudRelay
                     if (reason == "evicted")
                     {
                         Log.Warn("Cloud relay: 403 evicted — signed in elsewhere. Clearing session.");
-                        DataStore.Shared.Update(dd => { dd.CloudUrl = ""; dd.CloudUserId = null; dd.CloudToken = ""; });
+                        // Keep CloudUserId (email): the account is de-authed but we
+                        // prefill the sign-in gate with the email so reconnecting is a
+                        // one-tap password re-entry, not a blank cold gate. An explicit
+                        // Sign out still clears the email (UnlinkAccount).
+                        DataStore.Shared.Update(dd => { dd.CloudUrl = ""; dd.CloudToken = ""; });
                         AppState.Shared.RefreshFromData();
                         Stop();
                         return;
@@ -104,7 +108,11 @@ public sealed class CloudRelay
                     if (consecutive403 >= 3)
                     {
                         Log.Warn($"Cloud relay: 403 ({reason ?? "no reason"}) persisted x{consecutive403} — clearing session.");
-                        DataStore.Shared.Update(dd => { dd.CloudUrl = ""; dd.CloudUserId = null; dd.CloudToken = ""; });
+                        // Keep CloudUserId (email): the account is de-authed but we
+                        // prefill the sign-in gate with the email so reconnecting is a
+                        // one-tap password re-entry, not a blank cold gate. An explicit
+                        // Sign out still clears the email (UnlinkAccount).
+                        DataStore.Shared.Update(dd => { dd.CloudUrl = ""; dd.CloudToken = ""; });
                         AppState.Shared.RefreshFromData();
                         Stop();
                         return;

@@ -251,7 +251,12 @@ public sealed class RekordboxParser
                 var histDate = new Dictionary<string, double>();
                 using (var cmd = conn.CreateCommand())
                 {
-                    cmd.CommandText = "SELECT ID, COALESCE(Name,''), COALESCE(DateCreated,''), COALESCE(created_at,'') FROM djmdHistory WHERE rb_local_deleted = 0";
+                    // Attribute = 0 → a real per-set history session; Attribute = 1 → a
+                    // Year/Month folder node in Rekordbox's history tree. Without this
+                    // filter the folder rows (named "2026", "6", …) leak in as phantom
+                    // sessions — the "fake history" bug. Mirrors pyrekordbox / the
+                    // include_folders=false convention (same as djmdPlaylist).
+                    cmd.CommandText = "SELECT ID, COALESCE(Name,''), COALESCE(DateCreated,''), COALESCE(created_at,'') FROM djmdHistory WHERE rb_local_deleted = 0 AND COALESCE(Attribute,0) = 0";
                     using var rdr = cmd.ExecuteReader();
                     while (rdr.Read())
                     {

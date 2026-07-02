@@ -60,7 +60,22 @@ public sealed partial class LinkDevicePage : Page
         InitializeComponent();
         Content = Build();
         ApplyMode();
-        Loaded += (_, _) => _emailBox.Focus(FocusState.Programmatic);
+        // If a previous session was signed out involuntarily (account claimed on
+        // another computer, or a relay eviction cleared the token), CloudUserId is
+        // kept — prefill the email so reconnecting is a one-tap password re-entry
+        // instead of a blank gate. An explicit Sign out clears it, so this hint only
+        // appears after an involuntary de-auth.
+        var lastEmail = RimeoAgent.Models.DataStore.Shared.Data.CloudUserId;
+        if (!string.IsNullOrEmpty(lastEmail))
+        {
+            _emailBox.Text = lastEmail;
+            ShowStatus("Your session ended — sign in to reconnect this agent.", ok: true);
+            Loaded += (_, _) => _passwordBox.Focus(FocusState.Programmatic);
+        }
+        else
+        {
+            Loaded += (_, _) => _emailBox.Focus(FocusState.Programmatic);
+        }
     }
 
     private Grid Build()
@@ -183,6 +198,7 @@ public sealed partial class LinkDevicePage : Page
         _emailBox.Padding = new Thickness(0);
         _emailBox.VerticalAlignment = VerticalAlignment.Center;
         _emailBox.KeyDown += (_, e) => { if (e.Key == VirtualKey.Enter) Submit(); };
+        StripFieldChrome(_emailBox);
 
         var icon = UI.Icon(17, UI.Dim, 2,
             "M4 5H20A1 1 0 0 1 21 6V18A1 1 0 0 1 20 19H4A1 1 0 0 1 3 18V6A1 1 0 0 1 4 5Z", "M3 7l9 6 9-6");
@@ -225,6 +241,8 @@ public sealed partial class LinkDevicePage : Page
         _passwordBox.Padding = new Thickness(0);
         _passwordBox.VerticalAlignment = VerticalAlignment.Center;
         _passwordBox.KeyDown += (_, e) => { if (e.Key == VirtualKey.Enter) Submit(); };
+        StripFieldChrome(_passwordBox);
+        _passwordBox.PasswordRevealMode = PasswordRevealMode.Hidden;
 
         var lockIcon = UI.Icon(17, UI.Dim, 2,
             "M5 11H19A1 1 0 0 1 20 12V20A1 1 0 0 1 19 21H5A1 1 0 0 1 4 20V12A1 1 0 0 1 5 11Z", "M8 11V8a4 4 0 0 1 8 0v3");
@@ -260,6 +278,26 @@ public sealed partial class LinkDevicePage : Page
         };
     }
 
+    // Strip the WinUI TextBox/PasswordBox default-template chrome (inner fill, border,
+    // focus underline, rounded corners) so only the outer custom InputRow Border shows.
+    // Setting local Background/BorderThickness alone is not enough — the PointerOver/
+    // Focused visual states re-apply TextControl* theme brushes; override them on the
+    // control's own Resources (the same technique MainWindow uses for NavigationView).
+    private static void StripFieldChrome(Control c)
+    {
+        var clear = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        foreach (var key in new[]
+        {
+            "TextControlBackground", "TextControlBackgroundPointerOver",
+            "TextControlBackgroundFocused", "TextControlBackgroundDisabled",
+            "TextControlBorderBrush", "TextControlBorderBrushPointerOver",
+            "TextControlBorderBrushFocused", "TextControlBorderBrushDisabled",
+        })
+            c.Resources[key] = clear;
+        c.Resources["TextControlBorderThemeThickness"] = new Thickness(0);
+        c.CornerRadius = new CornerRadius(0);
+    }
+
     private Button BuildPrimaryButton()
     {
         var content = new StackPanel
@@ -276,6 +314,19 @@ public sealed partial class LinkDevicePage : Page
             Background = UI.Acc, HorizontalContentAlignment = HorizontalAlignment.Center, VerticalContentAlignment = VerticalAlignment.Center,
             Content = content
         };
+        // The default WinUI Button template swaps ContentPresenter.Background to the
+        // near-white ButtonBackgroundPointerOver on hover; behind the white label that
+        // makes the accent button look like it vanishes. Pin fill + white content
+        // across Normal/PointerOver/Pressed on the button's own Resources.
+        var clearBrush = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        b.Resources["ButtonBackground"]             = UI.Acc;
+        b.Resources["ButtonBackgroundPointerOver"]  = UI.Acc;
+        b.Resources["ButtonBackgroundPressed"]      = UI.Acc;
+        b.Resources["ButtonForeground"]             = UI.White;
+        b.Resources["ButtonForegroundPointerOver"]  = UI.White;
+        b.Resources["ButtonForegroundPressed"]      = UI.White;
+        b.Resources["ButtonBorderBrushPointerOver"] = clearBrush;
+        b.Resources["ButtonBorderBrushPressed"]     = clearBrush;
         b.Click += (_, _) => Submit();
         return b;
     }

@@ -47,6 +47,13 @@ public sealed partial class MainWindow : Window
             ExtendsContentIntoTitleBar = true;
             Content = gate;
             SetTitleBar(gate.TitleBarDragRegion);
+            // The gate draws its own min/max/close buttons (LinkDevicePage.BuildTitlebar).
+            // ExtendsContentIntoTitleBar keeps the framework's system caption buttons on
+            // top of them → two sets of buttons. Drop the system title bar (removes those
+            // caption buttons) while keeping the resize border. SetTitleBar drag rectangles
+            // are AppWindow-level and survive hasTitleBar:false, so the brand lane stays
+            // draggable. Must run AFTER SetTitleBar so it isn't re-overridden.
+            (AppWindow.Presenter as OverlappedPresenter)?.SetBorderAndTitleBar(true, false);
         }
         catch (Exception ex)
         {
@@ -62,7 +69,14 @@ public sealed partial class MainWindow : Window
         DispatcherQueue.TryEnqueue(() =>
         {
             _inGate = false;
-            try { ExtendsContentIntoTitleBar = false; } catch (Exception ex) { Log.Error($"Title bar reset failed: {ex}"); }
+            try
+            {
+                // Restore the standard system title bar (border + title bar + default
+                // caption buttons) for the shell, then stop extending content into it.
+                (AppWindow.Presenter as OverlappedPresenter)?.SetBorderAndTitleBar(true, true);
+                ExtendsContentIntoTitleBar = false;
+            }
+            catch (Exception ex) { Log.Error($"Title bar reset failed: {ex}"); }
             _defaultPageRequested = false;
             BuildShell();
             SelectNav("Library");
