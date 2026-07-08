@@ -123,10 +123,11 @@ public sealed partial class MainWindow : Window
             Content = _contentFrame,
             RequestedTheme = theme
         };
-        // Mirror the macOS rail: Library / Account / Settings (Devices merged into Account).
-        _navView.MenuItems.Add(CreateNavItem("Library", "Library")); // Folder
-        _navView.MenuItems.Add(CreateNavItem("Account", "Account")); // Cloud (Devices merged in)
-        _navView.MenuItems.Add(CreateNavItem("Settings", "Logs"));    // Settings gear
+        // Mirror the macOS rail: Library / Check spek / Account / Settings (Devices merged into Account).
+        _navView.MenuItems.Add(CreateNavItem("Library", "Library"));       // Folder
+        _navView.MenuItems.Add(CreateNavItem("Check spek", "CheckSpek"));  // Audio/waveform
+        _navView.MenuItems.Add(CreateNavItem("Account", "Account"));       // Cloud (Devices merged in)
+        _navView.MenuItems.Add(CreateNavItem("Settings", "Logs"));         // Settings gear
         _navView.SelectionChanged += NavView_SelectionChanged;
         ApplyPaneTheme();
 
@@ -168,9 +169,10 @@ public sealed partial class MainWindow : Window
 
     private static Type PageTypeFor(string tag) => tag switch
     {
-        "Account" => typeof(AccountPage),
-        "Logs"    => typeof(LogsPage),
-        _         => typeof(LibraryPage),
+        "CheckSpek" => typeof(CheckSpekPage),
+        "Account"   => typeof(AccountPage),
+        "Logs"      => typeof(LogsPage),
+        _           => typeof(LibraryPage),
     };
 
     private void SelectNav(string tag)
@@ -232,9 +234,10 @@ public sealed partial class MainWindow : Window
         var tag = (args.SelectedItem as NavigationViewItem)?.Tag?.ToString();
         switch (tag)
         {
-            case "Library":  NavigateSafely(typeof(LibraryPage), "Library");   break;
-            case "Account":  NavigateSafely(typeof(AccountPage), "Account");   break;
-            case "Logs":     NavigateSafely(typeof(LogsPage), "Logs");         break;
+            case "Library":   NavigateSafely(typeof(LibraryPage), "Library");     break;
+            case "CheckSpek": NavigateSafely(typeof(CheckSpekPage), "CheckSpek"); break;
+            case "Account":   NavigateSafely(typeof(AccountPage), "Account");     break;
+            case "Logs":      NavigateSafely(typeof(LogsPage), "Logs");           break;
         }
     }
 
@@ -325,9 +328,10 @@ public sealed partial class MainWindow : Window
     {
         var symbol = tag switch
         {
-            "Library" => Symbol.Library,
-            "Account" => Symbol.Contact,
-            _         => Symbol.Setting,
+            "Library"   => Symbol.Library,
+            "CheckSpek" => Symbol.Audio,
+            "Account"   => Symbol.Contact,
+            _           => Symbol.Setting,
         };
         return new NavigationViewItem { Content = content, Tag = tag, Icon = new SymbolIcon(symbol) };
     }
