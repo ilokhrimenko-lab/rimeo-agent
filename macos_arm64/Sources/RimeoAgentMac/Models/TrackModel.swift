@@ -32,6 +32,9 @@ struct Playlist: Codable, Identifiable, Equatable {
     let path: String
     let date: Double
     let smart: Bool?
+    /// Дата последнего изменения плейлиста (djmdPlaylist.updated_at). Опционально —
+    /// парсер отдаёт её только когда колонка доступна; иначе nil (клиент падает на `date`).
+    var updated: Double? = nil
     // Rekordbox play-history session. `history_id` is the stable djmdHistory.ID
     // (rename key); `name` is the display name (rename override applied). For
     // regular playlists these are nil and the client derives the name from `path`.

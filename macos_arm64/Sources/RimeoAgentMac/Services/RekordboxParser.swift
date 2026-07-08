@@ -491,6 +491,25 @@ playlists = {
     for row in playlist_rows
 }
 
+# Дата последнего изменения плейлиста (djmdPlaylist.updated_at) — для сортировки
+# «Recently changed» на клиенте. Defensive: если колонки нет в этой версии Rekordbox,
+# просто оставляем словарь пустым (клиент падает на date), библиотека не ломается.
+playlist_updated = {}
+try:
+    cur.execute(
+        """
+        SELECT ID, updated_at
+        FROM djmdPlaylist
+        WHERE rb_local_deleted = 0
+        """
+    )
+    for _row in cur.fetchall():
+        _ts = as_timestamp(_row[1], "")
+        if _ts:
+            playlist_updated[str(_row[0])] = _ts
+except Exception:
+    playlist_updated = {}
+
 def playlist_path(pid: str) -> str:
     parts = []
     seen = set()
@@ -504,6 +523,13 @@ def playlist_path(pid: str) -> str:
         current = item["parent"]
     parts.reverse()
     return " / ".join([p for p in parts if p])
+
+# id → updated_at → path → updated_at (папке с несколькими id берём максимум).
+playlist_updated_by_path = {}
+for _pid, _ts in playlist_updated.items():
+    _p = playlist_path(_pid)
+    if _p and _ts > playlist_updated_by_path.get(_p, 0):
+        playlist_updated_by_path[_p] = _ts
 
 playlist_latest = {}
 
@@ -694,7 +720,7 @@ try:
             track["histories"].append(key)
 
     history_playlists = [
-        {"path": f"hist:{hid}", "date": meta["date"], "smart": False,
+        {"path": f"hist:{hid}", "date": meta["date"], "smart": False, "updated": meta["date"],
          "history": True, "history_id": hid, "name": meta["name"]}
         for hid, meta in hist_meta.items()
     ]
@@ -702,7 +728,8 @@ except Exception:
     history_playlists = []
 
 tracks.sort(key=lambda item: item["timestamp"], reverse=True)
-playlists_list = [{"path": path, "date": playlist_latest[path], "smart": path in smart_paths} for path in playlist_latest]
+playlists_list = [{"path": path, "date": playlist_latest[path], "smart": path in smart_paths,
+                   "updated": playlist_updated_by_path.get(path, playlist_latest[path])} for path in playlist_latest]
 playlists_list.extend(history_playlists)
 
 with open(out_path, "w", encoding="utf-8") as fh:

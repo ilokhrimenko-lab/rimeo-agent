@@ -28,6 +28,11 @@ public sealed class Playlist
 {
     [JsonPropertyName("path")] public string Path { get; set; } = "";
     [JsonPropertyName("date")] public double Date { get; set; }
+    // «Recently changed» на клиенте: реальный djmdPlaylist.updated_at, если доступен;
+    // иначе не сериализуется (null) и клиент падает на Date.
+    [JsonPropertyName("updated")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? Updated { get; set; }
     // Rekordbox play-history session. Omitted (null) for regular playlists.
     [JsonPropertyName("history")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

@@ -41,7 +41,7 @@ public sealed class RekordboxParser
             {
                 return new Playlist
                 {
-                    Path = pl.Path, Date = pl.Date,
+                    Path = pl.Path, Date = pl.Date, Updated = pl.Updated,
                     History = pl.History, HistoryId = pl.HistoryId, Name = custom,
                 };
             }
@@ -215,6 +215,30 @@ public sealed class RekordboxParser
                 return string.Join(" / ", parts.Where(p => !string.Equals(p, "ROOT", StringComparison.OrdinalIgnoreCase)));
             }
 
+            // djmdPlaylist.updated_at → path (для сортировки «Recently changed» на клиенте).
+            // Defensive: если колонки нет в этой версии Rekordbox, ловим исключение и
+            // оставляем словарь пустым — библиотека продолжает парситься, клиент падает на Date.
+            var playlistUpdated = new Dictionary<string, double>();
+            try
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "SELECT ID, COALESCE(updated_at,'') FROM djmdPlaylist WHERE rb_local_deleted = 0";
+                using var rdr = cmd.ExecuteReader();
+                while (rdr.Read())
+                {
+                    var id  = rdr.GetValue(0)?.ToString() ?? "";
+                    var raw = rdr.GetValue(1)?.ToString() ?? "";
+                    if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(raw)) continue;
+                    if (!DateTime.TryParse(raw, null, System.Globalization.DateTimeStyles.RoundtripKind, out var dtU)) continue;
+                    var p = BuildPath(id);
+                    if (string.IsNullOrEmpty(p)) continue;
+                    var ts = new DateTimeOffset(dtU).ToUnixTimeMilliseconds() / 1000.0;
+                    if (!playlistUpdated.TryGetValue(p, out var prev) || ts > prev)
+                        playlistUpdated[p] = ts;
+                }
+            }
+            catch (Exception ex) { Log.Warn($"playlist updated_at skipped: {ex.Message}"); }
+
             var allPlaylists = new Dictionary<string, double>();
 
             using (var cmd = conn.CreateCommand())
@@ -294,6 +318,7 @@ public sealed class RekordboxParser
                 {
                     Path = $"hist:{kv.Key}",
                     Date = histDate.GetValueOrDefault(kv.Key, 0),
+                    Updated = histDate.GetValueOrDefault(kv.Key, 0),
                     History = true,
                     HistoryId = kv.Key,
                     Name = kv.Value,
@@ -305,7 +330,7 @@ public sealed class RekordboxParser
             }
 
             tracksDb.Sort((a, b) => b.Timestamp.CompareTo(a.Timestamp));
-            var playlists = allPlaylists.Select(kv => new Playlist { Path = kv.Key, Date = kv.Value }).ToList();
+            var playlists = allPlaylists.Select(kv => new Playlist { Path = kv.Key, Date = kv.Value, Updated = playlistUpdated.GetValueOrDefault(kv.Key, kv.Value) }).ToList();
             playlists.AddRange(historyPlaylists);
             var mtime     = GetMtime(dbPath);
             return new LibraryData { Tracks = tracksDb, Playlists = playlists, XmlDate = mtime, Source = "db" };

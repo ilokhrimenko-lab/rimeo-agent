@@ -1241,6 +1241,8 @@ final class APIRouter {
     private func encodablePlaylist(_ p: Playlist) -> [String: Any] {
         var dict: [String: Any] = [
             "path": p.path, "date": p.date, "smart": p.smart ?? false,
+            // «Recently changed» на клиенте: реальный updated_at, иначе fallback на date.
+            "updated": p.updated ?? p.date,
         ]
         if p.history == true {
             dict["history"]    = true
