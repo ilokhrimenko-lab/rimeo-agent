@@ -21,7 +21,26 @@ struct LinkDeviceView: View {
     @State private var isBusy = false
     @State private var statusMsg = ""
     @State private var infoMsg = ""
-    @FocusState private var emailFocused: Bool
+    @FocusState private var focusedField: Field?
+
+    private enum Field { case email, password }
+
+    // Password is ASCII-only: strip any non-Latin character the moment it's typed
+    // (so a wrong keyboard layout can't put a single Cyrillic char in) and flip the
+    // system layout to English so the next keypress is Latin. This is focus- and
+    // timing-independent — it runs in the field's own setter on every keystroke.
+    private var passwordInput: Binding<String> {
+        Binding(
+            get: { password },
+            set: { proposed in
+                let ascii = String(proposed.unicodeScalars.filter { $0.isASCII })
+                if ascii.unicodeScalars.count != proposed.unicodeScalars.count {
+                    KeyboardInputSource.forceEnglish()
+                }
+                password = ascii
+            }
+        )
+    }
 
     private let formWidth: CGFloat = 374
 
@@ -49,7 +68,7 @@ struct LinkDeviceView: View {
                 email = last
                 infoMsg = "Your session ended — sign in to reconnect this agent."
             }
-            emailFocused = true
+            focusedField = .email
         }
     }
 
@@ -133,7 +152,7 @@ struct LinkDeviceView: View {
                     .textFieldStyle(.plain)
                     .font(.system(size: 14))
                     .foregroundColor(C.text)
-                    .focused($emailFocused)
+                    .focused($focusedField, equals: .email)
                     .onSubmit(doSubmit)
             }
             .padding(.horizontal, 14)
@@ -168,15 +187,27 @@ struct LinkDeviceView: View {
                 Image(systemName: "lock").font(.system(size: 14)).foregroundColor(C.dim)
                 Group {
                     if showPassword {
-                        TextField(passwordPlaceholder, text: $password)
+                        TextField(passwordPlaceholder, text: passwordInput)
+                            .focused($focusedField, equals: .password)
                     } else {
-                        SecureField(passwordPlaceholder, text: $password)
+                        SecureField(passwordPlaceholder, text: passwordInput)
+                            .focused($focusedField, equals: .password)
                     }
                 }
                 .textFieldStyle(.plain)
                 .font(.system(size: 14))
                 .foregroundColor(C.text)
                 .onSubmit(doSubmit)
+                // Best-effort: flip to English the moment the password field is
+                // focused, so ideally the very first keypress is already Latin.
+                // Deferred a tick because AppKit re-applies the field's input source
+                // as it becomes first responder. The passwordInput binding above is
+                // the hard guarantee even if this misses.
+                .onChange(of: focusedField) { field in
+                    if field == .password {
+                        DispatchQueue.main.async { KeyboardInputSource.forceEnglish() }
+                    }
+                }
                 Button(action: { showPassword.toggle() }) {
                     Image(systemName: showPassword ? "eye.slash" : "eye")
                         .font(.system(size: 14)).foregroundColor(C.dim)

@@ -129,6 +129,7 @@ struct MainLayout: View {
     var tabContent: some View {
         switch appState.selectedTab {
         case 0:  LibraryTabView()
+        case 1:  CheckSpekTabView()
         case 3:  AccountTabView()
         case 4:  LogsTabView()
         default: LibraryTabView()
@@ -143,6 +144,7 @@ struct SidebarView: View {
 
     private let items: [(icon: String, label: String, idx: Int)] = [
         ("folder",    "Library",  0),
+        ("waveform",  "Check spek", 1),
         ("macbook.and.iphone", "Account", 3),
         ("gearshape", "Settings", 4),
     ]

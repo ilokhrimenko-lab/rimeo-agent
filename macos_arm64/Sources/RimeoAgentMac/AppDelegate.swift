@@ -6,7 +6,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var updateTimer: Timer?
     private var statusItem: NSStatusItem?
     private let defaultWindowSize = NSSize(width: 1180, height: 820)
-    private let minimumWindowSize = NSSize(width: 1120, height: 760)
+    private let minimumWindowSize = NSSize(width: 955, height: 760)
     private var servicesStarted = false
     private var fdaWasGranted = false
 
@@ -93,6 +93,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenuItem.submenu = appMenu
 
+        // ── File menu ─────────────────────────────────────────────────────────
+        let fileMenuItem = NSMenuItem()
+        mainMenu.addItem(fileMenuItem)
+        let fileMenu = NSMenu(title: "File")
+        let openAudio = fileMenu.addItem(withTitle: "Open Audio File…",
+                                         action: #selector(openAudioFile),
+                                         keyEquivalent: "o")
+        openAudio.target = self
+        fileMenuItem.submenu = fileMenu
+
         // ── Edit menu ─────────────────────────────────────────────────────────
         let editMenuItem = NSMenuItem()
         mainMenu.addItem(editMenuItem)
@@ -167,6 +177,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    // Hard floor on the main window size. `window.minSize`/`contentMinSize` don't
+    // reliably hold with an NSHostingController content view (the window can still be
+    // dragged down to an unusable sliver), so clamp every resize here.
+    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+        NSSize(width:  max(frameSize.width,  minimumWindowSize.width),
+               height: max(frameSize.height, minimumWindowSize.height))
+    }
+
     // Close → hide (do not quit)
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard case .clear = AppState.shared.componentGateState else {
@@ -217,6 +235,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func openFromMenu() { showWindow() }
     @objc private func quitApp()      { NSApp.terminate(nil) }
+
+    // MARK: - Open audio files (Finder "Open With", drag-onto-Dock, File menu)
+
+    // Modern multi-file entry point: Finder "Open With → Rimeo Agent", drag files
+    // onto the Dock icon, `open -a`. We analyse the first file; the Check quality
+    // window reuses across opens. The hop onto the main actor keeps the
+    // @MainActor window manager happy under the Swift 6 compiler.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        logger.info("Open file event: \(urls.map { $0.lastPathComponent }.joined(separator: ", "))")
+        guard let url = urls.first else { return }
+        Task { @MainActor in QualityWindowManager.shared.open(url: url) }
+    }
+
+    @objc private func openAudioFile() {
+        Task { @MainActor in QualityWindowManager.shared.presentOpenPanel() }
+    }
 
     // Rimeo logo for the status bar. Prefer the real bundled asset (rimeo1024.png);
     // fall back to the drawn badge only for bare swift-build runs without a bundle.
