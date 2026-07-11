@@ -39,6 +39,12 @@ enum AccessControl {
         "/api/agent_login", "/api/agent_signup",
         "/api/tunnel/start", "/api/tunnel/stop",
         "/api/report_bug",
+        // Playlist mutations (Фаза 0 — плейлисты из iOS). Unauthenticated writes
+        // would let anyone tamper with a user's library overlay. Kept as a single
+        // list; /api/playlist/recommendations stays PUBLIC (like /api/similar).
+        "/api/playlist/create", "/api/playlist/add", "/api/playlist/remove",
+        "/api/playlist/reorder", "/api/playlist/rename", "/api/playlist/delete",
+        "/api/playlist/create_folder",
     ]
 
     /// True when a request to `path` must be authorised (PSK, JWT, or trusted

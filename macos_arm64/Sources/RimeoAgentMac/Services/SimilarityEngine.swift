@@ -149,26 +149,126 @@ final class SimilarityEngine {
         }.resume()
     }
 
+    // MARK: - Playlist recommendation tuning (frozen cross-platform, finding-24)
+
+    private static let maxSeeds    = 40     // deterministic seed cap per request
+    private static let perSeedPool = 30     // candidates pulled per seed before merge
+    private static let freqBonus   = 0.75   // rank bonus per additional seed hit
+
     // MARK: - Public API
 
     func findSimilar(trackID: String, allTracks: [Track],
                      topN: Int? = nil, useKey: Bool = true) -> [SimilarResult] {
+        findSimilarCore(trackID: trackID, allTracks: allTracks,
+                        topN: topN, useKey: useKey, excludeIDs: [], cfg: config)
+    }
+
+    /// Exclude-aware variant (finding-30): candidates in `excludeIDs` are dropped
+    /// INSIDE the pool BEFORE the topN cut, so already-present playlist members
+    /// don't crowd the best matches out of the per-seed pool.
+    func findSimilar(trackID: String, allTracks: [Track],
+                     topN: Int? = nil, useKey: Bool = true,
+                     excludeIDs: Set<String>) -> [SimilarResult] {
+        findSimilarCore(trackID: trackID, allTracks: allTracks,
+                        topN: topN, useKey: useKey, excludeIDs: excludeIDs, cfg: config)
+    }
+
+    /// Spotify-style "recommended to add" for a whole playlist (spec 3.2, variant (a)
+    /// with limiters). Seed = deterministic sample of the playlist; per-seed pools are
+    /// merged by track id and re-ranked by aggregate score + hit frequency. Uses ONE
+    /// atomic config snapshot for the whole request (finding-29) and the cached parse
+    /// supplied by the caller (finding-23). Empty seed → [] with no library scan.
+    func recommendForPlaylist(trackIDs: [String], allTracks: [Track],
+                              topN: Int? = nil, useKey: Bool = true,
+                              excludeIDs: Set<String> = []) -> [SimilarResult] {
+        // Dedup seeds, preserve order (stable sampling between requests).
+        var seenSeed = Set<String>()
+        let orderedSeeds = trackIDs.filter { !$0.isEmpty && seenSeed.insert($0).inserted }
+        guard !orderedSeeds.isEmpty else { return [] }
+
+        let cfg   = config                       // atomic snapshot for the whole request
+        let limit = topN ?? cfg.result_limit
+        // Members (all of them, not just the sampled seeds) plus caller excludes are
+        // filtered out of every pool so nothing already in the playlist is recommended.
+        let exclude = Set(orderedSeeds).union(excludeIDs)
+        let seeds   = sampleSeeds(orderedSeeds, max: SimilarityEngine.maxSeeds)
+
+        struct Agg {
+            var track:       Track
+            var total:       Double
+            var hits:        Int
+            var bestScore:   MatchScore
+            var minBpmDelta: Double
+        }
+        var agg: [String: Agg] = [:]
+
+        for seedID in seeds {
+            let pool = findSimilarCore(trackID: seedID, allTracks: allTracks,
+                                       topN: SimilarityEngine.perSeedPool, useKey: useKey,
+                                       excludeIDs: exclude, cfg: cfg)
+            for r in pool {
+                let tid = r.track.id
+                if var a = agg[tid] {
+                    a.total += r.score.total
+                    a.hits  += 1
+                    if r.score.total > a.bestScore.total { a.bestScore = r.score }
+                    if r.score.bpm_delta < a.minBpmDelta { a.minBpmDelta = r.score.bpm_delta }
+                    agg[tid] = a
+                } else {
+                    agg[tid] = Agg(track: r.track, total: r.score.total, hits: 1,
+                                   bestScore: r.score, minBpmDelta: r.score.bpm_delta)
+                }
+            }
+        }
+
+        let ranked = agg.values
+            .map { a in (agg: a, rank: a.total + SimilarityEngine.freqBonus * Double(a.hits)) }
+            .sorted { l, r in
+                if l.rank != r.rank { return l.rank > r.rank }                       // rank ↓
+                if l.agg.minBpmDelta != r.agg.minBpmDelta {
+                    return l.agg.minBpmDelta < r.agg.minBpmDelta                      // bpm Δ ↑
+                }
+                return keyRank(l.agg.bestScore.key_relation)
+                     > keyRank(r.agg.bestScore.key_relation)                          // key ↓
+            }
+
+        return ranked.prefix(limit).map { SimilarResult(track: $0.agg.track, score: $0.agg.bestScore) }
+    }
+
+    /// Deterministic every-⌈n/max⌉-th sample so every cluster of a large playlist is
+    /// represented and the seed set is stable between requests (finding-29).
+    private func sampleSeeds(_ ids: [String], max: Int) -> [String] {
+        guard ids.count > max, max > 0 else { return ids }
+        let step = Int(ceil(Double(ids.count) / Double(max)))
+        var out: [String] = []
+        var i = 0
+        while i < ids.count { out.append(ids[i]); i += step }
+        return out
+    }
+
+    // Shared filter+score core. `cfg` is passed explicitly so a multi-pool request
+    // (recommendForPlaylist) uses one consistent snapshot even if the 600s refresh
+    // timer swaps the live config mid-request.
+    private func findSimilarCore(trackID: String, allTracks: [Track],
+                                 topN: Int?, useKey: Bool,
+                                 excludeIDs: Set<String>, cfg: SimilarityConfig) -> [SimilarResult] {
         guard let trackA = allTracks.first(where: { $0.id == trackID }) else { return [] }
 
         var results = [SimilarResult]()
         for trackB in allTracks {
             guard trackB.id != trackID else { continue }
+            if excludeIDs.contains(trackB.id) { continue }   // exclude BEFORE the topN cut
 
             // Hard filter 1: BPM tolerance
-            guard bpmWithinTolerance(trackA.bpm, trackB.bpm) else { continue }
+            guard bpmWithinTolerance(trackA.bpm, trackB.bpm, cfg: cfg) else { continue }
 
             // Hard filter 2: harmonic key compatibility (only when useKey)
-            let rel = keyRelation(trackA.key, trackB.key)
+            let rel = keyRelation(trackA.key, trackB.key, cfg: cfg)
             if useKey && rel == .incompatible { continue }
 
             results.append(SimilarResult(
                 track: trackB,
-                score: buildScore(trackA: trackA, trackB: trackB, rel: rel)
+                score: buildScore(trackA: trackA, trackB: trackB, rel: rel, cfg: cfg)
             ))
         }
 
@@ -178,23 +278,23 @@ final class SimilarityEngine {
             return keyRank(a.score.key_relation) > keyRank(b.score.key_relation)
         }
 
-        let limit = topN ?? config.result_limit
+        let limit = topN ?? cfg.result_limit
         return Array(results.prefix(limit))
     }
 
     // MARK: - Scoring
 
-    private func buildScore(trackA: Track, trackB: Track, rel: KeyRel) -> MatchScore {
+    private func buildScore(trackA: Track, trackB: Track, rel: KeyRel, cfg: SimilarityConfig) -> MatchScore {
         let labelMatch    = matches(trackA.label,  trackB.label)
         let genreMatch    = matches(trackA.genre,  trackB.genre)
         let artistMatch   = matches(trackA.artist, trackB.artist)
-        let durationMatch = durationWithinTolerance(trackA.duration, trackB.duration)
+        let durationMatch = durationWithinTolerance(trackA.duration, trackB.duration, cfg: cfg)
 
         var total = 0.0
-        if labelMatch    { total += config.weights.label    }
-        if genreMatch    { total += config.weights.genre    }
-        if artistMatch   { total += config.weights.artist   }
-        if durationMatch { total += config.weights.duration }
+        if labelMatch    { total += cfg.weights.label    }
+        if genreMatch    { total += cfg.weights.genre    }
+        if artistMatch   { total += cfg.weights.artist   }
+        if durationMatch { total += cfg.weights.duration }
 
         return MatchScore(
             total:          round(total * 100) / 100,
@@ -209,9 +309,9 @@ final class SimilarityEngine {
 
     // Bonus when track lengths are within duration_tolerance_pct of each other.
     // Missing duration on either side → no bonus.
-    private func durationWithinTolerance(_ a: Double?, _ b: Double?) -> Bool {
+    private func durationWithinTolerance(_ a: Double?, _ b: Double?, cfg: SimilarityConfig) -> Bool {
         guard let a = a, let b = b, a > 0, b > 0 else { return false }
-        return abs(a - b) / a <= config.duration_tolerance_pct / 100.0
+        return abs(a - b) / a <= cfg.duration_tolerance_pct / 100.0
     }
 
     private func matches(_ a: String, _ b: String) -> Bool {
@@ -223,9 +323,9 @@ final class SimilarityEngine {
     // MARK: - BPM filter
 
     // Candidate passes when |bpmB - bpmA| / bpmA <= tolerance%. Missing BPM → excluded.
-    private func bpmWithinTolerance(_ a: Double, _ b: Double) -> Bool {
+    private func bpmWithinTolerance(_ a: Double, _ b: Double, cfg: SimilarityConfig) -> Bool {
         guard a > 0, b > 0 else { return false }
-        return abs(a - b) / a <= config.bpm_tolerance_pct / 100.0
+        return abs(a - b) / a <= cfg.bpm_tolerance_pct / 100.0
     }
 
     // MARK: - Camelot key relation
@@ -248,7 +348,7 @@ final class SimilarityEngine {
         }
     }
 
-    private func keyRelation(_ keyA: String, _ keyB: String) -> KeyRel {
+    private func keyRelation(_ keyA: String, _ keyB: String, cfg: SimilarityConfig) -> KeyRel {
         guard let (numA, letA) = parseCamelot(keyA),
               let (numB, letB) = parseCamelot(keyB) else { return .unknown }
 
@@ -257,7 +357,7 @@ final class SimilarityEngine {
 
         if numA == numB && letA == letB { return .exact }
         if numA == numB && letA != letB { return .relative }
-        if letA == letB && steps <= config.key_max_steps { return .compatible }
+        if letA == letB && steps <= cfg.key_max_steps { return .compatible }
         return .incompatible
     }
 

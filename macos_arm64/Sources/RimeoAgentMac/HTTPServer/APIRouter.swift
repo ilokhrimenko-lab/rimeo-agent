@@ -86,6 +86,18 @@ final class APIRouter {
         // Play-history rename
         case ("POST", "/api/rename_history"):  return renameHistory(req)
 
+        // Playlists (Фаза 0 — плейлисты из iOS). Overlay-only CRUD: master.db is
+        // never written in v1. Mutations are auth-gated (SecurityGates); the
+        // read-only recommendations route is PUBLIC (like /api/similar).
+        case ("POST", "/api/playlist/create"):          return createPlaylist(req)
+        case ("POST", "/api/playlist/create_folder"):   return createFolder(req)
+        case ("POST", "/api/playlist/add"):             return playlistAdd(req)
+        case ("POST", "/api/playlist/remove"):          return playlistRemove(req)
+        case ("POST", "/api/playlist/reorder"):         return playlistReorder(req)
+        case ("POST", "/api/playlist/rename"):          return playlistRename(req)
+        case ("POST", "/api/playlist/delete"):          return playlistDelete(req)
+        case ("POST", "/api/playlist/recommendations"): return getPlaylistRecommendations(req)
+
         // Telegram
         case ("POST", "/api/send_tg"):     return sendTelegram(req)
 
@@ -474,10 +486,95 @@ final class APIRouter {
     private func getLibraryData(_ req: HTTPRequest) -> HTTPResponse {
         let lib  = RekordboxParser.shared.parse()
         let data = DataStore.shared.data
-        logger.info("GET /api/data -> \(lib.tracks.count) tracks, \(lib.playlists.count) playlists, source=\(lib.source ?? "unknown")")
+
+        // Merge playlist overlays (Фаза 0). tracks/playlists are mutated copies so
+        // the parser cache stays untouched. `overlayByPath` carries the overlay to
+        // encodablePlaylist for the extra keys (rimeo_id/track_ids/state/hash).
+        var tracks    = lib.tracks
+        var playlists = lib.playlists
+        var overlayByPath: [String: PlaylistOverlay] = [:]
+
+        if !data.playlists.isEmpty {
+            var trackIndex = [String: Int](minimumCapacity: tracks.count)
+            for (i, t) in tracks.enumerated() { trackIndex[t.id] = i }
+
+            // Dedup base playlists by rekordbox_id (override target) and by path.
+            var indexByRBID: [String: Int] = [:]
+            for (i, p) in playlists.enumerated() {
+                if let rb = p.rekordbox_id, !rb.isEmpty { indexByRBID[rb] = i }
+            }
+
+            // Rebuild a path's membership from an overlay's ordered, deduped ids.
+            func stripPath(_ path: String) {
+                for i in tracks.indices {
+                    tracks[i].playlist_indices.removeValue(forKey: path)
+                    if let j = tracks[i].playlists.firstIndex(of: path) {
+                        tracks[i].playlists.remove(at: j)
+                    }
+                }
+            }
+            func injectMembership(path: String, trackIDs: [String]) {
+                for (pos, tid) in trackIDs.enumerated() {
+                    guard let idx = trackIndex[tid] else { continue }
+                    tracks[idx].playlist_indices[path] = pos + 1
+                    if !tracks[idx].playlists.contains(path) {
+                        tracks[idx].playlists.append(path)
+                    }
+                }
+            }
+
+            let now = Date().timeIntervalSince1970
+            var removedRBIDs = Set<String>()
+            for ov in data.playlists {
+                if ov.deleted {
+                    // Tombstone: strip membership + drop an edited Rekordbox playlist
+                    // from the parsed list; a pure-Rimeo one is simply never emitted.
+                    if let rb = ov.rekordbox_id, !rb.isEmpty, let idx = indexByRBID[rb] {
+                        let path = playlists[idx].path
+                        if !path.isEmpty { stripPath(path) }
+                        removedRBIDs.insert(rb)
+                    }
+                    continue
+                }
+                if let rb = ov.rekordbox_id, !rb.isEmpty {
+                    // Edited Rekordbox playlist: override by id, only when dirty.
+                    guard ov.dirty else { continue }          // clean → base is source
+                    guard let idx = indexByRBID[rb] else { continue } // unknown id → skip
+                    let path = playlists[idx].path
+                    guard !path.isEmpty else { continue }
+                    stripPath(path)                            // overlay is authoritative
+                    injectMembership(path: path, trackIDs: ov.track_ids)
+                    overlayByPath[path] = ov
+                } else {
+                    // Pure-Rimeo playlist: synthetic namespaced path, never collides
+                    // with a real Rekordbox path (finding-21).
+                    let path = "rmo:\(ov.rimeo_id)"
+                    guard !ov.rimeo_id.isEmpty else { continue }
+                    injectMembership(path: path, trackIDs: ov.track_ids)
+                    overlayByPath[path] = ov
+                    playlists.append(Playlist(
+                        path: path, date: now, smart: false, updated: now,
+                        history: nil, history_id: nil, name: ov.name.isEmpty ? nil : ov.name,
+                        rekordbox_id: nil, parent: ov.parent,
+                        is_folder: ov.is_folder, is_smart: false
+                    ))
+                }
+            }
+
+            // Drop tombstoned Rekordbox playlists after the loop (indices used above
+            // stay valid; overlayByPath entries for removed paths become inert).
+            if !removedRBIDs.isEmpty {
+                playlists.removeAll { p in
+                    if let rb = p.rekordbox_id, removedRBIDs.contains(rb) { return true }
+                    return false
+                }
+            }
+        }
+
+        logger.info("GET /api/data -> \(tracks.count) tracks, \(playlists.count) playlists (\(overlayByPath.count) overlay), source=\(lib.source ?? "unknown")")
         let obj: [String: Any] = [
-            "tracks":            lib.tracks.map { encodableTrack($0) },
-            "playlists":         lib.playlists.map { encodablePlaylist($0) },
+            "tracks":            tracks.map { encodableTrack($0) },
+            "playlists":         playlists.map { encodablePlaylist($0, overlay: overlayByPath[$0.path]) },
             "notes":             data.notes,
             "global_exclusions": data.global_exclusions,
             // Return both keys during parity migration:
@@ -634,6 +731,289 @@ final class APIRouter {
         let cleaned = list.filter { $0.trimmingCharacters(in: .whitespaces).lowercased() != "all collection" }
         DataStore.shared.update { $0.global_exclusions = cleaned }
         return .json(["status": "ok"])
+    }
+
+    // MARK: - Playlists (overlay CRUD)
+
+    /// JSON string arrays are permissive: numbers are coerced to their string form
+    /// (track ids are strings in the model, but a client may send them numeric).
+    private func coerceStringArray(_ any: Any?) -> [String] {
+        if let arr = any as? [Any] {
+            return arr.compactMap { v in
+                if let s = v as? String { return s }
+                if let n = v as? NSNumber { return n.stringValue }
+                return nil
+            }
+        }
+        if let s = any as? String { return [s] }
+        if let n = any as? NSNumber { return [n.stringValue] }
+        return []
+    }
+
+    /// Dedup preserving first-seen order, dropping empties (spec: Set с сохранением порядка).
+    private func dedupOrdered(_ ids: [String]) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for id in ids where !id.isEmpty {
+            if seen.insert(id).inserted { out.append(id) }
+        }
+        return out
+    }
+
+    /// `track_id` (single) + `track_ids` (array), merged and deduped in order.
+    private func bodyTrackIDs(_ body: [String: Any]) -> [String] {
+        var ids = coerceStringArray(body["track_id"])
+        ids.append(contentsOf: coerceStringArray(body["track_ids"]))
+        return dedupOrdered(ids)
+    }
+
+    /// Addressing is strictly by id (finding-5): rimeo_id (pure-Rimeo / synthesized
+    /// override) or rekordbox_id (real playlist). Empty strings collapse to nil.
+    private func addressing(_ body: [String: Any]) -> (rimeo: String?, rekordbox: String?) {
+        let rimeo = (body["rimeo_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let rb    = coerceStringArray(body["rekordbox_id"]).first.flatMap { $0.isEmpty ? nil : $0 }
+        return (rimeo, rb)
+    }
+
+    /// Ordered base membership of a parsed playlist path, rebuilt from the tracks'
+    /// `playlist_indices`. Used to SEED an override the first time an existing
+    /// Rekordbox playlist is edited (the overlay then replaces base membership, so
+    /// starting empty would blank the playlist).
+    private func parsedMembership(path: String, tracks: [Track]) -> [String] {
+        guard !path.isEmpty else { return [] }
+        var pairs: [(String, Int)] = []
+        for t in tracks {
+            if let pos = t.playlist_indices[path] { pairs.append((t.id, pos)) }
+        }
+        pairs.sort { $0.1 < $1.1 }
+        return pairs.map { $0.0 }
+    }
+
+    /// 409 barrier for add/reorder/remove targeting a real Rekordbox playlist:
+    /// folders / smart / history are not track-editable, and a display-path
+    /// collision (same-named playlists) is refused so membership never merges
+    /// (finding-19/5). nil ⇒ ok. Pure-Rimeo overlays are checked separately.
+    private func rekordboxPlaylistBarrier(_ rb: String?, lib: LibraryData) -> HTTPResponse? {
+        guard let rb = rb, !rb.isEmpty,
+              let pl = lib.playlists.first(where: { $0.rekordbox_id == rb }) else { return nil }
+        if pl.is_folder == true || pl.is_smart == true || pl.smart == true || pl.history == true {
+            return HTTPResponse.error("not_editable", status: 409)
+        }
+        if !pl.path.isEmpty, lib.playlists.filter({ $0.path == pl.path }).count > 1 {
+            return HTTPResponse.error("ambiguous_path", status: 409)
+        }
+        return nil
+    }
+
+    /// A pure-Rimeo folder overlay can't hold tracks either.
+    private func overlayFolderBarrier(_ rimeo: String?, overlays: [PlaylistOverlay]) -> HTTPResponse? {
+        guard let r = rimeo,
+              let ov = overlays.first(where: { $0.rimeo_id == r }), ov.is_folder else { return nil }
+        return HTTPResponse.error("not_editable", status: 409)
+    }
+
+    /// Find-or-create the overlay and apply `transform` to its track ids. `seed` is
+    /// used only when CREATING an override of an existing Rekordbox playlist so the
+    /// base membership is preserved. Every mutation recomputes content_hash and
+    /// marks the overlay dirty/pending (finding-7). Runs inside DataStore.update.
+    @discardableResult
+    private func upsertOverlay(into d: inout RimoData,
+                              rimeoID: String?, rekordboxID: String?,
+                              seed: [String] = [],
+                              name: String? = nil,
+                              isFolder: Bool? = nil,
+                              parent: String? = nil,
+                              deleted: Bool = false,
+                              transform: ([String]) -> [String]) -> (hash: String, rimeoID: String, state: String) {
+        var idx: Int? = nil
+        if let r = rimeoID, !r.isEmpty { idx = d.playlists.firstIndex { $0.rimeo_id == r } }
+        if idx == nil, let rb = rekordboxID, !rb.isEmpty {
+            idx = d.playlists.firstIndex { $0.rekordbox_id == rb }
+        }
+
+        var ov: PlaylistOverlay
+        if let i = idx {
+            ov = d.playlists[i]
+            ov.track_ids = dedupOrdered(transform(ov.track_ids))
+        } else {
+            ov = PlaylistOverlay()
+            ov.rimeo_id     = (rimeoID?.isEmpty == false) ? rimeoID! : "rmo_\(UUID().uuidString.prefix(12))"
+            ov.rekordbox_id = (rekordboxID?.isEmpty == false) ? rekordboxID : nil
+            ov.track_ids    = dedupOrdered(transform(seed))
+        }
+        if let name = name { ov.name = name }
+        if let isFolder = isFolder { ov.is_folder = isFolder }
+        if let parent = parent { ov.parent = parent }
+        ov.deleted      = deleted
+        ov.dirty        = true
+        ov.state        = "pending"
+        ov.content_hash = PlaylistHash.contentHash(ov.track_ids)
+
+        if let i = idx { d.playlists[i] = ov } else { d.playlists.append(ov) }
+        return (ov.content_hash ?? "", ov.rimeo_id, ov.state)
+    }
+
+    private func jsonBody(_ req: HTTPRequest) -> [String: Any]? {
+        try? JSONSerialization.jsonObject(with: req.body) as? [String: Any]
+    }
+
+    // POST /api/playlist/create {rimeo_id,name,parent?,is_folder,track_ids[]}
+    private func createPlaylist(_ req: HTTPRequest) -> HTTPResponse {
+        guard let body = jsonBody(req) else { return .error("Bad request", status: 400) }
+        let (rimeo, rb) = addressing(body)
+        let name     = (body["name"] as? String) ?? ""
+        let parent   = (body["parent"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let isFolder = (body["is_folder"] as? Bool) ?? false
+        let incoming = isFolder ? [] : bodyTrackIDs(body)
+
+        var hash = ""; var rid = ""; var state = "pending"
+        DataStore.shared.update { d in
+            let r = upsertOverlay(into: &d, rimeoID: rimeo, rekordboxID: rb,
+                                  name: name, isFolder: isFolder, parent: parent) { $0 + incoming }
+            hash = r.hash; rid = r.rimeoID; state = r.state
+        }
+        return .json(["status": "ok", "rimeo_id": rid, "content_hash": hash, "state": state])
+    }
+
+    // POST /api/playlist/create_folder {rimeo_id,name,parent?}
+    private func createFolder(_ req: HTTPRequest) -> HTTPResponse {
+        guard let body = jsonBody(req) else { return .error("Bad request", status: 400) }
+        let (rimeo, rb) = addressing(body)
+        let name   = (body["name"] as? String) ?? ""
+        let parent = (body["parent"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        DataStore.shared.update { d in
+            upsertOverlay(into: &d, rimeoID: rimeo, rekordboxID: rb,
+                          name: name, isFolder: true, parent: parent) { _ in [] }
+        }
+        return .json(["status": "ok"])
+    }
+
+    // POST /api/playlist/add {rimeo_id?|rekordbox_id?, track_id|track_ids[]}
+    private func playlistAdd(_ req: HTTPRequest) -> HTTPResponse {
+        guard let body = jsonBody(req) else { return .error("Bad request", status: 400) }
+        let (rimeo, rb) = addressing(body)
+        guard rimeo != nil || rb != nil else { return .error("rimeo_id or rekordbox_id required", status: 400) }
+        let newIDs = bodyTrackIDs(body)
+
+        let lib = RekordboxParser.shared.parse()
+        if let barrier = overlayFolderBarrier(rimeo, overlays: DataStore.shared.data.playlists) { return barrier }
+        if let barrier = rekordboxPlaylistBarrier(rb, lib: lib) { return barrier }
+
+        let seed = seedMembership(forRekordboxID: rb, lib: lib)
+        var hash = ""; var state = "pending"
+        DataStore.shared.update { d in
+            let r = upsertOverlay(into: &d, rimeoID: rimeo, rekordboxID: rb, seed: seed) { $0 + newIDs }
+            hash = r.hash; state = r.state
+        }
+        return .json(["status": "ok", "content_hash": hash, "state": state])
+    }
+
+    // POST /api/playlist/remove {rimeo_id?|rekordbox_id?, track_id|track_ids[]}
+    private func playlistRemove(_ req: HTTPRequest) -> HTTPResponse {
+        guard let body = jsonBody(req) else { return .error("Bad request", status: 400) }
+        let (rimeo, rb) = addressing(body)
+        guard rimeo != nil || rb != nil else { return .error("rimeo_id or rekordbox_id required", status: 400) }
+        let removeIDs = Set(bodyTrackIDs(body))
+
+        let lib = RekordboxParser.shared.parse()
+        if let barrier = rekordboxPlaylistBarrier(rb, lib: lib) { return barrier }
+
+        let seed = seedMembership(forRekordboxID: rb, lib: lib)
+        var hash = ""
+        DataStore.shared.update { d in
+            let r = upsertOverlay(into: &d, rimeoID: rimeo, rekordboxID: rb, seed: seed) { cur in
+                cur.filter { !removeIDs.contains($0) }
+            }
+            hash = r.hash
+        }
+        return .json(["status": "ok", "content_hash": hash])
+    }
+
+    // POST /api/playlist/reorder {rimeo_id?|rekordbox_id?, path?, track_ids[]}
+    private func playlistReorder(_ req: HTTPRequest) -> HTTPResponse {
+        guard let body = jsonBody(req) else { return .error("Bad request", status: 400) }
+        let (rimeo, rb) = addressing(body)
+        let ordered = dedupOrdered(coerceStringArray(body["track_ids"]))
+
+        let lib = RekordboxParser.shared.parse()
+        if let barrier = rekordboxPlaylistBarrier(rb, lib: lib) { return barrier }
+
+        // Don't create an overlay blind: reorder needs an existing target unless a
+        // rimeo_id is supplied (create-if-missing only then), per contract (finding-19).
+        let overlays  = DataStore.shared.data.playlists
+        let hasOverlay = (rimeo.map { r in overlays.contains { $0.rimeo_id == r } } ?? false)
+                      || (rb.map { x in overlays.contains { $0.rekordbox_id == x } } ?? false)
+        let hasParsed  = rb.map { x in lib.playlists.contains { $0.rekordbox_id == x } } ?? false
+        if !hasOverlay && !hasParsed && (rimeo == nil) {
+            return .error("playlist_not_found", status: 409)
+        }
+
+        var hash = ""; var state = "pending"
+        DataStore.shared.update { d in
+            let r = upsertOverlay(into: &d, rimeoID: rimeo, rekordboxID: rb, seed: ordered) { _ in ordered }
+            hash = r.hash; state = r.state
+        }
+        return .json(["status": "ok", "content_hash": hash, "state": state])
+    }
+
+    // POST /api/playlist/rename {rimeo_id?|rekordbox_id?, name}
+    private func playlistRename(_ req: HTTPRequest) -> HTTPResponse {
+        guard let body = jsonBody(req) else { return .error("Bad request", status: 400) }
+        let (rimeo, rb) = addressing(body)
+        guard rimeo != nil || rb != nil else { return .error("rimeo_id or rekordbox_id required", status: 400) }
+        let name = (body["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !name.isEmpty else { return .error("name required", status: 400) }
+
+        let lib = RekordboxParser.shared.parse()
+        let seed = seedMembership(forRekordboxID: rb, lib: lib)   // preserve membership on first override
+        DataStore.shared.update { d in
+            upsertOverlay(into: &d, rimeoID: rimeo, rekordboxID: rb, seed: seed, name: name) { $0 }
+        }
+        return .json(["status": "ok"])
+    }
+
+    // POST /api/playlist/delete {rimeo_id?|rekordbox_id?} — tombstone in overlay
+    private func playlistDelete(_ req: HTTPRequest) -> HTTPResponse {
+        guard let body = jsonBody(req) else { return .error("Bad request", status: 400) }
+        let (rimeo, rb) = addressing(body)
+        guard rimeo != nil || rb != nil else { return .error("rimeo_id or rekordbox_id required", status: 400) }
+        DataStore.shared.update { d in
+            upsertOverlay(into: &d, rimeoID: rimeo, rekordboxID: rb, deleted: true) { _ in [] }
+        }
+        return .json(["status": "ok"])
+    }
+
+    // POST /api/playlist/recommendations {playlist_id?, track_ids[], limit, use_key, exclude_ids[]}
+    // PUBLIC (like /api/similar). Response mirrors /api/similar: {results:[{track,score}]}.
+    private func getPlaylistRecommendations(_ req: HTTPRequest) -> HTTPResponse {
+        guard let body = jsonBody(req) else { return .error("Bad request", status: 400) }
+        let trackIDs = dedupOrdered(coerceStringArray(body["track_ids"]))
+        guard !trackIDs.isEmpty else { return .json(["results": [Any]()]) }   // empty seed → []
+
+        let rawLimit = (body["limit"] as? NSNumber)?.intValue
+            ?? Int((body["limit"] as? String) ?? "") ?? 50
+        let limit    = min(max(1, rawLimit), 50)                          // clamp ≤ 50
+        let useKey   = (body["use_key"] as? Bool) ?? true
+        let exclude  = Set(coerceStringArray(body["exclude_ids"]))
+
+        let lib     = RekordboxParser.shared.parse()                     // reuse cached parse
+        let results = SimilarityEngine.shared.recommendForPlaylist(
+            trackIDs: trackIDs, allTracks: lib.tracks,
+            topN: limit, useKey: useKey, excludeIDs: exclude)
+
+        guard let data = try? JSONEncoder().encode(results),
+              let json = try? JSONSerialization.jsonObject(with: data) else {
+            return .error("Encode error", status: 500)
+        }
+        return .json(["results": json])
+    }
+
+    /// Ordered base membership to seed a first-time override of an existing
+    /// Rekordbox playlist; empty for pure-Rimeo targets.
+    private func seedMembership(forRekordboxID rb: String?, lib: LibraryData) -> [String] {
+        guard let rb = rb, !rb.isEmpty,
+              let pl = lib.playlists.first(where: { $0.rekordbox_id == rb }) else { return [] }
+        return parsedMembership(path: pl.path, tracks: lib.tracks)
     }
 
     // MARK: - /api/send_tg
@@ -936,6 +1316,7 @@ final class APIRouter {
             "agent_url":  localURL,
             "tunnel_url": tunnel,
             "agent_name": cfg.appName,
+            "caps":       CloudRelay.capabilities,
         ]
 
         guard let payloadData = try? JSONSerialization.data(withJSONObject: payload),
@@ -1016,6 +1397,7 @@ final class APIRouter {
             "agent_url":  localURL,
             "tunnel_url": tunnel,
             "agent_name": cfg.appName,
+            "caps":       CloudRelay.capabilities,
         ]
 
         guard let payloadData = try? JSONSerialization.data(withJSONObject: payload),
@@ -1238,16 +1620,34 @@ final class APIRouter {
         return dict
     }
 
-    private func encodablePlaylist(_ p: Playlist) -> [String: Any] {
+    private func encodablePlaylist(_ p: Playlist, overlay: PlaylistOverlay? = nil) -> [String: Any] {
         var dict: [String: Any] = [
             "path": p.path, "date": p.date, "smart": p.smart ?? false,
             // «Recently changed» на клиенте: реальный updated_at, иначе fallback на date.
             "updated": p.updated ?? p.date,
+            "is_folder": p.is_folder ?? false,
+            "is_smart":  p.is_smart ?? (p.smart ?? false),
         ]
+        if let rb = p.rekordbox_id, !rb.isEmpty { dict["rekordbox_id"] = rb }
+        if let parent = p.parent, !parent.isEmpty { dict["parent"] = parent }
+        if let name = p.name, !name.isEmpty { dict["name"] = name }
         if p.history == true {
             dict["history"]    = true
             dict["history_id"] = p.history_id ?? ""
             dict["name"]       = p.name ?? ""
+        }
+        // Overlay-backed playlist (Фаза 0): carry the id/membership/state so iOS can
+        // dedup by id, show the "not synced" badge and self-clear the overlay once
+        // the agent's content_hash matches. Overlay values win over parsed ones.
+        if let ov = overlay {
+            dict["rimeo_id"]     = ov.rimeo_id
+            dict["track_ids"]    = ov.track_ids
+            dict["state"]        = ov.state
+            dict["content_hash"] = ov.content_hash ?? PlaylistHash.contentHash(ov.track_ids)
+            dict["is_folder"]    = ov.is_folder
+            if let rb = ov.rekordbox_id, !rb.isEmpty { dict["rekordbox_id"] = rb }
+            if let parent = ov.parent, !parent.isEmpty { dict["parent"] = parent }
+            if !ov.name.isEmpty { dict["name"] = ov.name }
         }
         return dict
     }

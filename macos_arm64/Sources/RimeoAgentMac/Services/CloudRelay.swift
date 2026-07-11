@@ -6,6 +6,12 @@ final class CloudRelay {
     static let shared = CloudRelay()
     private init() {}
 
+    // Capability flags advertised to the cloud on every poll / binding so it can
+    // version-gate playlist-mobile routes (finding-12): a build without this flag
+    // gets 426 "agent update required" instead of a silent 404 that would leave
+    // the phone's overlay wedged as forever-pending. Comma-separated for growth.
+    static let capabilities = "playlists_v1"
+
     private let stateLock = NSLock()
     private var running = false
 
@@ -71,6 +77,7 @@ final class CloudRelay {
             // agent_min_build (old agents that omit this stay on quick-tunnel).
             let encodedBuild = AppConfig.shared.buildNumber.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
             pollURL += "&build=\(encodedBuild)"
+            pollURL += "&caps=\(CloudRelay.capabilities)"
             logTunnelAdvertisementIfChanged(tunnel)
 
             guard let url = URL(string: pollURL) else {
@@ -203,7 +210,7 @@ final class CloudRelay {
         let data = DataStore.shared.data
         guard !data.cloud_url.isEmpty, !data.cloud_token.isEmpty,
               let encoded = tunnelURL.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-              let url = URL(string: "\(data.cloud_url)/api/relay/poll/\(AppConfig.shared.agentID)?token=\(data.cloud_token)&tunnel=\(encoded)&build=\(AppConfig.shared.buildNumber.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")") else { return }
+              let url = URL(string: "\(data.cloud_url)/api/relay/poll/\(AppConfig.shared.agentID)?token=\(data.cloud_token)&tunnel=\(encoded)&build=\(AppConfig.shared.buildNumber.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")&caps=\(CloudRelay.capabilities)") else { return }
         var req = URLRequest(url: url)
         req.timeoutInterval = 5
         AppConfig.shared.applyCloudHeaders(to: &req)

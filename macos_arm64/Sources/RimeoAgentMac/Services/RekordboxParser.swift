@@ -728,8 +728,32 @@ except Exception:
     history_playlists = []
 
 tracks.sort(key=lambda item: item["timestamp"], reverse=True)
-playlists_list = [{"path": path, "date": playlist_latest[path], "smart": path in smart_paths,
-                   "updated": playlist_updated_by_path.get(path, playlist_latest[path])} for path in playlist_latest]
+
+# Emit EVERY djmdPlaylist node — folders (Attribute==1), empty playlists and smart
+# playlists included, not just those with tracks — so the client gets the full tree
+# and a stable rekordbox_id per node (finding-6). Same-name playlists in one folder
+# collapse to one display path; log the collision (mutations still address by
+# rekordbox_id, so membership does not merge). (finding-5)
+emitted_paths = set()
+playlists_list = []
+for _pid, _node in playlists.items():
+    _attr = _node.get("attribute", 0)
+    _path = playlist_path(_pid)
+    if not _path:
+        continue
+    if _path in emitted_paths:
+        sys.stderr.write("playlist path collision: %s\n" % _path)
+    emitted_paths.add(_path)
+    playlists_list.append({
+        "path": _path,
+        "date": playlist_latest.get(_path, 0),
+        "smart": _path in smart_paths,
+        "updated": playlist_updated_by_path.get(_path, playlist_latest.get(_path, 0)),
+        "rekordbox_id": _pid,
+        "parent": _node.get("parent") or "root",
+        "is_folder": _attr == 1,
+        "is_smart": _attr == 4,
+    })
 playlists_list.extend(history_playlists)
 
 with open(out_path, "w", encoding="utf-8") as fh:

@@ -41,6 +41,15 @@ struct Playlist: Codable, Identifiable, Equatable {
     var history:     Bool?
     var history_id:  String?
     var name:        String?
+    // Playlist identity + tree (Фаза 0 — плейлисты из iOS). The parser now emits a
+    // node for EVERY djmdPlaylist (folders, empty, smart), so overlay mutations can
+    // address a playlist strictly by `rekordbox_id` (path is display-only and can
+    // collide between same-named playlists). All optional so older helper output /
+    // disk caches that predate these keys still decode.
+    var rekordbox_id: String?   // djmdPlaylist.ID
+    var parent:       String?   // djmdPlaylist.ParentID ("root" at top level)
+    var is_folder:    Bool?     // Attribute == 1
+    var is_smart:     Bool?     // Attribute == 4
 
     static func == (lhs: Playlist, rhs: Playlist) -> Bool { lhs.path == rhs.path }
 }

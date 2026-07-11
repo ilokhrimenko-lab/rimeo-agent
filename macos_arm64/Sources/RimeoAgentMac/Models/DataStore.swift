@@ -1,4 +1,62 @@
 import Foundation
+import CryptoKit
+
+// Overlay record for a user-editable playlist (Фаза 0 — плейлисты из iOS). Lives
+// in rimo_data.json next to notes/exclusions. `master.db` is never written in v1;
+// these overlays are merged into /api/data at read time. A pure-Rimeo playlist has
+// `rekordbox_id == nil` (synthetic path `rmo:<rimeo_id>`); an edited Rekordbox
+// playlist carries the real `rekordbox_id` and `dirty == true` (overlay overrides
+// the parsed membership by id, never by path — same-named playlists collide).
+struct PlaylistOverlay: Codable {
+    var rimeo_id:         String   = ""
+    var rekordbox_id:     String?  = nil
+    var name:             String   = ""
+    var parent:           String?  = nil
+    var is_folder:        Bool     = false
+    var track_ids:        [String] = []
+    var state:            String   = "pending"
+    var dirty:            Bool     = true
+    var content_hash:     String?  = nil
+    var last_synced_hash: String?  = nil
+    // Tombstone (full-CRUD delete). A deleted overlay hides the playlist from
+    // /api/data: a pure-Rimeo one is simply not emitted; an edited Rekordbox one
+    // is removed from the parsed list (master.db is still never written in v1).
+    var deleted:          Bool     = false
+}
+
+// Resilient decode (finding-20): decode each key with `decodeIfPresent ?? default`
+// so a rimo_data.json written before a field was added never throws keyNotFound
+// (which load()'s `try?` would swallow → the whole store resets → agent unpairs).
+// In an extension so the memberwise `init()` stays synthesized for construction.
+extension PlaylistOverlay {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init()
+        rimeo_id         = try c.decodeIfPresent(String.self,   forKey: .rimeo_id)         ?? rimeo_id
+        rekordbox_id     = try c.decodeIfPresent(String.self,   forKey: .rekordbox_id)     ?? rekordbox_id
+        name             = try c.decodeIfPresent(String.self,   forKey: .name)             ?? name
+        parent           = try c.decodeIfPresent(String.self,   forKey: .parent)           ?? parent
+        is_folder        = try c.decodeIfPresent(Bool.self,     forKey: .is_folder)        ?? is_folder
+        track_ids        = try c.decodeIfPresent([String].self, forKey: .track_ids)        ?? track_ids
+        state            = try c.decodeIfPresent(String.self,   forKey: .state)            ?? state
+        dirty            = try c.decodeIfPresent(Bool.self,     forKey: .dirty)            ?? dirty
+        content_hash     = try c.decodeIfPresent(String.self,   forKey: .content_hash)     ?? content_hash
+        last_synced_hash = try c.decodeIfPresent(String.self,   forKey: .last_synced_hash) ?? last_synced_hash
+        deleted          = try c.decodeIfPresent(Bool.self,     forKey: .deleted)          ?? deleted
+    }
+}
+
+// Cross-platform playlist content hash (finding-7/25). MUST stay byte-identical to
+// the iOS / web / Windows implementations or overlays never self-clear: SHA-256,
+// lowercase hex, of the ordered `track_ids` joined by "\n". Order is significant;
+// ids are not case-normalized. Single source of truth for every mutation handler.
+enum PlaylistHash {
+    static func contentHash(_ trackIDs: [String]) -> String {
+        let joined = trackIDs.joined(separator: "\n")
+        let digest = SHA256.hash(data: Data(joined.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+}
 
 // Persistent data stored in rimo_data.json
 struct RimoData: Codable {
@@ -26,6 +84,9 @@ struct RimoData: Codable {
     // file in the background; it is applied (extract+replace+relaunch) on the next
     // launch. `staged_update_tag` non-empty = a staged build is ready to install.
     var staged_update_tag: String             = ""
+    // Overlay-only playlist edits from iOS (Фаза 0). Merged into /api/data at read
+    // time; never written back to Rekordbox's master.db in v1.
+    var playlists:         [PlaylistOverlay]   = []
 }
 
 // Resilient decoding. The synthesized `Codable.init(from:)` calls `decode` (not
@@ -54,6 +115,7 @@ extension RimoData {
         pending_update_url = try c.decodeIfPresent(String.self,           forKey: .pending_update_url) ?? pending_update_url
         pending_update_tag = try c.decodeIfPresent(String.self,           forKey: .pending_update_tag) ?? pending_update_tag
         staged_update_tag  = try c.decodeIfPresent(String.self,           forKey: .staged_update_tag) ?? staged_update_tag
+        playlists          = try c.decodeIfPresent([PlaylistOverlay].self, forKey: .playlists)        ?? playlists
     }
 }
 

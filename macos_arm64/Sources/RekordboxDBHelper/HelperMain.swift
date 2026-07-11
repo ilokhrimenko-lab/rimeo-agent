@@ -32,6 +32,12 @@ struct HelperPlaylist: Codable {
     var history: Bool? = nil
     var history_id: String? = nil
     var name: String? = nil
+    // Identity + tree (Фаза 0). Emitted for every djmdPlaylist node so the client
+    // can address playlists by rekordbox_id and render folders / empty playlists.
+    var rekordbox_id: String? = nil   // djmdPlaylist.ID
+    var parent: String? = nil         // djmdPlaylist.ParentID ("root" at top level)
+    var is_folder: Bool? = nil        // Attribute == 1
+    var is_smart: Bool? = nil         // Attribute == 4
 }
 
 struct HelperLibraryData: Codable {
@@ -610,9 +616,31 @@ func parseMasterDB(dbPath: String, mtime: Double) throws -> HelperLibraryData {
 
     tracks.sort { $0.timestamp > $1.timestamp }
 
-    let playlists = playlistLatest.keys.sorted().map {
-        HelperPlaylist(path: $0, date: playlistLatest[$0] ?? 0, smart: smartPaths.contains($0))
-    } + historyPlaylists
+    // Emit EVERY djmdPlaylist node — folders (Attribute==1), empty playlists and
+    // smart playlists included, not just those with tracks — so the client gets the
+    // full tree and a stable rekordbox_id per node (finding-6). Same-name playlists
+    // in one folder collapse to one display path; log the collision (mutations
+    // still address by rekordbox_id, so membership does not merge). (finding-5)
+    var emittedPaths = Set<String>()
+    var regularPlaylists: [HelperPlaylist] = []
+    for node in playlistsByID.values {
+        let path = playlistPath(for: node.id, playlists: playlistsByID)
+        guard !path.isEmpty else { continue }
+        if emittedPaths.contains(path) {
+            FileHandle.standardError.write(Data("rbdb-helper: playlist path collision: \(path)\n".utf8))
+        }
+        emittedPaths.insert(path)
+        regularPlaylists.append(HelperPlaylist(
+            path: path,
+            date: playlistLatest[path] ?? 0,
+            smart: smartPaths.contains(path),
+            rekordbox_id: node.id,
+            parent: node.parent.isEmpty ? "root" : node.parent,
+            is_folder: node.attribute == 1,
+            is_smart: node.attribute == 4
+        ))
+    }
+    let playlists = regularPlaylists.sorted { $0.path < $1.path } + historyPlaylists
 
     return HelperLibraryData(
         tracks: tracks,
