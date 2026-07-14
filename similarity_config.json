@@ -1,12 +1,24 @@
 {
+  "bpm_tolerance_abs": 3.0,
   "bpm_tolerance_pct": 1.6,
+  "bpm_allow_half_double": true,
   "key_max_steps": 1,
   "duration_tolerance_pct": 10.0,
   "result_limit": 50,
+  "candidate_pool": 300,
+  "max_per_artist": 2,
+  "max_per_label": 3,
+  "coplay_weight": 0.65,
+  "content_weight": 0.35,
+  "history_weight": 1.0,
+  "playlist_weight": 0.6,
+  "cold_start_backoff": 0.5,
+  "cold_start_quota_per_10": 3,
   "weights": {
     "label": 2.0,
     "genre": 1.0,
     "artist": 0.5,
+    "key": 1.5,
     "duration": 1.5
   }
 }

@@ -416,7 +416,8 @@ cur.execute(
         COALESCE(c.ImagePath, ''),
         COALESCE(c.Commnt, ''),
         COALESCE(c.FileNameL, ''),
-        COALESCE(c.StockDate, '')
+        COALESCE(c.StockDate, ''),
+        COALESCE(c.Length, 0)
     FROM djmdContent c
     LEFT JOIN djmdArtist a ON c.ArtistID = a.ID
     LEFT JOIN djmdGenre g  ON c.GenreID = g.ID
@@ -434,6 +435,7 @@ for row in cur.fetchall():
     date_str = str(row[11] or '')[:10] if row[11] else "0000-00-00"
     timestamp = as_timestamp(row[12], row[11])
     bpm = round(float(row[7] or 0) / 100.0, 2) if row[7] else 0.0
+    length_sec = float(row[17] or 0)
     track = {
         "id": track_id,
         "artist": str(row[1] or "Unknown Artist"),
@@ -443,6 +445,7 @@ for row in cur.fetchall():
         "rel_date": str(row[5] or ""),
         "key": str(row[6] or "—"),
         "bpm": bpm,
+        "duration": length_sec if length_sec > 0 else None,
         "bitrate": int(row[8] or 0),
         "play_count": int(row[9] or 0),
         "location": str(row[10] or ""),

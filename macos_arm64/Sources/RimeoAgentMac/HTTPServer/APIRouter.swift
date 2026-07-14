@@ -1155,8 +1155,13 @@ final class APIRouter {
         return .json(result.body, status: result.status)
     }
 
-    // POST /api/playlist/recommendations {playlist_id?, track_ids[], limit, use_key, exclude_ids[]}
+    // POST /api/playlist/recommendations {playlist_id?, track_ids[], limit, use_key, exclude_ids[], offset?}
     // PUBLIC (like /api/similar). Response mirrors /api/similar: {results:[{track,score}]}.
+    //
+    // `offset` — страница ранжированного списка. Кнопка Refresh в iOS при неизменном
+    // составе шлёт offset += limit и получает СЛЕДУЮЩИЙ срез вместо того же самого топа;
+    // само ранжирование при этом детерминировано (рандома нет). Старый клиент поле не
+    // шлёт → offset 0 → поведение как раньше.
     private func getPlaylistRecommendations(_ req: HTTPRequest) -> HTTPResponse {
         guard let body = jsonBody(req) else { return .error("Bad request", status: 400) }
         let trackIDs = dedupOrdered(coerceStringArray(body["track_ids"]))
@@ -1167,11 +1172,14 @@ final class APIRouter {
         let limit    = min(max(1, rawLimit), 50)                          // clamp ≤ 50
         let useKey   = (body["use_key"] as? Bool) ?? true
         let exclude  = Set(coerceStringArray(body["exclude_ids"]))
+        let rawOffset = (body["offset"] as? NSNumber)?.intValue
+            ?? Int((body["offset"] as? String) ?? "") ?? 0
+        let offset    = min(max(0, rawOffset), 5000)                      // защита от мусора в теле
 
         let lib     = RekordboxParser.shared.parse()                     // reuse cached parse
         let results = SimilarityEngine.shared.recommendForPlaylist(
-            trackIDs: trackIDs, allTracks: lib.tracks,
-            topN: limit, useKey: useKey, excludeIDs: exclude)
+            trackIDs: trackIDs, library: lib,
+            topN: limit, useKey: useKey, excludeIDs: exclude, offset: offset)
 
         guard let data = try? JSONEncoder().encode(results),
               let json = try? JSONSerialization.jsonObject(with: data) else {
@@ -1388,7 +1396,7 @@ final class APIRouter {
 
         let lib     = RekordboxParser.shared.parse()
         let results = SimilarityEngine.shared.findSimilar(
-            trackID: id, allTracks: lib.tracks,
+            trackID: id, library: lib,
             topN: min(limit, 50), useKey: useKey
         )
 
