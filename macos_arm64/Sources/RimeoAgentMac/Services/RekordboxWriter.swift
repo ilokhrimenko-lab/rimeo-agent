@@ -865,8 +865,64 @@ final class RekordboxWriter {
             execDir.appendingPathComponent("rbdb-sync-helper").path,
             Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/rbdb-sync-helper").path,
         ]
-        for path in candidates where fm.isExecutableFile(atPath: path) { return path }
+        for path in candidates where fm.isExecutableFile(atPath: path) {
+            // ⚠️ isExecutableFile проверяет только бит «исполняемый» — арку он не смотрит.
+            // Агент universal (arm64 + x86_64), а rbdb-sync-helper собирается PyInstaller'ом
+            // на arm64-раннере и выходит arm64-only. На Intel-маке файл лежит, бит стоит,
+            // и без этой проверки capability отвечала бы «синк умею», кнопка в приложении
+            // светилась бы активной, а нажатие падало бы с «Bad CPU type in executable».
+            guard canRunOnThisMachine(path) else { continue }
+            return path
+        }
         return nil
+    }
+
+    /// Есть ли в бинаре слайс под архитектуру, на которой мы СЕЙЧАС исполняемся.
+    ///
+    /// Читаем Mach-O заголовок сами, а не пытаемся запустить: PyInstaller-onefile при старте
+    /// распаковывает во временную папку ~54 МБ, и «проверка запуском» стоила бы секунд.
+    /// Проверка не хардкодит «хелпер arm64-only» — когда он станет universal, она просто
+    /// начнёт пропускать его и на Intel.
+    private static func canRunOnThisMachine(_ path: String) -> Bool {
+        #if arch(arm64)
+        let wanted: UInt32 = 0x0100_000C          // CPU_TYPE_ARM64
+        #elseif arch(x86_64)
+        let wanted: UInt32 = 0x0100_0007          // CPU_TYPE_X86_64
+        #else
+        return true                                // неизвестная арка — не мешаем
+        #endif
+
+        guard let fh = FileHandle(forReadingAtPath: path),
+              let head = try? fh.read(upToCount: 4096), head.count >= 8 else { return false }
+        try? fh.close()
+
+        func be32(_ o: Int) -> UInt32 {
+            (UInt32(head[o]) << 24) | (UInt32(head[o + 1]) << 16)
+            | (UInt32(head[o + 2]) << 8) | UInt32(head[o + 3])
+        }
+        func le32(_ o: Int) -> UInt32 {
+            (UInt32(head[o + 3]) << 24) | (UInt32(head[o + 2]) << 16)
+            | (UInt32(head[o + 1]) << 8) | UInt32(head[o])
+        }
+
+        let magic = be32(0)
+        // FAT (universal): арки перечислены в заголовке, поля всегда big-endian.
+        if magic == 0xCAFE_BABE || magic == 0xCAFE_BABF {
+            let count = Int(be32(4))
+            let entry = (magic == 0xCAFE_BABE) ? 20 : 32   // fat_arch / fat_arch_64
+            for i in 0..<count {
+                let off = 8 + i * entry
+                guard off + 4 <= head.count else { break }
+                if be32(off) == wanted { return true }
+            }
+            return false
+        }
+        // Thin Mach-O: cputype лежит сразу за magic.
+        if le32(0) == 0xFEED_FACF || le32(0) == 0xFEED_FACE {   // 64/32-bit, little-endian
+            return le32(4) == wanted
+        }
+        // Не Mach-O (скрипт с shebang и т.п.) — пусть решает ядро при запуске.
+        return true
     }
 
     // MARK: - Verify

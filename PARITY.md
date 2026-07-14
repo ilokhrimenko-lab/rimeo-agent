@@ -55,10 +55,12 @@ Windows — просто потому, что это негде было зап�
 | Не рекомендовать треки с недоступными файлами | ✅ `TrackAvailability` | ❌ | Критично: битый трек никогда не игрался ⇒ он идеальный кандидат в квоту «открытий» |
 | Конфиг из облака (`GET /api/similarity_config`) | ✅ синкает каждые 600 с | ❌ не читает вовсе | Windows-движок захардкожен и про `similarity_config.json` не знает — новые поля (`bpm_tolerance_abs`, `coplay_weight`, `content_weight`, `cold_start_backoff`, `cold_start_quota_per_10`, `max_per_artist`…) его не ломают, но и не настраивают |
 
-⚠️ **Sync на Intel-маках не работает.** Агент universal (`x86_64 arm64`), а `rbdb-sync-helper` —
-PyInstaller-onefile, собирается на arm64-раннере и выходит **arm64-only**. На Intel он просто не
-запустится. Варианты: собирать хелпер вторым джобом на `macos-13` и склеивать, либо честно
-сообщать пользователю на Intel, что синк недоступен (сейчас он получит невнятную ошибку запуска).
+⚠️ **Sync на Intel-маках недоступен.** Агент universal (`x86_64 arm64`), а `rbdb-sync-helper` —
+PyInstaller-onefile, собирается на arm64-раннере и выходит **arm64-only**. На Intel он не запустится.
+С build 254 агент это ЗНАЕТ: `bundledSyncHelperPath()` читает Mach-O заголовок и проверяет, есть ли
+слайс под текущую архитектуру. На Intel capability `playlist_sync` = false → кнопка Sync в приложении
+не появляется. До этого она светилась активной, а нажатие падало с «Bad CPU type in executable».
+Чтобы синк заработал и на Intel, хелпер надо собирать вторым джобом на `macos-13` и склеивать `lipo`.
 
 ## Диагностика
 
