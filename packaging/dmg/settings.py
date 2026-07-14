@@ -7,12 +7,22 @@
 # Координаты — центры иконок из макета «DMG — C» (артборд 660×400).
 
 import os.path
+import subprocess
 
 # dmgbuild выполняет этот файл через exec(), поэтому __file__ здесь не существует —
 # путь к папке приезжает через -D here=...
 app = defines.get("app", "dist/RimeoAgent.app")  # noqa: F821 — defines приходит от dmgbuild
 here = defines.get("here", ".")  # noqa: F821
 appname = os.path.basename(app)
+
+# ⚠️ Размер образа задаём ЯВНО, с запасом.
+# Без этого dmgbuild считает его сам и делает впритык, а копирует бандл через
+# `subprocess.call(["ditto", ...])` — БЕЗ проверки кода возврата. Если места не хватило,
+# ditto молча не докопирует последние файлы, и образ соберётся «успешно» без них.
+# Один раз это уже случилось: из бандла пропали Contents/CodeResources (тикет нотаризации)
+# и Contents/Library/LaunchAgents (автозапуск), причём подпись бандла при этом сломалась.
+_app_kb = int(subprocess.check_output(["du", "-sk", app]).split()[0])
+size = "{}M".format(_app_kb // 1024 + 128)
 
 format = "UDZO"
 compression_level = 9
