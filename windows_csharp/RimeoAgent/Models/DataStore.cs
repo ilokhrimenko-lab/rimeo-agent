@@ -25,6 +25,9 @@ public sealed class RimoData
     // file in the background; it is applied (xcopy+restart) on the next launch.
     // Non-empty = a staged build is ready to install. Mirrors macOS.
     [JsonPropertyName("staged_update_tag")] public string                     StagedUpdateTag  { get; set; } = "";
+    // Автозапуск включается автоматически ОДИН раз (первый запуск после установки).
+    // Флаг не даёт включить его снова, если пользователь снял тумблер в Settings.
+    [JsonPropertyName("autostart_configured")] public bool                    AutostartConfigured { get; set; }
 }
 
 public sealed class DataStore

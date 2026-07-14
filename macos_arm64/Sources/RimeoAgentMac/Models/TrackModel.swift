@@ -50,6 +50,11 @@ struct Playlist: Codable, Identifiable, Equatable {
     var parent:       String?   // djmdPlaylist.ParentID ("root" at top level)
     var is_folder:    Bool?     // Attribute == 1
     var is_smart:     Bool?     // Attribute == 4
+    /// djmdPlaylist.Seq — НАСТОЯЩИЙ порядок показа внутри родителя. Единое
+    /// пространство для папок и плейлистов: папка может стоять НИЖЕ плейлиста.
+    /// Без него пункт «Rekordbox order» на клиенте был пустышкой (порядок БД).
+    /// Опционально: старые кэши/схемы без Seq должны декодироваться.
+    var seq:          Int?
 
     static func == (lhs: Playlist, rhs: Playlist) -> Bool { lhs.path == rhs.path }
 }

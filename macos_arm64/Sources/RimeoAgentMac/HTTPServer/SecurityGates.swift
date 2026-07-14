@@ -45,6 +45,20 @@ enum AccessControl {
         "/api/playlist/create", "/api/playlist/add", "/api/playlist/remove",
         "/api/playlist/reorder", "/api/playlist/rename", "/api/playlist/delete",
         "/api/playlist/create_folder",
+        // Фаза 6 — the ONLY endpoint that writes the user's real Rekordbox
+        // master.db (create/rename/delete playlists, rewrite membership). Every
+        // route above it edits a Rimeo-owned overlay file we can throw away; this
+        // one mutates the irreplaceable library. Unauthenticated, anyone on the
+        // same café/hotel Wi-Fi could POST it and wipe a DJ's playlists — so it is
+        // gated exactly like the other mutations, never as a "read" (риск 14).
+        "/api/playlist/sync",
+        "/api/playlist/sync/status",
+        // Обновление агента по запросу с телефона. Неаутентифицированный POST сюда —
+        // это «любой в кафейном Wi-Fi может в любой момент перезапустить твой агент
+        // посреди сета» (и заставить его качать zip). Подпись обновления это не
+        // защищает: она гарантирует, ЧТО поставится, но не КТО это инициировал.
+        "/api/agent/update",
+        "/api/agent/update/status",
     ]
 
     /// True when a request to `path` must be authorised (PSK, JWT, or trusted

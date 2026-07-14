@@ -14,6 +14,44 @@ final class UpdateChecker {
         for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("RimeoAgent/last_update_check")
 
+    // MARK: - Кэш «последнего билда» (для capabilities в /api/data)
+
+    private let latestLock = NSLock()
+    private var _latestKnownBuild = 0
+    private var _latestKnownTag   = ""
+    private var _lastCheckAt      = Date.distantPast
+
+    /// Билд последнего релиза, который агент видел на GitHub. 0 — ещё ни разу не
+    /// спрашивали (это НЕ значит «обновлений нет»). Читается синхронно из /api/data —
+    /// поэтому только кэш, без похода в сеть.
+    var latestKnownBuild: Int {
+        latestLock.lock(); defer { latestLock.unlock() }
+        return _latestKnownBuild
+    }
+
+    var latestKnownTag: String {
+        latestLock.lock(); defer { latestLock.unlock() }
+        return _latestKnownTag
+    }
+
+    /// Билд запущенного сейчас агента (из тега релиза, вшитого в build_info.py).
+    var currentBuild: Int { parseBuild(AppConfig.shared.releaseTag) }
+
+    func buildNumber(ofTag tag: String) -> Int { parseBuild(tag) }
+
+    /// Ненавязчиво освежает кэш для capabilities: не чаще раза в 15 минут и всегда в
+    /// фоне — /api/data не имеет права ждать GitHub.
+    func refreshLatestInBackgroundIfStale() {
+        latestLock.lock()
+        let due = Date().timeIntervalSince(_lastCheckAt) > 900
+        // Слот занимаем ДО ухода в фон: иначе десяток параллельных /api/data устроит
+        // шторм запросов к GitHub API (и упрётся в rate limit).
+        if due { _lastCheckAt = Date() }
+        latestLock.unlock()
+        guard due else { return }
+        DispatchQueue.global(qos: .utility).async { _ = self.fetchLatest() }
+    }
+
     // Called automatically at startup — respects 24h cooldown
     func checkAsync(callback: @escaping (UpdateInfo?) -> Void) {
         DispatchQueue.global(qos: .utility).async {
@@ -77,13 +115,61 @@ final class UpdateChecker {
         do {
             logger.info("Applying staged update \(tag) at launch")
             DataStore.shared.update { $0.staged_update_tag = "" }
-            try applyZip(at: stagedZipURL)   // extract+replace+relaunch → exit(0)
+            try applyZip(at: stagedZipURL, tag: tag)   // extract+replace+relaunch → exit(0)
             return true
         } catch {
             logger.warning("Applying staged update failed: \(error)")
+            UpdateProgress.shared.fail(error.localizedDescription)
             try? FileManager.default.removeItem(at: stagedZipURL)
             return false
         }
+    }
+
+    // MARK: - On-demand обновление (POST /api/agent/update с телефона)
+
+    enum StartUpdateOutcome {
+        case started(tag: String, build: Int, notes: String)
+        case upToDate
+        case inProgress
+        case checkFailed      // GitHub не ответил — это НЕ «обновлений нет»
+    }
+
+    /// Ставит последний релиз ПРЯМО СЕЙЧАС, не дожидаясь часового фонового цикла.
+    /// Блокируется только на опрос GitHub (иначе нечем ответить на «а есть ли куда
+    /// обновляться»); скачивание, проверка подписи и подмена бандла уходят в фон, а
+    /// стадии телефон забирает из GET /api/agent/update/status.
+    func startUpdateNow() -> StartUpdateOutcome {
+        guard UpdateProgress.shared.tryBeginAPIUpdate() else { return .inProgress }
+
+        let found: UpdateInfo
+        switch fetchLatestResult() {
+        case .update(let info): found = info
+        case .upToDate:         UpdateProgress.shared.abortBegin(); return .upToDate
+        case .failed:           UpdateProgress.shared.abortBegin(); return .checkFailed
+        }
+
+        let build = parseBuild(found.version)
+        UpdateProgress.shared.startDownload(tag: found.version, build: build)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let tmp = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("rimeo_upd_\(UUID().uuidString)")
+                try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: tmp) }
+                let zipPath = tmp.appendingPathComponent("update.zip")
+                // Ровно те же примитивы, что и у авто-апдейта: качаем zip + .sig и
+                // отдаём в applyZip, который fail-closed проверяет подпись. Своей
+                // «облегчённой» проверки тут нет и быть не может.
+                try self.downloadZip(found, to: zipPath) { UpdateProgress.shared.setDownloadFraction($0) }
+                try self.applyZip(at: zipPath, tag: found.version)   // verify → install → restart → exit(0)
+            } catch {
+                logger.warning("On-demand update failed: \(error)")
+                UpdateProgress.shared.fail(error.localizedDescription)
+            }
+        }
+        logger.info("On-demand update started: \(found.version)")
+        return .started(tag: found.version, build: build, notes: found.notes)
     }
 
     // Download + apply immediately (manual "Update now" flow).
@@ -93,9 +179,14 @@ final class UpdateChecker {
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmp) }
         let zipPath = tmp.appendingPathComponent("update.zip")
-        try downloadZip(info, to: zipPath) { progress($0 * 0.85) }
-        progress(0.9)
-        try applyZip(at: zipPath)   // relaunches → exit(0)
+        do {
+            try downloadZip(info, to: zipPath) { progress($0 * 0.85) }
+            progress(0.9)
+            try applyZip(at: zipPath, tag: info.version)   // relaunches → exit(0)
+        } catch {
+            UpdateProgress.shared.fail(error.localizedDescription)
+            throw error
+        }
     }
 
     private func downloadZip(_ info: UpdateInfo, to dest: URL, progress: @escaping (Double) -> Void) throws {
@@ -141,7 +232,12 @@ final class UpdateChecker {
     }
 
     // Extract zip → replace running bundle (unprivileged, osascript fallback) → relaunch → exit(0).
-    private func applyZip(at zipPath: URL) throws {
+    private func applyZip(at zipPath: URL, tag: String) throws {
+        // Стадии для GET /api/agent/update/status ставятся ровно вокруг настоящих
+        // шагов: «verifying» держится, пока идут ОБЕ проверки подписи (detached ES256
+        // на архив + Developer ID на .app), и снимается только после них.
+        UpdateProgress.shared.enterVerifying(tag: tag)
+
         // 6005: verify the archive's detached ECDSA-P256/SHA-256 signature with the
         // baked update public key BEFORE extracting it. Fail-closed — a missing or
         // invalid .sig aborts the update. Identical check runs on Windows.
@@ -177,6 +273,9 @@ final class UpdateChecker {
         try UpdateSignatureVerifier.verify(appPath: newAppPath)
         logger.info("Update signature verified (Developer ID team \(UpdateSignatureVerifier.expectedTeamID))")
 
+        // Подпись проверена — только теперь трогаем установленный бандл.
+        UpdateProgress.shared.enterInstalling()
+
         // Unprivileged replace first (works when the bundle is in a user-writable
         // location → fully silent). Fall back to osascript (admin prompt) otherwise.
         let replaced = (try? replaceApp(from: newAppPath, to: currentPath)) ?? false
@@ -202,6 +301,15 @@ final class UpdateChecker {
         try? FileManager.default.removeItem(at: stagedZipURL)
         logger.info("Update installed — relaunching")
         DataStore.shared.update { $0.just_updated = true }
+
+        // Процесс сейчас умрёт (exit 0), и вместе с ним HTTP-сервер. Стадию
+        // «restarting» отдаём ДО выхода: ждём, пока телефон её реально заберёт (или
+        // 5 с таймаута) — и только потом поднимаем новый инстанс, иначе новый процесс
+        // упрётся в порт, который ещё держим мы. При staged-апдейте на старте ждать
+        // некого, и awaitRestartingDelivered возвращается мгновенно.
+        UpdateProgress.shared.enterRestarting(tag: tag, build: parseBuild(tag))
+        UpdateProgress.shared.awaitRestartingDelivered(timeout: 5)
+
         let reopen = Process()
         reopen.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         reopen.arguments = [currentPath]
@@ -241,7 +349,21 @@ final class UpdateChecker {
         return Int(s[i...]) ?? 0
     }
 
+    /// Три РАЗНЫХ исхода опроса GitHub. `failed` (сеть/парсинг) — не то же самое, что
+    /// `upToDate`: телефону, нажавшему «Обновить», нельзя врать «у вас последняя
+    /// версия», когда мы просто не дозвонились до GitHub.
+    private enum FetchResult {
+        case update(UpdateInfo)
+        case upToDate
+        case failed
+    }
+
     private func fetchLatest() -> UpdateInfo? {
+        if case .update(let info) = fetchLatestResult() { return info }
+        return nil
+    }
+
+    private func fetchLatestResult() -> FetchResult {
         let repo = AppConfig.shared.githubRepo
         // Iterate ALL releases and pick the highest BUILD NUMBER that ships a mac
         // asset. GitHub's /releases/latest is ordered by publish date and is
@@ -249,7 +371,7 @@ final class UpdateChecker {
         // win-only release made /latest carry no mac asset → no update found).
         guard repo != "your-org/rimeo",
               let url = URL(string: "https://api.github.com/repos/\(repo)/releases?per_page=50")
-        else { return nil }
+        else { return .failed }
 
         var req = URLRequest(url: url)
         req.setValue("RimeoAgentMac/\(AppConfig.shared.version)", forHTTPHeaderField: "User-Agent")
@@ -264,7 +386,7 @@ final class UpdateChecker {
 
         guard let data = payload,
               let releases = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
-        else { return nil }
+        else { return .failed }
 
         let assetName = "RimeoAgent_mac.zip"
         let currentBuild = parseBuild(AppConfig.shared.releaseTag)
@@ -284,8 +406,17 @@ final class UpdateChecker {
                               notes: (rel["body"] as? String ?? "").prefix(400).description)
         }
 
-        if let best { logger.info("Update available: build\(currentBuild) → \(best.version)") }
-        return best
+        // GitHub ответил — кэшируем «самый свежий известный билд» для capabilities.
+        // bestBuild стартует с текущего и только растёт, так что это max(current, latest).
+        latestLock.lock()
+        _latestKnownBuild = bestBuild
+        _latestKnownTag   = best?.version ?? AppConfig.shared.releaseTag
+        _lastCheckAt      = Date()
+        latestLock.unlock()
+
+        guard let best else { return .upToDate }
+        logger.info("Update available: build\(currentBuild) → \(best.version)")
+        return .update(best)
     }
 
     private func replaceApp(from src: String, to dst: String) throws -> Bool {

@@ -472,13 +472,28 @@ for row in cur.fetchall():
         "stockDate": str(row[16] or "")[:10],
     })
 
-cur.execute(
-    """
-    SELECT ID, Name, ParentID, Attribute, SmartList
-    FROM djmdPlaylist
-    WHERE rb_local_deleted = 0
-    """
-)
+# Seq — НАСТОЯЩИЙ порядок отображения внутри родителя (единое пространство для
+# папок и плейлистов: папка спокойно стоит НИЖЕ плейлиста). Раньше его не читали
+# вовсе, поэтому пункт «Rekordbox order» на клиенте был пустышкой.
+# Defensive: экзотическая схема без Seq не должна ронять всю библиотеку.
+try:
+    cur.execute(
+        """
+        SELECT ID, Name, ParentID, Attribute, SmartList, Seq
+        FROM djmdPlaylist
+        WHERE rb_local_deleted = 0
+        """
+    )
+    _has_seq = True
+except Exception:
+    cur.execute(
+        """
+        SELECT ID, Name, ParentID, Attribute, SmartList
+        FROM djmdPlaylist
+        WHERE rb_local_deleted = 0
+        """
+    )
+    _has_seq = False
 playlist_rows = cur.fetchall()
 playlists = {
     str(row[0]): {
@@ -487,6 +502,7 @@ playlists = {
         "parent": str(row[2] or "root"),
         "attribute": int(row[3] or 0),
         "smart_list": str(row[4] or ""),
+        "seq": (int(row[5]) if _has_seq and len(row) > 5 and row[5] is not None else None),
     }
     for row in playlist_rows
 }
@@ -753,6 +769,7 @@ for _pid, _node in playlists.items():
         "parent": _node.get("parent") or "root",
         "is_folder": _attr == 1,
         "is_smart": _attr == 4,
+        "seq": _node.get("seq"),
     })
 playlists_list.extend(history_playlists)
 

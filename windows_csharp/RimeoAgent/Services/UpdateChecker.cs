@@ -16,6 +16,11 @@ public sealed class UpdateChecker
 
     private readonly string _stampFile = Path.Combine(AppConfig.Shared.BaseDir, "last_update_check");
 
+    // Причина последней сорвавшейся проверки (сеть / парсинг ответа GitHub). null —
+    // проверка прошла (в т.ч. когда обновлений просто нет). Нужна, чтобы HTTP-ручка
+    // не выдавала сетевой сбой за "up to date": QueryLatest глотает исключения.
+    public string? LastCheckError { get; private set; }
+
     public void CheckAsync(Action<UpdateInfo?> callback) =>
         Task.Run(() => callback(Check()));
 
@@ -37,7 +42,7 @@ public sealed class UpdateChecker
     }
 
     // Trailing run of digits: "win-v1.0-build183" -> 183, "183" -> 183, "dev" -> 0.
-    private static int ParseBuild(string? s)
+    internal static int ParseBuild(string? s)
     {
         if (string.IsNullOrEmpty(s)) return 0;
         int i = s.Length;
@@ -53,6 +58,7 @@ public sealed class UpdateChecker
         // is unreliable when mac/win release tags interleave — it once advertised
         // an OLDER build (lower number) as "latest" and prompted a downgrade.
         var url = $"https://api.github.com/repos/{repo}/releases?per_page=50";
+        LastCheckError = null;
         try
         {
             using var http = new HttpClient();
@@ -106,7 +112,11 @@ public sealed class UpdateChecker
             Log.Info($"Update available: build{currentBuild} → build{bestBuild} ({bestTag})");
             return new UpdateInfo(bestTag, bestUrl, bestNotes);
         }
-        catch { return null; }
+        catch (Exception ex)
+        {
+            LastCheckError = ex.Message;
+            return null;
+        }
     }
 
     // ── Silent staging (hourly check downloads in background; apply on next launch) ──
@@ -157,7 +167,9 @@ public sealed class UpdateChecker
     }
 
     // Manual "Update now" flow: download + apply immediately.
-    public void DownloadAndApply(UpdateInfo info, Action<double> progress)
+    // `stage` (optional) reports the coarse phase — verifying / installing / restarting —
+    // for the HTTP status endpoint; the UI button passes only `progress`.
+    public void DownloadAndApply(UpdateInfo info, Action<double> progress, Action<string>? stage = null)
     {
         var tmp = Path.Combine(Path.GetTempPath(), $"rimeo_upd_{Guid.NewGuid():N}");
         Directory.CreateDirectory(tmp);
@@ -166,7 +178,7 @@ public sealed class UpdateChecker
             var zipPath = Path.Combine(tmp, "update.zip");
             DownloadZip(info, zipPath, p => progress(Math.Min(0.85, p * 0.85)));
             progress(0.9);
-            ApplyZip(zipPath);   // restarts → Environment.Exit(0)
+            ApplyZip(zipPath, stage);   // restarts → Environment.Exit(0)
         }
         catch
         {
@@ -220,14 +232,16 @@ public sealed class UpdateChecker
     }
 
     // Extract zip → xcopy over the install dir + restart via a detached hidden bat → exit.
-    private static void ApplyZip(string zipPath)
+    private static void ApplyZip(string zipPath, Action<string>? stage = null)
     {
         // 6005: verify the archive's detached ECDSA-P256/SHA-256 signature with the
         // baked update public key BEFORE extracting. Fail-closed — a missing or
         // invalid .sig aborts the update. Identical check runs on macOS.
+        stage?.Invoke("verifying");
         UpdateSignatureVerifier.VerifyZipSignature(zipPath, zipPath + ".sig");
         Log.Info("Update archive signature verified (detached ES256)");
 
+        stage?.Invoke("installing");
         var tmp = Path.Combine(Path.GetTempPath(), $"rimeo_apply_{Guid.NewGuid():N}");
         var extDir = Path.Combine(tmp, "ext");
         Directory.CreateDirectory(extDir);
@@ -240,13 +254,19 @@ public sealed class UpdateChecker
         var script = Path.Combine(tmp, "update.bat");
         var current = AppContext.BaseDirectory.TrimEnd('\\');
         var newDirEsc = newDir.TrimEnd('\\');
+        // Перезапуск в том же режиме: агент, поднятый автозапуском (--background),
+        // после обновления не должен вылезти окном на передний план.
+        var relaunchArgs = AgentSettings.LaunchedInBackground ? $" {AgentSettings.BackgroundFlag}" : "";
         File.WriteAllText(script, $@"@echo off
 timeout /t 2 /nobreak > nul
 xcopy /E /Y /I ""{newDirEsc}\*"" ""{current}\""
-start """" ""{Path.Combine(current, "RimeoAgent.exe")}""
+start """" ""{Path.Combine(current, "RimeoAgent.exe")}""{relaunchArgs}
 ");
         try { if (File.Exists(StagedZipPath)) File.Delete(StagedZipPath); } catch { }
         // Launch the updater hidden — no console window flashes for the user.
+        // Всё, что должно пережить обновление, надо записать ДО этого момента:
+        // сразу после Process.Start процесс умирает.
+        stage?.Invoke("restarting");
         Process.Start(new ProcessStartInfo("cmd.exe", $"/c \"{script}\"")
         {
             UseShellExecute = false,

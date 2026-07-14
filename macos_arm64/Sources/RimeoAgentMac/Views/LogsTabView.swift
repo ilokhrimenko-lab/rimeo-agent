@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 
 struct LogsTabView: View {
-    @State private var launchAtLoginEnabled = AgentSettings.shared.launchAtLoginEnabled
+    @State private var launchAtLoginEnabled = AgentSettings.shared.launchAtLoginActive
     @State private var showInDockEnabled = AgentSettings.shared.showInDockEnabled
     @State private var keepAlive247Enabled = AgentSettings.shared.keepAlive247Enabled
     @State private var settingsStatus = ""
@@ -384,7 +384,9 @@ struct LogsTabView: View {
     // MARK: - Settings actions
 
     private func reloadSettingsFromStore() {
-        launchAtLoginEnabled = AgentSettings.shared.launchAtLoginEnabled
+        // Тумблер показывает ПРАВДУ из launchd (SMAppService.status), а не желание
+        // пользователя из UserDefaults: регистрацию могли снять в System Settings.
+        launchAtLoginEnabled = AgentSettings.shared.launchAtLoginActive
         showInDockEnabled = AgentSettings.shared.showInDockEnabled
         keepAlive247Enabled = AgentSettings.shared.keepAlive247Enabled
     }
@@ -392,9 +394,14 @@ struct LogsTabView: View {
     private func applyLaunchAtLogin(_ enabled: Bool) {
         do {
             try AgentSettings.shared.setLaunchAtLogin(enabled)
-            settingsStatus = enabled ? "✓ Launch at login enabled" : "✓ Launch at login disabled"
+            launchAtLoginEnabled = AgentSettings.shared.launchAtLoginActive
+            if enabled && AgentSettings.shared.launchAtLoginNeedsApproval {
+                settingsStatus = "Allow Rimeo Agent in System Settings → General → Login Items"
+            } else {
+                settingsStatus = enabled ? "✓ Launch at login enabled" : "✓ Launch at login disabled"
+            }
         } catch {
-            launchAtLoginEnabled = AgentSettings.shared.launchAtLoginEnabled
+            launchAtLoginEnabled = AgentSettings.shared.launchAtLoginActive
             settingsStatus = "Error: \(error.localizedDescription)"
         }
     }

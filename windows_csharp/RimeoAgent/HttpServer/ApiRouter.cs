@@ -138,6 +138,8 @@ public sealed class ApiRouter
                 case ("POST", "/api/tunnel/start"):        await TunnelStart(req, resp); break;
                 case ("POST", "/api/tunnel/stop"):         await TunnelStop(req, resp); break;
                 case ("POST", "/api/report_bug"):          await ReportBug(req, resp); break;
+                case ("POST", "/api/agent/update"):        await StartAgentUpdate(req, resp); break;
+                case ("GET",  "/api/agent/update/status"): await AgentUpdateStatus(req, resp); break;
                 default:                                   await WriteJson(resp, 404, new { error = "Not found" }); break;
             }
         }
@@ -968,6 +970,92 @@ public sealed class ApiRouter
         }
         catch (Exception ex) { await WriteJson(resp, 502, new { error = ex.Message }); return; }
         await WriteJson(resp, 200, new { status = "ok" });
+    }
+
+    // ── /api/agent/update ────────────────────────────────────────────────────
+
+    /// Обновление агента по запросу с телефона. HTTP-ответ пишется ДО старта задачи:
+    /// установка завершает процесс (Environment.Exit в ApplyZip), и клиент иначе
+    /// получил бы оборванное соединение вместо 202.
+    private static async Task StartAgentUpdate(AgentRequest req, HttpListenerResponse resp)
+    {
+        var cfg = AppConfig.Shared;
+        var r   = AgentUpdateService.Shared.Start();
+
+        if (r.AlreadyRunning)
+        {
+            var running = AgentUpdateService.Shared.Status();
+            await WriteJson(resp, 200, new
+            {
+                status          = "in_progress",
+                stage           = running.Stage,
+                progress        = running.Progress,
+                current_version = cfg.DisplayVersion,
+                current_build   = cfg.BuildNumber,
+                target_version  = running.TargetVersion,
+            });
+            return;
+        }
+
+        // Проверка сорвалась (нет сети / GitHub недоступен) — это НЕ "up to date".
+        if (r.Error != null)
+        {
+            await WriteJson(resp, 502, new
+            {
+                status          = "error",
+                stage           = "error",
+                error           = r.Error,
+                current_version = cfg.DisplayVersion,
+                current_build   = cfg.BuildNumber,
+            });
+            return;
+        }
+
+        if (r.Info == null)
+        {
+            await WriteJson(resp, 200, new
+            {
+                status          = "up_to_date",
+                stage           = "idle",
+                progress        = 0.0,
+                current_version = cfg.DisplayVersion,
+                current_build   = cfg.BuildNumber,
+            });
+            return;
+        }
+
+        Log.Info($"Remote update accepted: build {cfg.BuildNumber} → {r.Info.Version}");
+        await WriteJson(resp, 202, new
+        {
+            status          = "updating",
+            stage           = "downloading",
+            progress        = 0.0,
+            current_version = cfg.DisplayVersion,
+            current_build   = cfg.BuildNumber,
+            target_version  = r.Info.Version,
+            notes           = r.Info.Notes,
+        });
+    }
+
+    /// Poll-эндпоинт для попапа в iOS. Стадии: idle / downloading / verifying /
+    /// installing / restarting / done / error. На "restarting" процесс умирает —
+    /// соединение рвётся, и клиент должен перезапрашивать статус, пока агент не
+    /// поднимется снова: тогда он ответит "done" (по маркеру на диске).
+    private static async Task AgentUpdateStatus(AgentRequest req, HttpListenerResponse resp)
+    {
+        var cfg = AppConfig.Shared;
+        var st  = AgentUpdateService.Shared.Status();
+        await WriteJson(resp, 200, new
+        {
+            stage           = st.Stage,
+            progress        = st.Progress,
+            error           = st.Error,
+            current_version = cfg.DisplayVersion,
+            current_build   = cfg.BuildNumber,
+            target_version  = st.TargetVersion,
+            platform        = "windows",
+            supported       = true,
+        });
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

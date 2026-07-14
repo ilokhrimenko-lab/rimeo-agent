@@ -35,6 +35,9 @@ public static class AccessControl
         "/api/agent_login", "/api/agent_signup",
         "/api/tunnel/start", "/api/tunnel/stop",
         "/api/report_bug",
+        // Самообновление по запросу с телефона: ставит новый бинарь и перезапускает
+        // агент — без авторизации это удалённая подмена исполняемого файла.
+        "/api/agent/update", "/api/agent/update/status",
     };
 
     public static bool RequiresAuth(string path) =>

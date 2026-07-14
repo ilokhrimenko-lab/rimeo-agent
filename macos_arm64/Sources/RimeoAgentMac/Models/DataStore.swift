@@ -58,6 +58,26 @@ enum PlaylistHash {
     }
 }
 
+// Sync signature (Фаза 6). `content_hash` covers ONLY membership (SHA-256 of the
+// ordered track_ids) — a rename, a move, a folder create or a delete leaves it
+// byte-identical, so a content_hash-based pending check would silently declare
+// those changes already-synced. The sync signature covers everything the writer
+// can push into master.db: name, parent, folder-ness, tombstone AND membership.
+// `last_synced_hash` stores the signature of the state that was actually written,
+// so `last_synced_hash != syncSignature` is exactly "there is something to sync".
+extension PlaylistOverlay {
+    var syncSignature: String {
+        let parts = [name,
+                     parent ?? "",
+                     is_folder ? "1" : "0",
+                     deleted   ? "1" : "0",
+                     track_ids.joined(separator: "\n")]
+        // \u{1F} (unit separator) can't occur in a name/path/track id → no collision
+        // between e.g. name="a", parent="b" and name="a\u{1F}b", parent="".
+        return PlaylistHash.contentHash([parts.joined(separator: "\u{1F}")])
+    }
+}
+
 // Persistent data stored in rimo_data.json
 struct RimoData: Codable {
     var notes:             [String: String]    = [:]
@@ -155,5 +175,19 @@ final class DataStore {
         var copy = data
         block(&copy)
         save(copy)
+    }
+
+    // Overlays that still differ from what was last written into master.db
+    // (Фаза 6). Single source of truth for both the Sync engine and the
+    // `pending_sync` counter in /api/data — they must never disagree, or the iOS
+    // button offers a sync that turns into a no-op (or hides one that is needed).
+    // A tombstone for a playlist that never reached the DB has nothing to delete
+    // there, so it is not pending (it is dropped from the overlay list on its own).
+    // `last_synced_hash == nil` ⇒ never synced ⇒ pending.
+    func pendingSyncOverlays() -> [PlaylistOverlay] {
+        data.playlists.filter { ov in
+            if ov.deleted && (ov.rekordbox_id ?? "").isEmpty { return false }
+            return ov.last_synced_hash != ov.syncSignature
+        }
     }
 }

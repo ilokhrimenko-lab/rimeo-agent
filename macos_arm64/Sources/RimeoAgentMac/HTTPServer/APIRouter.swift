@@ -58,7 +58,9 @@ final class APIRouter {
         // Auth gate for data-exposing (6001) and mutating/control (6004) endpoints.
         // In-process UI calls (req.trusted) bypass; every socket request is gated,
         // including a same-machine browser hitting 127.0.0.1.
-        if !req.trusted, AccessControl.requiresAuth(path: path) {
+        if req.trusted {
+            req.ctx.auth = "trusted"
+        } else if AccessControl.requiresAuth(path: path) {
             if let failure = authGate(req) { return failure }
         }
 
@@ -86,8 +88,8 @@ final class APIRouter {
         // Play-history rename
         case ("POST", "/api/rename_history"):  return renameHistory(req)
 
-        // Playlists (Фаза 0 — плейлисты из iOS). Overlay-only CRUD: master.db is
-        // never written in v1. Mutations are auth-gated (SecurityGates); the
+        // Playlists (Фаза 0 — плейлисты из iOS). Overlay-only CRUD: the routes below
+        // never touch master.db. Mutations are auth-gated (SecurityGates); the
         // read-only recommendations route is PUBLIC (like /api/similar).
         case ("POST", "/api/playlist/create"):          return createPlaylist(req)
         case ("POST", "/api/playlist/create_folder"):   return createFolder(req)
@@ -97,6 +99,11 @@ final class APIRouter {
         case ("POST", "/api/playlist/rename"):          return playlistRename(req)
         case ("POST", "/api/playlist/delete"):          return playlistDelete(req)
         case ("POST", "/api/playlist/recommendations"): return getPlaylistRecommendations(req)
+
+        // Фаза 6 — the one route that writes the overlays INTO master.db.
+        // Auth-gated in AccessControl.controlProtectedPaths (риск 14).
+        case ("POST", "/api/playlist/sync"):            return playlistSync(req)
+        case ("GET",  "/api/playlist/sync/status"):     return playlistSyncStatus(req)
 
         // Telegram
         case ("POST", "/api/send_tg"):     return sendTelegram(req)
@@ -130,6 +137,10 @@ final class APIRouter {
 
         // Diagnostics
         case ("GET", "/api/admin/diag"):     return adminDiag(req)
+
+        // Обновление агента по запросу с телефона (не дожидаясь часового авто-цикла)
+        case ("POST", "/api/agent/update"):        return agentUpdateStart(req)
+        case ("GET",  "/api/agent/update/status"): return agentUpdateStatus(req)
 
         default:
             return HTTPResponse.error("Not found", status: 404)
@@ -305,9 +316,8 @@ final class APIRouter {
         end = min(end, size - 1)
 
         let length    = end - start + 1
-        let server    = HTTPServer(port: 0)   // reuse writeAll helper
         let respStatus = hasRange ? 206 : 200
-        logger.info("Stream response: track=\(trackID), status=\(respStatus), mime=\(mime), bytes=\(start)-\(end)/\(size), length=\(length), final_path=\(finalPath)")
+        logger.debug("Stream response: track=\(trackID), status=\(respStatus), mime=\(mime), bytes=\(start)-\(end)/\(size), length=\(length), final_path=\(finalPath)")
         StreamDiag.record(trackID: trackID, path: filePath, resolvedPath: resolvedPath,
                           status: respStatus, range: rangeHeader, preload: preload, bytes: length, note: "ok")
 
@@ -322,18 +332,24 @@ final class APIRouter {
         return HTTPResponse(
             status: respStatus,
             headers: headers,
-            body: .stream { fd in
-                guard let fh = FileHandle(forReadingAtPath: finalPath) else { return }
+            body: .stream { fd -> Int in
+                guard let fh = FileHandle(forReadingAtPath: finalPath) else { return 0 }
                 defer { fh.closeFile() }
                 fh.seek(toFileOffset: UInt64(start))
                 var remaining = length
+                var written   = 0
                 while remaining > 0 {
                     let chunk = min(256 * 1024, remaining)
                     let data  = fh.readData(ofLength: chunk)
                     if data.isEmpty { break }
                     remaining -= data.count
-                    server.writeAll(fd, data)
+                    let n = socketWriteAll(fd, data)
+                    written += n
+                    // Короткая запись = клиент закрыл соединение. Досылать некому;
+                    // в access-логе это станет `bytes=X/Y abort=client`.
+                    if n < data.count { break }
                 }
+                return written
             }
         )
     }
@@ -493,6 +509,10 @@ final class APIRouter {
         var tracks    = lib.tracks
         var playlists = lib.playlists
         var overlayByPath: [String: PlaylistOverlay] = [:]
+        // Synced overlays (dirty == false): master.db is the source of their
+        // membership, so they are NOT merged — but the base playlist still has to
+        // carry their rimeo_id. See the `guard ov.dirty` branch below (риск 7).
+        var identityByPath: [String: PlaylistOverlay] = [:]
 
         if !data.playlists.isEmpty {
             var trackIndex = [String: Int](minimumCapacity: tracks.count)
@@ -538,10 +558,18 @@ final class APIRouter {
                 }
                 if let rb = ov.rekordbox_id, !rb.isEmpty {
                     // Edited Rekordbox playlist: override by id, only when dirty.
-                    guard ov.dirty else { continue }          // clean → base is source
                     guard let idx = indexByRBID[rb] else { continue } // unknown id → skip
                     let path = playlists[idx].path
                     guard !path.isEmpty else { continue }
+                    guard ov.dirty else {
+                        // Clean → base is the source of the membership (Sync wrote it
+                        // there). We still stamp rimeo_id/sync_state onto the base
+                        // playlist: without it the iOS overlay — which is keyed by
+                        // rimeo_id — never matches the real playlist and the user gets a
+                        // phantom `rmo:` twin sitting next to it (риск 7).
+                        identityByPath[path] = ov
+                        continue
+                    }
                     stripPath(path)                            // overlay is authoritative
                     injectMembership(path: path, trackIDs: ov.track_ids)
                     overlayByPath[path] = ov
@@ -571,18 +599,115 @@ final class APIRouter {
             }
         }
 
-        logger.info("GET /api/data -> \(tracks.count) tracks, \(playlists.count) playlists (\(overlayByPath.count) overlay), source=\(lib.source ?? "unknown")")
+        // Same predicate as RekordboxWriter's pending list — one source of truth, or
+        // the button offers a sync that no-ops (or hides one that is needed).
+        let pendingSync = DataStore.shared.pendingSyncOverlays().count
+
+        logger.info("GET /api/data -> \(tracks.count) tracks, \(playlists.count) playlists (\(overlayByPath.count) overlay), pending_sync=\(pendingSync), source=\(lib.source ?? "unknown")")
         let obj: [String: Any] = [
             "tracks":            tracks.map { encodableTrack($0) },
-            "playlists":         playlists.map { encodablePlaylist($0, overlay: overlayByPath[$0.path]) },
+            "playlists":         playlists.map {
+                encodablePlaylist($0, overlay: overlayByPath[$0.path], identity: identityByPath[$0.path])
+            },
             "notes":             data.notes,
             "global_exclusions": data.global_exclusions,
             // Return both keys during parity migration:
             // Python serves library_date, while existing Swift code used xml_date.
             "library_date":      lib.xml_date,
             "xml_date":          lib.xml_date,
+            // Фаза 6. Clients gate their Sync UI on these two.
+            "capabilities":      agentCapabilities(),
+            "pending_sync":      pendingSync,
         ]
         return .json(obj)
+    }
+
+    /// Announced in /api/data; iOS decodes it into `AgentCapabilities` (Models.swift)
+    /// and gates its playlist UI + Sync button on it. Without this block iOS falls
+    /// back to *inferring* support from the shape of the payload and pins
+    /// `syncSupported = false` — the Sync button is simply never offered.
+    ///
+    /// `playlist_sync` is a genuine capability, not a health check: it says "this
+    /// build has POST /api/playlist/sync AND is configured against a master.db it
+    /// could write". In XML-only mode there are no Rekordbox IDs and sync can never
+    /// work, so the button must not exist. Transient failures (Rekordbox open, helper
+    /// missing, DB busy) stay TRUE here on purpose — they come back from the sync
+    /// call as actionable errors ("Закройте Rekordbox и повторите"), which beats a
+    /// button that silently disappears.
+    private func agentCapabilities() -> [String: Any] {
+        let cfg = AppConfig.shared
+        let canWriteDB = cfg.dbSourceEnabled && !cfg.dbPath.isEmpty
+            && FileManager.default.fileExists(atPath: cfg.dbPath)
+        // Наличия базы МАЛО: запись делает frozen-бинарь rbdb-sync-helper, и если он
+        // не забандлен (или сборка его потеряла), Sync упадёт с 500 helper_unavailable.
+        // Без этой проверки юзер видел бы активную кнопку, жал — и получал ошибку.
+        // Capability обязана отражать РЕАЛЬНУЮ способность, а не намерение.
+        let hasHelper = RekordboxWriter.bundledSyncHelperPath() != nil
+
+        // Кэш «последнего билда» освежаем в ФОНЕ (не чаще раза в 15 мин): /api/data —
+        // горячая ручка, ждать GitHub она не имеет права. Поэтому latest_build здесь
+        // всегда из кэша.
+        let checker = UpdateChecker.shared
+        checker.refreshLatestInBackgroundIfStale()
+        let latest  = checker.latestKnownBuild
+        let current = checker.currentBuild
+
+        return [
+            "playlists":       true,
+            "playlist_sync":   canWriteDB && hasHelper,
+            "recommendations": true,
+            "platform":        "macos",
+            "agent_version":   cfg.buildNumber,
+            // Аддитивно (старый контракт не ломаем): iOS сравнивает билды и предлагает
+            // обновление через POST /api/agent/update.
+            // ⚠️ latest_build == 0 значит «агент ещё НЕ спрашивал GitHub», а НЕ
+            // «обновлений нет» — поэтому update_available в этом случае false.
+            "current_build":    current,
+            "latest_build":     latest,
+            "update_available": latest > current,
+            "self_update":      true,
+        ]
+    }
+
+    /// "synced" iff what is in master.db matches the overlay right now. Deliberately
+    /// the same comparison as DataStore.pendingSyncOverlays() (signature vs
+    /// last_synced_hash), so the per-playlist badge and the `pending_sync` count can
+    /// never contradict each other.
+    private func syncState(_ ov: PlaylistOverlay) -> String {
+        ov.last_synced_hash == ov.syncSignature ? "synced" : "pending"
+    }
+
+    // MARK: - Pending sync
+
+    /// Сколько оверлеев ещё не записано в master.db. Тот же источник, что и
+    /// `pending_sync` в /api/data (DataStore.pendingSyncOverlays) — они НЕ должны
+    /// расходиться, иначе кнопка Sync либо предлагает пустой прогон, либо прячет нужный.
+    private func pendingSyncCount() -> Int {
+        DataStore.shared.pendingSyncOverlays().count
+    }
+
+    // MARK: - LAN PSK
+
+    /// Персистентный PSK агента для LAN-авторизации. Выпускается один раз и живёт
+    /// в rimo_data.json.
+    ///
+    /// ⚠️ ГРАБЛИ: раньше секрет рождался ТОЛЬКО внутри getPairingInfo (то есть при
+    /// показе QR-кода). У всех, кто связал агент и телефон по email/паролю, а не
+    /// сканом QR, `lan_secret` оставался пустым — и весь LAN-путь был мёртв:
+    /// SecurityGates.decide() пропускает PSK-ветку при пустом секрете, остаётся
+    /// только JWT, которого в локальной сети никто не подставляет → 401. Телефон
+    /// молча уходил в облако и тянул музыку через Cloudflare, стоя в одной
+    /// комнате с Mac. Поэтому теперь PSK выпускается и при логине в облако.
+    static func ensureLANSecret() -> String {
+        let existing = DataStore.shared.data.lan_secret
+        if !existing.isEmpty { return existing }
+        let bytes = (0..<32).map { _ in UInt8.random(in: 0...255) }
+        let psk = Data(bytes).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        DataStore.shared.update { d in d.lan_secret = psk }
+        return psk
     }
 
     // MARK: - /api/pairing_info
@@ -591,16 +716,8 @@ final class APIRouter {
         let chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         let code  = String((0..<5).map { _ in chars.randomElement()! })
 
-        // Persistent per-device PSK (generate once, reuse across QR refreshes).
-        var psk = DataStore.shared.data.lan_secret
-        if psk.isEmpty {
-            let bytes = (0..<32).map { _ in UInt8.random(in: 0...255) }
-            psk = Data(bytes).base64EncodedString()
-                .replacingOccurrences(of: "+", with: "-")
-                .replacingOccurrences(of: "/", with: "_")
-                .replacingOccurrences(of: "=", with: "")
-        }
-        DataStore.shared.update { d in d.pairing_code = code; d.lan_secret = psk }
+        let psk = Self.ensureLANSecret()
+        DataStore.shared.update { d in d.pairing_code = code }
 
         let localIP  = AppConfig.shared.getLocalIP()
         let port     = Int(AppConfig.shared.port)
@@ -872,7 +989,8 @@ final class APIRouter {
                                   name: name, isFolder: isFolder, parent: parent) { $0 + incoming }
             hash = r.hash; rid = r.rimeoID; state = r.state
         }
-        return .json(["status": "ok", "rimeo_id": rid, "content_hash": hash, "state": state])
+        return .json(["status": "ok", "rimeo_id": rid, "content_hash": hash, "state": state,
+                      "pending_sync": pendingSyncCount()])
     }
 
     // POST /api/playlist/create_folder {rimeo_id,name,parent?}
@@ -885,7 +1003,7 @@ final class APIRouter {
             upsertOverlay(into: &d, rimeoID: rimeo, rekordboxID: rb,
                           name: name, isFolder: true, parent: parent) { _ in [] }
         }
-        return .json(["status": "ok"])
+        return .json(["status": "ok", "pending_sync": pendingSyncCount()])
     }
 
     // POST /api/playlist/add {rimeo_id?|rekordbox_id?, track_id|track_ids[]}
@@ -905,7 +1023,8 @@ final class APIRouter {
             let r = upsertOverlay(into: &d, rimeoID: rimeo, rekordboxID: rb, seed: seed) { $0 + newIDs }
             hash = r.hash; state = r.state
         }
-        return .json(["status": "ok", "content_hash": hash, "state": state])
+        return .json(["status": "ok", "content_hash": hash, "state": state,
+                      "pending_sync": pendingSyncCount()])
     }
 
     // POST /api/playlist/remove {rimeo_id?|rekordbox_id?, track_id|track_ids[]}
@@ -926,7 +1045,8 @@ final class APIRouter {
             }
             hash = r.hash
         }
-        return .json(["status": "ok", "content_hash": hash])
+        return .json(["status": "ok", "content_hash": hash,
+                      "pending_sync": pendingSyncCount()])
     }
 
     // POST /api/playlist/reorder {rimeo_id?|rekordbox_id?, path?, track_ids[]}
@@ -953,7 +1073,8 @@ final class APIRouter {
             let r = upsertOverlay(into: &d, rimeoID: rimeo, rekordboxID: rb, seed: ordered) { _ in ordered }
             hash = r.hash; state = r.state
         }
-        return .json(["status": "ok", "content_hash": hash, "state": state])
+        return .json(["status": "ok", "content_hash": hash, "state": state,
+                      "pending_sync": pendingSyncCount()])
     }
 
     // POST /api/playlist/rename {rimeo_id?|rekordbox_id?, name}
@@ -969,7 +1090,7 @@ final class APIRouter {
         DataStore.shared.update { d in
             upsertOverlay(into: &d, rimeoID: rimeo, rekordboxID: rb, seed: seed, name: name) { $0 }
         }
-        return .json(["status": "ok"])
+        return .json(["status": "ok", "pending_sync": pendingSyncCount()])
     }
 
     // POST /api/playlist/delete {rimeo_id?|rekordbox_id?} — tombstone in overlay
@@ -980,7 +1101,58 @@ final class APIRouter {
         DataStore.shared.update { d in
             upsertOverlay(into: &d, rimeoID: rimeo, rekordboxID: rb, deleted: true) { _ in [] }
         }
-        return .json(["status": "ok"])
+        return .json(["status": "ok", "pending_sync": pendingSyncCount()])
+    }
+
+    // GET /api/playlist/sync/status — честный прогресс идущего Sync.
+    //
+    // Синк — блокирующий POST на десятки секунд, поэтому стадии телефон забирает
+    // ОТДЕЛЬНЫМ опросом. Стадии реальные (checking → backup → writing → verifying),
+    // счётчик треков приходит из stdout хелпера. Декоративного прогресса тут нет:
+    // если бы агент их не слал, экран мог бы только крутить спиннер и врать.
+    private func playlistSyncStatus(_ req: HTTPRequest) -> HTTPResponse {
+        let p = RekordboxWriter.shared.progress
+        var body: [String: Any] = [
+            "active":       p.active,
+            "stage":        p.stage,
+            "stage_index":  p.stageIndex,
+            "stage_total":  p.stageTotal,
+            "tracks_done":  p.tracksDone,
+            "tracks_total": p.tracksTotal,
+            "playlist":     p.playlistName,
+        ]
+        if let e = p.error { body["error"] = e }
+        return .json(body)
+    }
+
+    // POST /api/playlist/sync {rimeo_ids?: [String]} — Фаза 6. Writes the pending
+    // overlays INTO the user's real Rekordbox master.db. Auth-gated (риск 14).
+    //
+    // Thin on purpose: every dangerous step (Rekordbox-running barrier, 3-file
+    // backup, plan, helper subprocess, USN check, verify-by-reparse, write-back)
+    // lives in RekordboxWriter, which serialises runs on its own queue. Synchronous
+    // like sendTelegram — the caller gets the real outcome, not a fire-and-forget
+    // "ok" it would have to poll.
+    //
+    //   200 {status:"ok", synced:[{rimeo_id,rekordbox_id,sync_state}], failed:[], counts:{…}}
+    //   200 {status:"ok", synced:[], nothing:true}    — nothing pending (idempotent)
+    //   409 sync_in_progress | rekordbox_running | ambiguous_path | db_unavailable
+    //   500 write_failed | helper_unavailable | backup_failed | usn_not_advanced |
+    //       write_verify_failed
+    private func playlistSync(_ req: HTTPRequest) -> HTTPResponse {
+        // Body is OPTIONAL: an empty POST means "sync everything pending" (that is
+        // what the iOS button sends). So no 400 on a missing/!dict body — only an
+        // explicit non-empty `rimeo_ids` narrows the run.
+        let requested = jsonBody(req).map { dedupOrdered(coerceStringArray($0["rimeo_ids"])) } ?? []
+        let result = RekordboxWriter.shared.sync(rimeoIDs: requested.isEmpty ? nil : requested)
+
+        if result.ok {
+            let c = result.counts
+            logger.info("POST /api/playlist/sync -> ok, synced=\(result.synced.count) nothing=\(result.nothing) created=\(c.created) updated=\(c.updated) deleted=\(c.deleted)")
+        } else {
+            logger.warning("POST /api/playlist/sync -> \(result.status) \(result.error ?? "?") \(result.detail ?? "")")
+        }
+        return .json(result.body, status: result.status)
     }
 
     // POST /api/playlist/recommendations {playlist_id?, track_ids[], limit, use_key, exclude_ids[]}
@@ -1238,7 +1410,7 @@ final class APIRouter {
             "os":            ProcessInfo.processInfo.operatingSystemVersionString,
             "agent_version": cfg.displayVersion,
             "agent_id":      cfg.agentID,
-            "log":           logger.lastLines(800),
+            "log":           logger.tail(bytes: 256 * 1024),
         ])
     }
 
@@ -1317,6 +1489,10 @@ final class APIRouter {
             "tunnel_url": tunnel,
             "agent_name": cfg.appName,
             "caps":       CloudRelay.capabilities,
+            // Облако передаст PSK телефону того же аккаунта — тот же уровень
+            // доверия, что и QR (который печатает секрет прямо на экране), но
+            // работает и при входе по email. Без этого LAN-путь не включается.
+            "lan_secret": Self.ensureLANSecret(),
         ]
 
         guard let payloadData = try? JSONSerialization.data(withJSONObject: payload),
@@ -1398,6 +1574,7 @@ final class APIRouter {
             "tunnel_url": tunnel,
             "agent_name": cfg.appName,
             "caps":       CloudRelay.capabilities,
+            "lan_secret": Self.ensureLANSecret(),
         ]
 
         guard let payloadData = try? JSONSerialization.data(withJSONObject: payload),
@@ -1574,7 +1751,12 @@ final class APIRouter {
             validate: { JWTValidator.validate(token: $0, expectedAudience: $1) }
         )
         if decision == .allow {
-            logger.info("authGate: allow path=\(req.path) via=\(provided != nil && !secret.isEmpty ? "psk_or_jwt" : "jwt")")
+            // Основание допуска пишем в контекст запроса — его подхватит одна строка
+            // [REQ] в access-логе (auth=psk / auth=jwt). Отдельную INFO-строку здесь
+            // больше не плодим: она дублировала бы [REQ] на каждый запрос.
+            let byPSK = !secret.isEmpty && provided != nil
+                && AccessControl.constantTimeEquals(provided!, secret)
+            req.ctx.auth = byPSK ? "psk" : "jwt"
             return nil
         }
 
@@ -1584,6 +1766,7 @@ final class APIRouter {
         } else {
             reason = JWTValidator.validate(token: jwtToken, expectedAudience: aud)?.rawValue ?? "unauthorized"
         }
+        req.ctx.auth = "deny:\(reason)"
         logger.warning("Auth rejected: path=\(req.path), reason=\(reason), aud=\(aud), token_present=\(jwtToken != nil), psk_present=\(provided != nil)")
         return HTTPResponse(
             status: 401,
@@ -1620,7 +1803,15 @@ final class APIRouter {
         return dict
     }
 
-    private func encodablePlaylist(_ p: Playlist, overlay: PlaylistOverlay? = nil) -> [String: Any] {
+    /// `overlay` — the overlay that OWNS this playlist's membership (pure-Rimeo, or a
+    /// dirty override of a Rekordbox one): its values win over the parsed ones.
+    /// `identity` — a already-synced overlay (Фаза 6): master.db is authoritative for
+    /// the content, so only the identity/state keys are stamped on and `track_ids`
+    /// are deliberately NOT emitted (they could be stale if the user edited the
+    /// playlist inside Rekordbox after the sync). The two are mutually exclusive.
+    private func encodablePlaylist(_ p: Playlist,
+                                   overlay: PlaylistOverlay? = nil,
+                                   identity: PlaylistOverlay? = nil) -> [String: Any] {
         var dict: [String: Any] = [
             "path": p.path, "date": p.date, "smart": p.smart ?? false,
             // «Recently changed» на клиенте: реальный updated_at, иначе fallback на date.
@@ -1631,6 +1822,10 @@ final class APIRouter {
         if let rb = p.rekordbox_id, !rb.isEmpty { dict["rekordbox_id"] = rb }
         if let parent = p.parent, !parent.isEmpty { dict["parent"] = parent }
         if let name = p.name, !name.isEmpty { dict["name"] = name }
+        // ⚠️ Этот словарь собирается ВРУЧНУЮ — новое поле модели сюда не попадёт само.
+        // Именно так `seq` (порядок Rekordbox) молча терялся, хотя и парсер, и модель
+        // его уже отдавали.
+        if let seq = p.seq { dict["seq"] = seq }
         if p.history == true {
             dict["history"]    = true
             dict["history_id"] = p.history_id ?? ""
@@ -1645,9 +1840,17 @@ final class APIRouter {
             dict["state"]        = ov.state
             dict["content_hash"] = ov.content_hash ?? PlaylistHash.contentHash(ov.track_ids)
             dict["is_folder"]    = ov.is_folder
+            // Фаза 6: "pending" = not (yet) written into master.db. Drives the
+            // "not synced" badge; `state` above is the Фаза-0 overlay lifecycle.
+            dict["sync_state"]   = syncState(ov)
             if let rb = ov.rekordbox_id, !rb.isEmpty { dict["rekordbox_id"] = rb }
             if let parent = ov.parent, !parent.isEmpty { dict["parent"] = parent }
             if !ov.name.isEmpty { dict["name"] = ov.name }
+        } else if let ov = identity {
+            // Synced: the parsed playlist IS the truth. Stamp only who it is, so the
+            // iOS overlay matches it by rimeo_id instead of drawing a phantom twin.
+            dict["rimeo_id"]   = ov.rimeo_id
+            dict["sync_state"] = syncState(ov)
         }
         return dict
     }
@@ -1704,6 +1907,78 @@ final class APIRouter {
             "stream_recent": streamEntries,
             "now": iso.string(from: Date()),
         ])
+    }
+
+    // MARK: - /api/agent/update
+
+    // POST /api/agent/update — поставить последний релиз ПРЯМО СЕЙЧАС.
+    //
+    // Отвечает сразу: скачивание, проверка подписи и подмена бандла идут в фоне
+    // (UpdateChecker.startUpdateNow), а стадии телефон забирает из
+    // GET /api/agent/update/status. Блокируемся только на опрос GitHub — без него
+    // нечем ответить на вопрос «а есть ли куда обновляться».
+    //
+    //   200 {status:"started", target, target_build, current_build, notes}
+    //   200 {status:"up_to_date", current_build, latest_build}
+    //   409 update_in_progress    — установка уже идёт
+    //   503 update_check_failed   — GitHub недоступен. Отдельный код нужен, чтобы НЕ
+    //                               соврать «у вас последняя версия» при сетевой ошибке.
+    private func agentUpdateStart(_ req: HTTPRequest) -> HTTPResponse {
+        let checker = UpdateChecker.shared
+        let current = checker.currentBuild
+        switch checker.startUpdateNow() {
+        case .started(let tag, let build, let notes):
+            logger.info("POST /api/agent/update -> starting \(tag) (build\(current) → build\(build))")
+            return .json([
+                "status":        "started",
+                "target":        tag,
+                "target_build":  build,
+                "current_build": current,
+                "notes":         notes,
+            ])
+        case .upToDate:
+            logger.info("POST /api/agent/update -> already on latest (build\(current))")
+            return .json([
+                "status":        "up_to_date",
+                "current_build": current,
+                "latest_build":  checker.latestKnownBuild,
+            ])
+        case .inProgress:
+            return .error("update_in_progress", status: 409)
+        case .checkFailed:
+            return .error("update_check_failed", status: 503)
+        }
+    }
+
+    // GET /api/agent/update/status — честные стадии обновления для прогресса в iOS:
+    // idle | downloading (progress 0…1) | verifying | installing | restarting | done | error.
+    //
+    // Стадии проставляет сам UpdateChecker вокруг РЕАЛЬНЫХ шагов (скачивание,
+    // проверка подписи, подмена бандла) — декоративного таймера тут нет: телефон
+    // показывает «Signature verified» только после того, как подпись действительно
+    // проверена.
+    //
+    // `restarting` — последняя стадия, которую этот процесс успевает отдать: applyZip
+    // сразу за ней делает open + exit(0). Отметка ниже сообщает апдейтеру, что ответ
+    // ушёл, и он может выходить. `done` придёт уже от НОВОГО процесса.
+    private func agentUpdateStatus(_ req: HTTPRequest) -> HTTPResponse {
+        let cfg     = AppConfig.shared
+        let current = UpdateChecker.shared.currentBuild
+        let s       = UpdateProgress.shared.snapshot(currentBuild: current)
+
+        if s.stage == .restarting { UpdateProgress.shared.markRestartingDelivered() }
+
+        var body: [String: Any] = [
+            "stage":         s.stage.rawValue,
+            "active":        s.isActive,
+            "progress":      s.progress,
+            "current_build": current,
+            "agent_version": cfg.buildNumber,
+        ]
+        if !s.targetTag.isEmpty { body["target"]       = s.targetTag }
+        if s.targetBuild > 0    { body["target_build"] = s.targetBuild }
+        if let e = s.error      { body["error"]        = e }
+        return .json(body)
     }
 
     private func currentTunnelInfo() -> (active: Bool, url: String, storedURL: String, cloudflaredFound: Bool) {

@@ -11,10 +11,14 @@ namespace RimeoAgent;
 public partial class App : Application
 {
     private const string SingleInstanceMutexName = "Local\\RimeoAgent.Windows.SingleInstance";
+    // Именованное событие, которым второй запуск просит уже работающий (в т.ч.
+    // запущенный автостартом и невидимый) экземпляр показать своё окно.
+    private const string ShowWindowEventName     = "Local\\RimeoAgent.Windows.ShowWindow";
 
     private MainWindow?      _window;
     private AgentHttpServer? _server;
     private Mutex?           _singleInstanceMutex;
+    private EventWaitHandle? _showWindowEvent;
     private System.Threading.Timer? _updateTimer;
     private bool            _backgroundStarted;
     private TaskbarIcon?    _trayIcon;
@@ -36,13 +40,21 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-        Log.Info($"Rimeo Agent starting — {AppConfig.Shared.DisplayVersion}");
+        // Автозапуск подставляет --background (см. AgentSettings.RunCommand): агент
+        // должен подняться в трее, без окна и без кражи фокуса при входе в систему.
+        var background = AgentSettings.IsBackgroundCommandLine(Environment.GetCommandLineArgs());
+        AgentSettings.LaunchedInBackground = background;
+
+        Log.Info($"Rimeo Agent starting — {AppConfig.Shared.DisplayVersion}{(background ? " (background)" : "")}");
         AgentLogger.Shared.LogStartupDiagnostics();
 
         _singleInstanceMutex = new Mutex(initiallyOwned: true, SingleInstanceMutexName, out var isFirstInstance);
         if (!isFirstInstance)
         {
-            Log.Warn("Another Rimeo Agent instance is already running");
+            // Раньше второй запуск просто молча умирал. С фоновым автостартом это
+            // означало бы «клик по ярлыку ничего не делает» — поэтому будим первый.
+            Log.Warn("Another Rimeo Agent instance is already running — asking it to show its window");
+            SignalRunningInstance();
             Environment.Exit(0);
             return;
         }
@@ -53,6 +65,8 @@ public partial class App : Application
         try { if (UpdateChecker.Shared.ApplyStagedUpdateIfPresent()) return; }
         catch (Exception ex) { Log.Warn($"Staged update apply failed: {ex.Message}"); }
 
+        AgentSettings.EnsureAutostartConfiguredOnce();
+
         // Bring up the window FIRST and let it become stable before touching any
         // heavy background work. Spinning up the HTTP server, the 62 MB component
         // download (Defender risk), the cloudflared subprocess and the relay
@@ -62,6 +76,19 @@ public partial class App : Application
             Log.Info("Creating main window shell");
             _window = new MainWindow();
             Log.Info("Main window shell created");
+
+            StartShowWindowListener();
+
+            if (background)
+            {
+                // Окно создано, но НЕ активировано — WinUI показывает окно только по
+                // Activate(), так что на экране ничего не появляется. Activated тут не
+                // сработает, поэтому сервисы (и трей) поднимаем сами.
+                _backgroundStarted = true;
+                _window.DispatcherQueue.TryEnqueue(StartBackgroundServices);
+                Log.Info("Rimeo Agent started in background (tray only)");
+                return;
+            }
 
             // Defer background services until the window has actually been activated
             // (first render done) so the UI thread is stable when they start.
@@ -78,6 +105,39 @@ public partial class App : Application
             Log.Error($"Main window startup failed: {ex}");
             throw;
         }
+    }
+
+    // Второй экземпляр не может показать окно первого напрямую (разные процессы) —
+    // он взводит именованное событие, которое слушает первый.
+    private static void SignalRunningInstance()
+    {
+        try
+        {
+            if (!EventWaitHandle.TryOpenExisting(ShowWindowEventName, out var ev)) return;
+            using (ev) ev.Set();
+        }
+        catch (Exception ex) { Log.Warn($"Could not signal the running instance: {ex.Message}"); }
+    }
+
+    private void StartShowWindowListener()
+    {
+        try
+        {
+            _showWindowEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowWindowEventName);
+            var queue = _window!.DispatcherQueue;
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    while (_showWindowEvent!.WaitOne())
+                        queue.TryEnqueue(ShowWindow);
+                }
+                catch (Exception ex) { Log.Warn($"Show-window listener stopped: {ex.Message}"); }
+            })
+            { IsBackground = true, Name = "RimeoShowWindowListener" };
+            thread.Start();
+        }
+        catch (Exception ex) { Log.Warn($"Show-window listener failed to start: {ex.Message}"); }
     }
 
     private void OnWindowFirstActivated(object sender, WindowActivatedEventArgs args)

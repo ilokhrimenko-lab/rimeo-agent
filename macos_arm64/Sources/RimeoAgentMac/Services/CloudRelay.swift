@@ -1,5 +1,38 @@
 import Foundation
 
+/// Секрет на время жизни процесса. Релей штампует им свои запросы к самому себе
+/// (127.0.0.1), чтобы access-лог мог отличить их от трафика cloudflared и от
+/// локального браузера — все трое приходят с одного и того же loopback-адреса.
+/// Именно поэтому ключ, а не заголовок-константа: константу подделал бы любой,
+/// кто открыл localhost:8000 в браузере, и метка транспорта в логе стала бы ложью.
+enum RelayMarker {
+    static let key = UUID().uuidString
+}
+
+/// Сводка релей-цикла раз в 5 минут вместо строки на каждый поллинг.
+///
+/// Построчный лог поллинга занимал **91% всего файла** и вытеснял из 500-строчного
+/// буфера всё полезное — глубина памяти лога падала до ~17 минут. Гасим его порогом
+/// (`debug`), но признак жизни релея терять нельзя — поэтому счётчики + периодический
+/// итог. Живёт под замком: `loop()` один, но пусть будет честно.
+final class RelayHeartbeat {
+    private let lock = NSLock()
+    var polls = 0, cmds = 0, errors = 0
+    private var windowStart = Date()
+
+    func flushIfDue(every seconds: TimeInterval = 300) {
+        lock.lock()
+        guard Date().timeIntervalSince(windowStart) >= seconds else { lock.unlock(); return }
+        let (p, c, e) = (polls, cmds, errors)
+        polls = 0; cmds = 0; errors = 0
+        windowStart = Date()
+        lock.unlock()
+        logger.info("[RELAY] heartbeat: polls=\(p) cmds=\(c) errors=\(e) window=\(Int(seconds / 60))m")
+    }
+}
+
+let beat = RelayHeartbeat()
+
 // Long-poll relay: polls cloud /api/relay/poll/<agentID>, forwards commands
 // to the local HTTP server, then posts results back to the cloud.
 final class CloudRelay {
@@ -78,6 +111,13 @@ final class CloudRelay {
             let encodedBuild = AppConfig.shared.buildNumber.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
             pollURL += "&build=\(encodedBuild)"
             pollURL += "&caps=\(CloudRelay.capabilities)"
+            // LAN-PSK по heartbeat: агент, уже связанный с облаком, повторно
+            // /api/agent/login не дёргает, поэтому линковка — не канал. Публикуем
+            // секрет здесь, и облако передаст его телефону того же аккаунта. Без
+            // этого прямой путь по локалке не включается (телефон уходит в туннель).
+            let encodedPSK = APIRouter.ensureLANSecret()
+                .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+            pollURL += "&lan_secret=\(encodedPSK)"
             logTunnelAdvertisementIfChanged(tunnel)
 
             guard let url = URL(string: pollURL) else {
@@ -86,6 +126,8 @@ final class CloudRelay {
             }
 
             logger.debug("Cloud relay poll: \(cloudURL)")
+            beat.polls += 1
+            beat.flushIfDue()
 
             var req = URLRequest(url: url)
             req.timeoutInterval = 30
@@ -195,6 +237,7 @@ final class CloudRelay {
             let method = msg["method"] as? String ?? "GET"
             let path = msg["path"] as? String ?? "/"
             logger.debug("Cloud relay cmd: req_id=\(reqID) method=\(method) path=\(path)")
+            beat.cmds += 1
 
             commandQueue.async {
                 self.handleCommand(msg, cloudURL: cloudURL)
@@ -252,7 +295,7 @@ final class CloudRelay {
         let body = bodyB64.flatMap { Data(base64Encoded: $0) }
         let rangeHeader = headers.first { $0.key.lowercased() == "range" }?.value ?? "(none)"
 
-        logger.info("Relay local request: req=\(reqID), method=\(method), path=\(path), range=\(rangeHeader), headers=\(headers.count), body_bytes=\(body?.count ?? 0)")
+        logger.debug("Relay local request: req=\(reqID), method=\(method), path=\(path), range=\(rangeHeader), headers=\(headers.count), body_bytes=\(body?.count ?? 0)")
         if path.hasPrefix("/stream"), rangeHeader == "(none)" {
             logger.warning("Relay stream request has no Range header: req=\(reqID), path=\(path). Audio may require large buffered relay response.")
         }
@@ -268,6 +311,12 @@ final class CloudRelay {
             guard lower != "host" else { return }
             req.setValue(value, forHTTPHeaderField: key)
         }
+        // Метка релея. Без неё запрос от CloudRelay неотличим в логе от cloudflared и
+        // от локального браузера — все трое приходят с 127.0.0.1. Ключ генерится на
+        // запуск процесса, поэтому подделать метку RELAY снаружи невозможно.
+        // Host релей намеренно вырезает (выше), так что опознать его по нему нельзя.
+        req.setValue(RelayMarker.key, forHTTPHeaderField: "X-Rimeo-Relay-Key")
+        req.setValue(reqID,           forHTTPHeaderField: "X-Rimeo-Req-Id")
 
         let sema = DispatchSemaphore(value: 0)
         var resultBody = Data()
@@ -302,7 +351,7 @@ final class CloudRelay {
                 "body_b64": Data(localError.localizedDescription.utf8).base64EncodedString(),
             ]
         } else {
-            logger.info("Relay local response: req=\(reqID), status=\(resultStatus), body_bytes=\(resultBody.count), elapsed=\(String(format: "%.2f", elapsed))s, path=\(path)")
+            logger.debug("Relay local response: req=\(reqID), status=\(resultStatus), body_bytes=\(resultBody.count), elapsed=\(String(format: "%.2f", elapsed))s, path=\(path)")
             result = [
                 "req_id": reqID,
                 "status": resultStatus,

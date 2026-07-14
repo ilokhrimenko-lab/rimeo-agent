@@ -38,6 +38,10 @@ struct HelperPlaylist: Codable {
     var parent: String? = nil         // djmdPlaylist.ParentID ("root" at top level)
     var is_folder: Bool? = nil        // Attribute == 1
     var is_smart: Bool? = nil         // Attribute == 4
+    /// djmdPlaylist.Seq — НАСТОЯЩИЙ порядок Rekordbox внутри родителя. Единое
+    /// пространство для папок и плейлистов (папка может стоять НИЖЕ плейлиста),
+    /// поэтому «сначала папки» — это НЕ Rekordbox-порядок.
+    var seq: Int? = nil
 }
 
 struct HelperLibraryData: Codable {
@@ -53,6 +57,8 @@ struct PlaylistNode {
     let parent: String
     let attribute: Int
     let smartList: String
+    /// djmdPlaylist.Seq — порядок показа внутри родителя.
+    let seq: Int
 }
 
 // Fields needed to evaluate Rekordbox smart-playlist conditions, kept parallel to
@@ -470,7 +476,7 @@ func parseMasterDB(dbPath: String, mtime: Double) throws -> HelperLibraryData {
 
     let playlistsStmt = try db.prepare(
         """
-        SELECT ID, Name, ParentID, COALESCE(Attribute, 0), COALESCE(SmartList, '')
+        SELECT ID, Name, ParentID, COALESCE(Attribute, 0), COALESCE(SmartList, ''), COALESCE(Seq, 0)
         FROM djmdPlaylist
         WHERE rb_local_deleted = 0
         """
@@ -491,7 +497,8 @@ func parseMasterDB(dbPath: String, mtime: Double) throws -> HelperLibraryData {
             name: columnText(playlistsStmt, 1),
             parent: columnText(playlistsStmt, 2),
             attribute: columnInt(playlistsStmt, 3),
-            smartList: columnText(playlistsStmt, 4)
+            smartList: columnText(playlistsStmt, 4),
+            seq: columnInt(playlistsStmt, 5)
         )
     }
 
@@ -637,10 +644,17 @@ func parseMasterDB(dbPath: String, mtime: Double) throws -> HelperLibraryData {
             rekordbox_id: node.id,
             parent: node.parent.isEmpty ? "root" : node.parent,
             is_folder: node.attribute == 1,
-            is_smart: node.attribute == 4
+            is_smart: node.attribute == 4,
+            seq: node.seq
         ))
     }
-    let playlists = regularPlaylists.sorted { $0.path < $1.path } + historyPlaylists
+    // ⚠️ Раньше здесь был `.sorted { $0.path < $1.path }` — алфавит по пути. Именно он
+    // (вместе с «папки вперёд» на клиенте) и выдавал себя за «Rekordbox order».
+    // Порядок Rekordbox — это Seq внутри родителя; сортируем по нему, path — лишь
+    // тайбрейк для детерминированности.
+    let playlists = regularPlaylists.sorted {
+        ($0.seq ?? 0, $0.path) < ($1.seq ?? 0, $1.path)
+    } + historyPlaylists
 
     return HelperLibraryData(
         tracks: tracks,

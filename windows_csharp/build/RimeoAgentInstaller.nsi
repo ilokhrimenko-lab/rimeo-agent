@@ -74,6 +74,11 @@ Section "Uninstall"
   RMDir /r "$INSTDIR"
   DeleteRegKey HKCU "Software\RimeoAgent"
 
+  ; Автозапуск агент включает себе сам при первом запуске (Run-ключ с --background) —
+  ; после удаления запись обязана уйти, иначе Windows будет пытаться стартовать
+  ; несуществующий exe при каждом входе.
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "RimeoAgent"
+
   ; Remove the LAN urlacl + firewall rule added on install.
   nsExec::ExecToLog 'netsh http delete urlacl url=http://+:8000/'
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Rimeo Agent (LAN)"'

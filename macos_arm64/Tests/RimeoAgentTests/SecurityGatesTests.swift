@@ -81,9 +81,32 @@ final class SecurityGatesTests: XCTestCase {
 
     func test_6004_publicHandshakeEndpoints_areNotGated() {
         for p in ["/api/pairing_info", "/api/check_pairing", "/api/status",
-                  "/api/account", "/api/similar", "/api/tunnel/status"] {
+                  "/api/account", "/api/similar", "/api/tunnel/status",
+                  "/api/playlist/recommendations"] {
             XCTAssertFalse(AccessControl.requiresAuth(path: p), "\(p) must stay public")
         }
+    }
+
+    func test_6004_playlistMutations_requireAuth() {
+        for p in ["/api/playlist/create", "/api/playlist/create_folder",
+                  "/api/playlist/add", "/api/playlist/remove",
+                  "/api/playlist/reorder", "/api/playlist/rename",
+                  "/api/playlist/delete", "/api/playlist/sync"] {
+            XCTAssertTrue(AccessControl.requiresAuth(path: p), "\(p) must be gated")
+        }
+    }
+
+    // Фаза 6, риск 14. /api/playlist/sync is the only endpoint that writes the
+    // user's real Rekordbox master.db — it can create, rename and DELETE playlists
+    // in a library that is not backed up anywhere else. Ungated, anyone on the same
+    // Wi-Fi could POST it. This assertion is the tripwire: it fails the build if the
+    // path is ever dropped from controlProtectedPaths.
+    func test_6004_playlistSync_isGated_evenWithoutCredentials() {
+        XCTAssertTrue(AccessControl.requiresAuth(path: "/api/playlist/sync"))
+        let d = AccessControl.decide(
+            lanSecret: "device-psk-abc", providedToken: nil,
+            namedHostname: "", jwtToken: nil, validate: alwaysReject)
+        XCTAssertEqual(d, .deny)
     }
 
     func test_6004_exploit_linkAccountTakeover_noCreds_isDenied() {

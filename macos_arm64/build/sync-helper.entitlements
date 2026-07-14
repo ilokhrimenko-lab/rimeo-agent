@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  rbdb-sync-helper — PyInstaller onefile: на старте он распаковывает питоновские
+	  .so во временную папку и грузит их через dlopen. Эти .so не подписаны нашим
+	  Team ID, поэтому library validation (она включается вместе с hardened runtime)
+	  убила бы процесс при первом же импорте.
+
+	  Hardened runtime при этом обязателен: без него Apple не нотаризует бандл вообще.
+	  Отсюда единственный работающий вариант — hardened runtime + отключённая
+	  library validation ровно для этого бинаря. Остальные бинари бандла
+	  (RimeoAgent, rbdb-helper) подписаны без послаблений.
+	-->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>

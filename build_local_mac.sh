@@ -107,6 +107,10 @@ swift build -c release --arch arm64 --arch x86_64 $SWIFT_DEFINES
 
 UNIVERSAL="$MAC_DIR/.build/apple/Products/Release/RimeoAgent"
 HELPER="$MAC_DIR/.build/apple/Products/Release/RekordboxDBHelper"
+# ФАЗА 6 — frozen-бинарь ЗАПИСИ в master.db (pyrekordbox внутри, ~52 МБ, PyInstaller).
+# Собирается отдельно: RimeoAgent/rbdb_sync_helper/build_helper.sh
+# Не путать с $HELPER выше — тот только ЧИТАЕТ базу.
+SYNC_HELPER="$ROOT_DIR/rbdb_sync_helper/dist/rbdb-sync-helper"
 SQLCIPHER_FRAMEWORK="$MAC_DIR/.build/artifacts/sqlcipher.swift/SQLCipher/SQLCipher.xcframework/macos-arm64_x86_64/SQLCipher.framework"
 if [ ! -f "$UNIVERSAL" ]; then
     echo "ERROR: universal binary not found at $UNIVERSAL"
@@ -130,6 +134,19 @@ cp "$UNIVERSAL" "$APP_DIR/Contents/MacOS/RimeoAgent"
 chmod +x "$APP_DIR/Contents/MacOS/RimeoAgent"
 cp "$HELPER" "$APP_DIR/Contents/MacOS/rbdb-helper"
 chmod +x "$APP_DIR/Contents/MacOS/rbdb-helper"
+# ФАЗА 6 — хелпер ЗАПИСИ. Отсутствует → агент честно отдаёт capability
+# playlist_sync=false, и кнопка Sync в iOS просто не показывается (см.
+# APIRouter.agentCapabilities + RekordboxWriter.bundledSyncHelperPath).
+# Сборка агента при этом НЕ падает: Sync — опциональная фича, а не ядро.
+if [ -f "$SYNC_HELPER" ]; then
+    cp "$SYNC_HELPER" "$APP_DIR/Contents/MacOS/rbdb-sync-helper"
+    chmod +x "$APP_DIR/Contents/MacOS/rbdb-sync-helper"
+    echo "    sync helper: $(du -h "$SYNC_HELPER" | cut -f1 | tr -d ' ') → Contents/MacOS/rbdb-sync-helper"
+else
+    echo "    WARNING: rbdb-sync-helper не найден ($SYNC_HELPER)"
+    echo "             Sync в Rekordbox будет НЕДОСТУПЕН (кнопка скрыта)."
+    echo "             Собрать: RimeoAgent/rbdb_sync_helper/build_helper.sh"
+fi
 cp -R "$SQLCIPHER_FRAMEWORK" "$APP_DIR/Contents/Frameworks/SQLCipher.framework"
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP_DIR/Contents/MacOS/rbdb-helper"
 cp "$MAC_DIR/build/Info.plist" "$APP_DIR/Contents/Info.plist"
@@ -148,6 +165,15 @@ cp "$ROOT_DIR/rimeo1024.png" "$APP_DIR/Contents/Resources/rimeo1024.png"
 # AppConfig.activateReviewMode(). Lets App Review see a working library straight
 # from the agent downloaded off rimeo.app, with no real Rekordbox install.
 cp -R "$ROOT_DIR/review_library" "$APP_DIR/Contents/Resources/review_library"
+# LaunchAgent автозапуска (SMAppService.agent(plistName:)). Кладём ДО подписи — Contents/
+# Library опечатывается вместе с бандлом. В REVIEW-сборке плист НЕ кладём: у неё другой
+# bundle id, а Label у LaunchAgent'а один на всех — два зарегистрированных job'а с одинаковым
+# Label подрались бы в launchd. Регистрация там просто откатится на старый login item.
+if [[ "$REVIEW" != "1" ]]; then
+    mkdir -p "$APP_DIR/Contents/Library/LaunchAgents"
+    cp "$MAC_DIR/build/app.rimeo.agent.autostart.plist" \
+       "$APP_DIR/Contents/Library/LaunchAgents/app.rimeo.agent.autostart.plist"
+fi
 
 echo "==> Runtime components are not bundled"
 echo "    tunnel-runtime, ffmpeg, and ffprobe are installed by Component Gate from rimeo.app"

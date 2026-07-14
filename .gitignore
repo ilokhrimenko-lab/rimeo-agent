@@ -31,3 +31,14 @@ dist/
 update_priv.pem
 *.p12
 *.pfx
+
+# Генерируется make_dmg.sh из background.png + @2x
+packaging/dmg/background.tiff
+
+# Рабочие worktrees агентов
+.claude/
+
+# rbdb-sync-helper: в git только исходники, бинарь (54 МБ) собирается в CI
+rbdb_sync_helper/.venv/
+rbdb_sync_helper/build/
+rbdb_sync_helper/dist/

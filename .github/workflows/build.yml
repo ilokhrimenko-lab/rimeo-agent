@@ -31,6 +31,30 @@ jobs:
           cp rimeo1024-bigsur.icns "$ICON_ICNS"
           echo "ICON_ICNS=$ICON_ICNS" >> "$GITHUB_ENV"
 
+      - name: Build Rekordbox sync helper (frozen)
+        run: |
+          set -euo pipefail
+          # Запись в master.db делает не Swift, а frozen-бинарь с pyrekordbox внутри:
+          # у пользователя на машине нет ни pyrekordbox, ни sqlcipher3, и поставить их
+          # мы не можем. Без этого шага в релиз уезжает агент, у которого кнопка Sync
+          # молча не работает («rbdb-sync-helper not bundled»).
+          cd rbdb_sync_helper
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet --upgrade pip
+          .venv/bin/pip install --quiet pyrekordbox==0.4.3 sqlcipher3-wheels pyinstaller
+          .venv/bin/pyinstaller \
+            --onefile --name rbdb-sync-helper --clean --noconfirm --strip --console \
+            --collect-all pyrekordbox --collect-all sqlcipher3 \
+            --hidden-import sqlalchemy --hidden-import construct \
+            --exclude-module matplotlib --exclude-module pandas --exclude-module PIL \
+            --exclude-module tkinter --exclude-module pytest \
+            rbdb_sync_helper.py
+          if [ ! -x dist/rbdb-sync-helper ]; then
+            echo "::error::rbdb-sync-helper не собрался — Sync в Rekordbox не будет работать"
+            exit 1
+          fi
+          echo "sync helper: $(du -h dist/rbdb-sync-helper | cut -f1 | tr -d ' '), archs: $(lipo -archs dist/rbdb-sync-helper)"
+
       - name: Build macOS app (Universal — arm64 + x86_64)
         run: |
           cd macos_arm64
@@ -60,6 +84,14 @@ jobs:
           chmod +x "$APP/Contents/MacOS/RimeoAgent"
           cp "$HELPER" "$APP/Contents/MacOS/rbdb-helper"
           chmod +x "$APP/Contents/MacOS/rbdb-helper"
+          # Frozen-хелпер ЗАПИСИ (не путать с rbdb-helper выше — тот только читает базу).
+          SYNC_HELPER="$GITHUB_WORKSPACE/rbdb_sync_helper/dist/rbdb-sync-helper"
+          if [ ! -x "$SYNC_HELPER" ]; then
+            echo "::error::rbdb-sync-helper не найден — Sync в Rekordbox не будет работать"
+            exit 1
+          fi
+          cp "$SYNC_HELPER" "$APP/Contents/MacOS/rbdb-sync-helper"
+          chmod +x "$APP/Contents/MacOS/rbdb-sync-helper"
           cp -R "$SQLCIPHER_FRAMEWORK" "$APP/Contents/Frameworks/SQLCipher.framework"
           install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/rbdb-helper"
           cp build/Info.plist "$APP/Contents/Info.plist"
@@ -72,6 +104,12 @@ jobs:
           # AppConfig.activateReviewMode(). Lets App Review see a working library
           # straight from the downloaded agent, with no real Rekordbox install.
           cp -R "$GITHUB_WORKSPACE/review_library" "$APP/Contents/Resources/review_library"
+          # LaunchAgent автозапуска (регистрируется через SMAppService.agent(plistName:)).
+          # Кладём ДО подписи: Contents/Library входит в опечатанный бандл, дописать плист
+          # после codesign нельзя — это сломает `codesign --verify --deep --strict`, который
+          # агент прогоняет на КАЖДОМ автообновлении (UpdateSignatureVerifier).
+          mkdir -p "$APP/Contents/Library/LaunchAgents"
+          cp build/app.rimeo.agent.autostart.plist "$APP/Contents/Library/LaunchAgents/app.rimeo.agent.autostart.plist"
 
       - name: Sign macOS app (Developer ID + hardened runtime)
         env:
@@ -117,6 +155,12 @@ jobs:
           # NB: "$ID" обязательно в кавычках — identity содержит пробелы.
           [ -d "$FW" ] && codesign --force --timestamp --options runtime --sign "$ID" "$FW/Versions/A"
           codesign --force --timestamp --options runtime --sign "$ID" "$APP/Contents/MacOS/rbdb-helper"
+          # rbdb-sync-helper — единственный бинарь с послаблением: PyInstaller onefile
+          # грузит из себя неподписанные .so, и library validation его бы убила.
+          # Подробности — в macos_arm64/build/sync-helper.entitlements.
+          codesign --force --timestamp --options runtime \
+                   --entitlements "$GITHUB_WORKSPACE/macos_arm64/build/sync-helper.entitlements" \
+                   --sign "$ID" "$APP/Contents/MacOS/rbdb-sync-helper"
           codesign --force --timestamp --options runtime --sign "$ID" "$APP/Contents/MacOS/RimeoAgent"
           codesign --force --timestamp --options runtime --sign "$ID" --identifier app.rimeo.agent "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
@@ -153,10 +197,71 @@ jobs:
           cd dist
           ditto -c -k --sequesterRsrc --keepParent RimeoAgent.app RimeoAgent_mac.zip
 
+      # DMG собирается из уже подписанного/нотаризованного/застейпленного .app —
+      # билет лежит внутри бандла и переезжает в образ вместе с ним.
+      # RimeoAgent_mac.zip при этом НЕ уходит: на его имя завязан UpdateChecker
+      # всех установленных агентов, релиз обязан содержать оба ассета.
+      - name: Build DMG
+        run: |
+          set -e
+          # dmgbuild ставим в venv: python3 на раннере Homebrew-managed (PEP 668),
+          # прямой "pip3 install" падает с externally-managed-environment.
+          VENV="$RUNNER_TEMP/dmgvenv"
+          python3 -m venv "$VENV"
+          "$VENV/bin/pip" install --quiet --upgrade pip
+          "$VENV/bin/pip" install --quiet dmgbuild
+          DMGBUILD="$VENV/bin/dmgbuild" bash "$GITHUB_WORKSPACE/packaging/dmg/make_dmg.sh" \
+            "$GITHUB_WORKSPACE/dist/RimeoAgent.app" \
+            "$GITHUB_WORKSPACE/dist/RimeoAgent.dmg"
+          if [ ! -f "$GITHUB_WORKSPACE/dist/RimeoAgent.dmg" ]; then
+            echo "::error::RimeoAgent.dmg was not produced by make_dmg.sh"
+            exit 1
+          fi
+
+      - name: Sign DMG (Developer ID)
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          set -e
+          ID="$SIGN_IDENTITY"
+          DMG="$GITHUB_WORKSPACE/dist/RimeoAgent.dmg"
+          KEYCHAIN="$RUNNER_TEMP/build.keychain-db"
+          # Кейчейн из шага подписи .app остаётся в списке поиска, но мог
+          # залочиться по таймауту — разблокируем повторно.
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # К образу hardened runtime неприменим (--options runtime только для кода),
+          # но доверенный timestamp обязателен, иначе нотаризация отклонит.
+          codesign --force --timestamp --sign "$ID" "$DMG"
+          codesign --verify --strict --verbose=2 "$DMG"
+
+      - name: Notarize & staple DMG
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_BASE64: ${{ secrets.ASC_API_KEY_BASE64 }}
+        run: |
+          set -e
+          DMG="$GITHUB_WORKSPACE/dist/RimeoAgent.dmg"
+          API_KEY="$RUNNER_TEMP/asc_api_key.p8"
+          echo "$ASC_API_KEY_BASE64" | base64 --decode > "$API_KEY"
+          # Отдельный submit: билет .app на образ НЕ распространяется — скачанный
+          # .dmg приходит с карантином и должен нести собственный билет.
+          xcrun notarytool submit "$DMG" \
+            --key "$API_KEY" \
+            --key-id "$ASC_API_KEY_ID" \
+            --issuer "$ASC_API_ISSUER_ID" \
+            --wait
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG" || true
+
       - uses: actions/upload-artifact@v4
         with:
           name: mac
-          path: dist/RimeoAgent_mac.zip
+          path: |
+            dist/RimeoAgent_mac.zip
+            dist/RimeoAgent.dmg
 
   build-windows:
     name: Windows (${{ matrix.arch }})
@@ -387,6 +492,7 @@ jobs:
         with:
           name: ${{ env.RELEASE_NAME }}
           files: |
+            artifacts/mac/RimeoAgent.dmg
             artifacts/mac/RimeoAgent_mac.zip
             artifacts/mac/RimeoAgent_mac.zip.sig
             artifacts/windows-x64/RimeoAgentSetup_win.exe
@@ -402,6 +508,7 @@ jobs:
         with:
           name: ${{ env.RELEASE_NAME }}
           files: |
+            artifacts/mac/RimeoAgent.dmg
             artifacts/mac/RimeoAgent_mac.zip
             artifacts/mac/RimeoAgent_mac.zip.sig
 

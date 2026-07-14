@@ -14,6 +14,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Ignore SIGPIPE (prevents crashes on broken socket writes)
         signal(SIGPIPE, SIG_IGN)
 
+        // Первой строкой — метка старта с данными о ПРЕДЫДУЩЕМ запуске. Лог теперь
+        // append-only, поэтому она не затирает историю: по ней видно, сколько раз и
+        // как агент перезапускался (exit=unclean ⇒ упал/убит, а не закрыт штатно).
+        // 13.07.2026 агент перезапустился 5 раз за 16 минут — и доказать это по логам
+        // было нечем, потому что лог стирался при каждом старте.
+        logger.boot()
+
         // Silent auto-update: install a build that was staged (downloaded) in the
         // background during the previous session BEFORE any UI/server comes up, then
         // relaunch into it. applyZip() calls exit(0) on success, so launch stops here.
@@ -25,9 +32,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         setupAppMenu()
         setupMenuBar()
-        createMainWindow()
+        // Тихий старт: агента поднял launchd при логине (или он перезапустился после
+        // фонового автообновления) — окна нет, только иконка в menu bar. Окно создастся
+        // лениво в showWindow(), когда пользователь сам его откроет.
+        if AgentSettings.shared.isBackgroundSession {
+            logger.info("Boot: background launch — main window suppressed (menu bar only)")
+        } else {
+            createMainWindow()
+        }
         TCCDiagnostics.logIdentityOnce()
         AgentSettings.shared.applyAllAtLaunch()
+        AgentSettings.shared.reconcileLaunchAtLoginAtLaunch()
         CacheManager.shared.scheduleEnforce()
         SimilarityEngine.shared.startCloudSync()
         NotificationCenter.default.addObserver(
@@ -37,6 +52,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             object: nil
         )
         checkComponentsAtLaunch()
+    }
+
+
+    /// Штатный выход. Без этой отметки следующий [BOOT] напишет exit=unclean —
+    /// именно так в логе отличается падение/kill от нормального закрытия.
+    func applicationWillTerminate(_ notification: Notification) {
+        logger.markCleanExit()
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -168,13 +190,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func showWindow() {
+        // Пользователь сам открыл окно — фоновая сессия закончилась, Dock-иконка
+        // возвращается (если она включена в настройках).
+        AgentSettings.shared.endBackgroundSession()
         if let w = mainWindow {
             enforceWindowSize(w, forceDefaultSize: false)
             w.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
         } else {
             createMainWindow()
         }
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     // Hard floor on the main window size. `window.minSize`/`contentMinSize` don't
@@ -305,14 +330,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         self.startServices()
                     } else {
                         AppState.shared.componentGateState = .required(missing)
+                        self.forceShowWindowIfBackground(
+                            "missing components: \(missing.map { $0.id }.joined(separator: ", "))")
                     }
                 }
             } catch {
                 await MainActor.run {
                     AppState.shared.componentGateState = .error(error.localizedDescription)
+                    self.forceShowWindowIfBackground("component check failed: \(error.localizedDescription)")
                 }
             }
         }
+    }
+
+    // Компонентный гейт не пройден ⇒ startServices() не вызывается и агент фактически
+    // мёртв: ни HTTP-сервера, ни туннеля. Чинится это только руками в UI, поэтому при
+    // фоновом старте окно всё-таки показываем — иначе пользователь молча остаётся без
+    // работающего агента и без единого намёка почему.
+    private func forceShowWindowIfBackground(_ reason: String) {
+        guard AgentSettings.shared.isBackgroundSession else { return }
+        logger.warning("Background launch blocked (\(reason)) — showing the window")
+        showWindow()
     }
 
     private func startServices() {

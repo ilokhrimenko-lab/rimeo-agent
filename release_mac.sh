@@ -49,6 +49,9 @@ $GIT_NOMODE add build_info.py
 # Swift sweep below misses them). The CI copies these into RimeoAgent.app/Contents/
 # Resources — if they aren't committed, the build fails at the `cp` step.
 $GIT_NOMODE add similarity_config.json
+# Плисты бандла: Info.plist и LaunchAgent автозапуска. LaunchAgent — новый файл, `git add -u`
+# его не подхватит, а CI копирует его в бандл ДО подписи → сборка упадёт на `cp`.
+$GIT_NOMODE add macos_arm64/build
 $GIT_NOMODE add -u
 # `git add -u` only stages modifications to ALREADY-tracked files — it silently
 # skips NEW source files. That once shipped a release referencing a brand-new

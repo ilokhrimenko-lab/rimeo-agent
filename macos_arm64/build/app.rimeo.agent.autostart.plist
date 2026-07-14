@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Label обязан совпадать с именем файла (без .plist): SMAppService.agent(plistName:)
+       ищет job именно по нему. -->
+  <key>Label</key>
+  <string>app.rimeo.agent.autostart</string>
+
+  <!-- BundleProgram, а не Program/ProgramArguments: путь считается ОТНОСИТЕЛЬНО бандла,
+       поэтому автозапуск не ломается, если .app лежит не в /Applications.
+       argv подменять нельзя — AppConfig/RekordboxParser/TCCDiagnostics берут путь
+       к исполняемому файлу из CommandLine.arguments[0]. -->
+  <key>BundleProgram</key>
+  <string>Contents/MacOS/RimeoAgent</string>
+
+  <!-- Признак «нас поднял launchd»: по нему агент стартует тихо, без окна и без Dock.
+       Передаём переменной окружения ровно потому, что argv трогать нельзя (см. выше). -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>RIMEO_BACKGROUND</key>
+    <string>1</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- KeepAlive НЕ ставим: пользователь должен иметь возможность выйти из агента через
+       menu bar. С KeepAlive launchd воскрешал бы его сразу, и заодно ловил бы гонку
+       с автообновлением (оно делает exit(0) и перезапускает себя само). -->
+
+  <!-- Login item показывается в System Settings как «Rimeo Agent», а не как имя разработчика. -->
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>app.rimeo.agent</string>
+  </array>
+
+  <key>ProcessType</key>
+  <string>Interactive</string>
+</dict>
+</plist>

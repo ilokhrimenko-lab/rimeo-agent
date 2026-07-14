@@ -76,7 +76,25 @@ Builds run in **GitHub Actions** and are triggered by pushing a tag:
 | `mac-v1.0-buildNNN` | macOS only |
 | `win-v1.0-buildNNN` | Windows only |
 
+Pushing a build is always **two** steps — commit **and** tag. Without the tag the workflow never starts:
+
+```bash
+# 1. bump build_info.py (VERSION, BUILD_NUMBER, RELEASE_TAG)
+git commit -am "Build NNN"
+git tag mac-v1.0-buildNNN && git push origin main && git push origin mac-v1.0-buildNNN
+# or simply: ./release_mac.sh   (does the bump, commit, tag and push for you)
+```
+
 CI produces a Developer‑ID‑signed, **notarized** macOS `.app` and **NSIS** installers for Windows x64 & arm64, then attaches all artifacts to a GitHub Release.
+
+Every macOS release carries **two** assets — shipping only one of them is a bug:
+
+| Asset | Why it must be there |
+|-------|----------------------|
+| `RimeoAgent.dmg` | What a human downloads: mount, drag **RimeoAgent** to Applications. |
+| `RimeoAgent_mac.zip` | The auto‑update channel. Its filename is hard‑coded in `UpdateChecker.swift` — rename it or drop it from a release and self‑update dies **silently** on every installed agent. |
+
+The `.dmg` is built by [`packaging/dmg/make_dmg.sh`](packaging/dmg) — `dmgbuild`, fully headless (no Finder, no AppleScript: Finder snaps icons to its own grid and isn't available on a CI runner). Its window background comes from `background.png` + `background@2x.png`, merged into a `.tiff` so it stays crisp on Retina. The image is signed and **notarized separately from the `.app`** — a stapled app inside a non‑notarized disk image still trips Gatekeeper.
 
 Build the macOS agent locally:
 
