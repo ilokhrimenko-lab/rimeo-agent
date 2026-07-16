@@ -1115,9 +1115,30 @@ public sealed class RekordboxWriter
 
             proc.BeginOutputReadLine();
             proc.BeginErrorReadLine();
-            // Именно БЕСПАРАМЕТРИЧЕСКИЙ WaitForExit(): только он дожидается ещё и EOF
-            // асинхронных пайпов. WaitForExit(timeout) вернулся бы раньше, и последние
-            // строки stderr (там едет код ошибки хелпера!) мы бы просто не увидели.
+
+            // Хелпер НЕ должен уметь виснуть навсегда: если он завис (антивирус
+            // сканирует свежий exe, файловая блокировка, дедлок), беспараметрический
+            // WaitForExit() блокировал бы этот поток бесконечно — а вместе с ним
+            // Sync() никогда не дошёл бы до своего finally, и _inFlight остался бы
+            // true НАВСЕГДА: все последующие синки получали бы 409 sync_in_progress
+            // до ручного перезапуска агента (см. инцидент 16.07 — зависание >30 мин
+            // на одном прогоне без единой строки в логе после старта backup).
+            const int HelperTimeoutSec = 180;
+            var finished = proc.WaitForExit(HelperTimeoutSec * 1000);
+            if (!finished)
+            {
+                Log.Warn($"sync: helper did not exit within {HelperTimeoutSec}s — killing");
+                try { proc.Kill(entireProcessTree: true); } catch (Exception ex) { Log.Warn($"sync: kill failed — {ex.Message}"); }
+                // Короткий добор после kill: дать асинхронным пайпам дойти до EOF, но
+                // не рисковать повторным бесконечным ожиданием, если kill не сработал.
+                try { proc.WaitForExit(5000); } catch { }
+                return new HelperRun(null, new HelperFailure("helper_timeout",
+                    $"rbdb-sync-helper did not exit within {HelperTimeoutSec}s"));
+            }
+            // Именно ПОВТОРНЫЙ беспараметрический WaitForExit() после успешного
+            // WaitForExit(timeout): только он гарантированно дожидается EOF
+            // асинхронных пайпов — иначе последние строки stderr (там едет код
+            // ошибки хелпера!) мы могли бы просто не увидеть.
             proc.WaitForExit();
 
             string stderr;
