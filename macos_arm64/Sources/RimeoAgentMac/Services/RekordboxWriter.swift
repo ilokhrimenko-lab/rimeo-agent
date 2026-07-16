@@ -873,9 +873,44 @@ final class RekordboxWriter {
         } catch {
             return .launchFailure(code: "helper_unavailable", detail: error.localizedDescription)
         }
-        // Читаем до waitUntilExit: полный пайп заблокировал бы хелпер намертво.
-        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-        proc.waitUntilExit()
+
+        // stderr — в фоне (readDataToEndOfFile() синхронно тут заблокировал бы
+        // поток до закрытия пайпа, то есть фактически до выхода хелпера), а выход
+        // хелпера ждём ОГРАНИЧЕННОЕ время. Раньше здесь стоял безусловный
+        // waitUntilExit() — если хелпер подвисал (антивирус, файловая блокировка,
+        // дедлок), этот поток блокировался НАВСЕГДА, sync() не доходил до своего
+        // defer, и inFlight оставался true НАВСЕГДА: все последующие
+        // /api/playlist/sync получали 409 sync_in_progress до ручного перезапуска
+        // агента. Тот же баг найден и пофикшен на Windows (RekordboxWriter.cs,
+        // 16.07, по диагностик-бандлу юзера — зависание >30 минут); паттерн
+        // таймаута — как в AudioService.runFFmpeg().
+        let errQueue = DispatchQueue(label: "rimeo.rbdb-helper.stderr")
+        var errData = Data()
+        let errGroup = DispatchGroup()
+        errGroup.enter()
+        errQueue.async {
+            errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            errGroup.leave()
+        }
+
+        let helperTimeoutSec: TimeInterval = 180
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            proc.waitUntilExit()
+            finished.signal()
+        }
+
+        if finished.wait(timeout: .now() + helperTimeoutSec) == .timedOut {
+            logger.warning("sync: helper did not exit within \(Int(helperTimeoutSec))s — killing")
+            proc.terminate()
+            _ = finished.wait(timeout: .now() + 5)
+            try? errPipe.fileHandleForReading.close()
+            try? outPipe.fileHandleForReading.close()
+            _ = errGroup.wait(timeout: .now() + 5)
+            return .launchFailure(code: "helper_timeout",
+                                  detail: "rbdb-sync-helper did not exit within \(Int(helperTimeoutSec))s")
+        }
+        _ = errGroup.wait(timeout: .now() + 5)
 
         let stderr = String(data: errData, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
