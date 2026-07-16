@@ -320,6 +320,87 @@ jobs:
           dotnet restore RimeoAgent/RimeoAgent.csproj `
             -r ${{ matrix.rid }}
 
+      # Запись в master.db делает не C#, а frozen-бинарь с pyrekordbox внутри:
+      # у пользователя на машине нет ни pyrekordbox, ни sqlcipher3, и поставить их
+      # мы не можем. Без этого шага в релиз уехал бы агент, у которого кнопка Sync
+      # молча не работает («rbdb-sync-helper not bundled»).
+      #
+      # ХЕЛПЕР ВСЕГДА x64 — И КЛАДЁТСЯ В ОБЕ СБОРКИ. Раннер один (windows-2022, x64), а
+      # PyInstaller не умеет кросс-компиляцию: он «замораживает» тот интерпретатор, под
+      # которым запущен. Значит на любой леге матрицы из него выйдет x64-бинарь.
+      #
+      # Класть его ТОЛЬКО в x64-zip — ошибка, которую мы сначала и сделали: Windows 11 на
+      # ARM64 УМЕЕТ запускать x64 под эмуляцией, и RekordboxWriter это учитывает
+      # (CanRunOnThisMachine проверяет сборку ОС: Win11 22000+ → x64-хелпер годен, Win10
+      # ARM64 → нет, там эмулируется только x86). Не положив бинарь в arm64-пакет, мы бы
+      # сами превратили эту ветку в мёртвый код и молча лишили ARM-пользователей синка.
+      #
+      # Поэтому: собираем и бандлим на ОБЕИХ легах, а «запустится ли» решает рантайм-
+      # проверка внутри агента — она же и отвечает за честность capability playlist_sync.
+      # runs-on НЕ меняем и arm64-раннер НЕ добавляем: рабочую матрицу не ломаем.
+      # Питон пиним ЯВНО: дефолтный python на образе windows-2022 — не тот, что берёт
+      # маковая лега (python3 = 3.12), а PyInstaller замораживает ИМЕННО тот интерпретатор,
+      # под которым запущен. Разные питоны → разный резолв зависимостей → «на маке синк
+      # работает, на винде нет» с неотлаживаемой причиной.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build Rekordbox sync helper (frozen, x64 binary for both RIDs)
+        shell: pwsh
+        working-directory: rbdb_sync_helper
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -m venv .venv
+          .venv\Scripts\python.exe -m pip install --quiet --upgrade pip
+          # sqlcipher3-wheels публикует колёса под win32/win_amd64/win_arm64 — стек
+          # ставится из бинарников, компилятор SQLCipher на раннере не нужен.
+          .venv\Scripts\python.exe -m pip install --quiet pyrekordbox==0.4.3 sqlcipher3-wheels pyinstaller
+          # Флаги те же, что на маке, кроме --strip: на Windows PyInstaller его игнорирует
+          # (нужен objcopy из binutils), только шумит предупреждением.
+          .venv\Scripts\pyinstaller.exe `
+            --onefile --name rbdb-sync-helper --clean --noconfirm --console `
+            --collect-all pyrekordbox --collect-all sqlcipher3 `
+            --hidden-import sqlalchemy --hidden-import construct `
+            --exclude-module matplotlib --exclude-module pandas --exclude-module PIL `
+            --exclude-module tkinter --exclude-module pytest `
+            rbdb_sync_helper.py
+          # Fail-fast: молча выкатить агента с нерабочей кнопкой Sync нельзя —
+          # пользователь нажмёт, плейлисты «уйдут», а в Rekordbox их не будет.
+          if (-not (Test-Path "dist\rbdb-sync-helper.exe")) {
+            Write-Host "::error::rbdb-sync-helper.exe не собрался — Sync в Rekordbox не будет работать"
+            exit 1
+          }
+          $size = [math]::Round((Get-Item "dist\rbdb-sync-helper.exe").Length / 1MB, 1)
+          Write-Host "sync helper: dist\rbdb-sync-helper.exe ($size MB)"
+
+          # ⚠️ ПРОВЕРКИ «ФАЙЛ СУЩЕСТВУЕТ» НЕДОСТАТОЧНО. PyInstaller регулярно теряет
+          # скрытые импорты: exe собирается, весит свои 50 МБ — и падает на первом же
+          # `import pyrekordbox`. Пользователь при этом видит АКТИВНУЮ кнопку Sync
+          # (capability смотрит на наличие бинаря), жмёт — и получает 500.
+          #
+          # Дымовой прогон: скармливаем несуществующую базу. Хелпер сначала делает
+          # preflight() (ИМПОРТИРУЕТ pyrekordbox / sqlalchemy / sqlcipher3), и только потом
+          # доходит до открытия базы. Значит:
+          #   stderr содержит "db_not_found"      → импорты живы, бинарь рабочий;
+          #   stderr содержит "helper_unavailable" → импорт сорвался, бинарь мёртвый.
+          '{"ops":[]}' | Set-Content -Path "$env:RUNNER_TEMP\smoke_plan.json" -Encoding utf8
+          $stderrFile = "$env:RUNNER_TEMP\smoke_err.txt"
+          $p = Start-Process -FilePath "dist\rbdb-sync-helper.exe" `
+                 -ArgumentList "$env:RUNNER_TEMP\nonexistent.db","$env:RUNNER_TEMP\smoke_plan.json","$env:RUNNER_TEMP\smoke_out.json" `
+                 -NoNewWindow -Wait -PassThru -RedirectStandardError $stderrFile
+          $err = (Get-Content $stderrFile -Raw) ?? ""
+          Write-Host "smoke stderr: $err"
+          if ($err -match "helper_unavailable") {
+            Write-Host "::error::rbdb-sync-helper.exe собрался, но не может импортировать pyrekordbox/sqlcipher3 — Sync упал бы у пользователя"
+            exit 1
+          }
+          if ($err -notmatch "db_not_found") {
+            Write-Host "::error::rbdb-sync-helper.exe повёл себя неожиданно на дымовом прогоне (ожидали db_not_found): $err"
+            exit 1
+          }
+          Write-Host "smoke OK: pyrekordbox + sqlcipher3 импортируются, хелпер дошёл до открытия базы"
+
       - name: Publish
         shell: pwsh
         working-directory: windows_csharp
@@ -401,6 +482,21 @@ jobs:
       - name: Copy build_info
         shell: pwsh
         run: Copy-Item build_info.py dist\RimeoAgent\build_info.py
+
+      # Кладём хелпер РЯДОМ с RimeoAgent.exe (AppContext.BaseDirectory) — оттуда его ищет
+      # RekordboxWriter. Делать это надо строго ПОСЛЕ Publish (dotnet publish перезаписывает -o) и
+      # ДО Package: тогда бинарь автоматически попадает и в zip (Compress-Archive берёт
+      # dist\RimeoAgent\*), и в NSIS-инсталлятор (он ставит папку целиком: File /r SOURCE_DIR).
+      - name: Bundle Rekordbox sync helper (both RIDs)
+        shell: pwsh
+        run: |
+          $src = "rbdb_sync_helper\dist\rbdb-sync-helper.exe"
+          if (-not (Test-Path $src)) {
+            Write-Host "::error::rbdb-sync-helper.exe не найден — Sync в Rekordbox не будет работать"
+            exit 1
+          }
+          Copy-Item $src "dist\RimeoAgent\rbdb-sync-helper.exe" -Force
+          Write-Host "bundled: dist\RimeoAgent\rbdb-sync-helper.exe"
 
       - name: Package
         shell: pwsh

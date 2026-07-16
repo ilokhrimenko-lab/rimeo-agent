@@ -31,6 +31,15 @@ public sealed partial class LogsPage : Page
 
     private readonly StackPanel _themeHost = new() { Orientation = Orientation.Horizontal, Spacing = 4 };
 
+    // Ход установки берём ТОЛЬКО опросом AgentUpdateService.Status() — он же отвечает
+    // телефону на GET /api/agent/update/status. Колбэк DownloadAndApply как источник
+    // прогресса не годится: он виден лишь этому окну, и телефон, опрашивающий статус
+    // во время UI-обновления, получал бы "idle" ("обновлений нет") прямо под замену
+    // агента. Один источник правды → одна картинка на обоих экранах.
+    private DispatcherTimer? _updatePoll;
+    private readonly TextBlock   _updateStage = new() { FontSize = 14, Foreground = UI.Secondary, VerticalAlignment = VerticalAlignment.Center, TextWrapping = TextWrapping.Wrap };
+    private readonly ProgressBar _updateBar   = new() { Minimum = 0, Maximum = 1, Value = 0, Height = 6, HorizontalAlignment = HorizontalAlignment.Stretch };
+
     public LogsPage()
     {
         InitializeComponent();
@@ -38,6 +47,10 @@ public sealed partial class LogsPage : Page
         BuildUpdateIdle();
         RebuildThemeSegmented();
         RefreshCacheSize();
+
+        // Таймер живёт дольше страницы, если его не погасить: после ухода со Settings
+        // он продолжал бы дёргать Status() и писать в отсоединённые TextBlock'и.
+        Unloaded += (_, _) => StopUpdatePolling();
     }
 
     private ScrollViewer Build()
@@ -168,28 +181,46 @@ public sealed partial class LogsPage : Page
         _settingsStatus.Foreground = UI.Green;
     }
 
-    // ── Update checker UI (unchanged logic) ─────────────────────────────────
+    // ── Update checker UI ───────────────────────────────────────────────────
     private void BuildUpdateIdle()
     {
+        // Установку мог запустить телефон (POST /api/agent/update) ещё до того, как
+        // открыли Settings. Показывать в этот момент "Check for Updates" — врать:
+        // спрашиваем состояние у сервиса и, если он занят, сразу рисуем прогресс.
+        var st = AgentUpdateService.Shared.Status();
+        if (IsActiveStage(st.Stage)) { ShowUpdateProgress(st); StartUpdatePolling(); return; }
+        if (st.Stage == AgentUpdateService.StageError)
+        {
+            BuildUpdateFailed(st.Error ?? "Update failed");
+            return;
+        }
+
         _updateHost.Children.Clear();
         _updateHost.Children.Add(UI.HStack(12,
             new TextBlock { Text = "Check whether a newer build is available", FontSize = 14, Foreground = UI.Secondary, VerticalAlignment = VerticalAlignment.Center },
             UI.SecondaryButton("Check for Updates", (_, _) => RunUpdateCheck())));
     }
 
+    // "Check for Updates" НЕ идёт через AgentUpdateService намеренно: он ничего не
+    // ставит и не должен занимать слот _running (иначе проверка из UI блокировала бы
+    // обновление с телефона). Единственная правка — честная обработка сбоя сети:
+    // QueryLatest глотает исключения и возвращает null, поэтому null+LastCheckError
+    // означает "не дозвонились до GitHub", а не "у вас последняя версия".
     private void RunUpdateCheck()
     {
-        _updateHost.Children.Clear();
-        _updateHost.Children.Add(UI.HStack(10,
-            new ProgressRing { IsActive = true, Width = 18, Height = 18 },
-            new TextBlock { Text = "Checking for updates…", FontSize = 14, Foreground = UI.Secondary, VerticalAlignment = VerticalAlignment.Center }));
+        StopUpdatePolling();
+        ShowUpdateBusy("Checking for updates…");
 
         UpdateChecker.Shared.ForceCheckAsync(info =>
+        {
+            var error = UpdateChecker.Shared.LastCheckError;
             DispatcherQueue.TryEnqueue(() =>
             {
                 if (info != null) BuildUpdateAvailable(info);
+                else if (error != null) BuildUpdateFailed($"Update check failed: {error}");
                 else BuildUpToDate();
-            }));
+            });
+        });
     }
 
     private void BuildUpToDate()
@@ -210,34 +241,143 @@ public sealed partial class LogsPage : Page
             lines.Children.Add(new TextBlock { Text = info.Notes, FontSize = 12, Foreground = UI.Dim, TextWrapping = TextWrapping.Wrap });
 
         _updateHost.Children.Add(lines);
-        _updateHost.Children.Add(UI.PrimaryButton("Update Now", (_, _) => UpdateNow(info)));
+        _updateHost.Children.Add(UI.PrimaryButton("Update Now", (_, _) => UpdateNow()));
     }
 
-    private void UpdateNow(UpdateInfo info)
+    private void BuildUpdateFailed(string message)
     {
         _updateHost.Children.Clear();
-        var progress = new TextBlock { Text = "Downloading update… 0%", FontSize = 14, Foreground = UI.Secondary };
-        _updateHost.Children.Add(UI.HStack(10,
-            new ProgressRing { IsActive = true, Width = 18, Height = 18 }, progress));
+        _updateHost.Children.Add(new TextBlock { Text = message, FontSize = 14, Foreground = UI.Red, TextWrapping = TextWrapping.Wrap });
+        _updateHost.Children.Add(UI.SecondaryButton("Try Again", (_, _) => RunUpdateCheck()));
+    }
 
+    /// Кнопка "Update Now". Ставит НЕ сама, а через AgentUpdateService.Start():
+    /// у него есть флаг _running (защита от двух одновременных установок — кнопка +
+    /// запрос с телефона) и он же ведёт стадию/прогресс для /api/agent/update/status.
+    /// `info` из BuildUpdateAvailable намеренно не передаём: Start() перепроверяет
+    /// GitHub сам и возвращает актуальный релиз.
+    private void UpdateNow()
+    {
+        ShowUpdateBusy("Starting update…");
+
+        // Start() блокирующий: внутри ForceCheck() ходит в GitHub (таймаут 10 с).
+        // На UI-потоке это фризило бы окно.
         Task.Run(() =>
         {
-            try
-            {
-                UpdateChecker.Shared.DownloadAndApply(info, p =>
-                    DispatcherQueue.TryEnqueue(() => progress.Text = $"Downloading update… {(int)(p * 100)}%"));
-            }
+            UpdateStartResult r;
+            try { r = AgentUpdateService.Shared.Start(); }
             catch (Exception ex)
             {
                 Log.Error($"Update failed: {ex.Message}");
-                DispatcherQueue.TryEnqueue(() =>
-                {
-                    _updateHost.Children.Clear();
-                    _updateHost.Children.Add(new TextBlock { Text = $"Update failed: {ex.Message}", FontSize = 14, Foreground = UI.Red, TextWrapping = TextWrapping.Wrap });
-                    _updateHost.Children.Add(UI.SecondaryButton("Try Again", (_, _) => RunUpdateCheck()));
-                });
+                DispatcherQueue.TryEnqueue(() => BuildUpdateFailed($"Update failed: {ex.Message}"));
+                return;
             }
+
+            DispatcherQueue.TryEnqueue(() =>
+            {
+                // Обновление уже идёт (его начал телефон) — вторую установку не
+                // запускаем, просто подхватываем чужой прогресс.
+                if (r.AlreadyRunning)
+                {
+                    ShowUpdateProgress(AgentUpdateService.Shared.Status(), "Update already in progress…");
+                    StartUpdatePolling();
+                    return;
+                }
+                // Сеть/GitHub отвалились. Показывать "у вас последняя версия" здесь —
+                // ровно тот баг, из-за которого пользователь остаётся на старом билде.
+                if (r.Error != null) { BuildUpdateFailed($"Update failed: {r.Error}"); return; }
+                if (r.Info == null)  { BuildUpToDate(); return; }
+
+                ShowUpdateProgress(AgentUpdateService.Shared.Status());
+                StartUpdatePolling();
+            });
         });
+    }
+
+    // ── Прогресс установки: опрос AgentUpdateService ─────────────────────────
+
+    // "verifying" / "installing" констант в AgentUpdateService нет — эти стадии
+    // приходят строками из UpdateChecker.ApplyZip через колбэк stage.
+    private static bool IsActiveStage(string stage) =>
+        stage is AgentUpdateService.StageDownloading
+              or "verifying"
+              or "installing"
+              or AgentUpdateService.StageRestarting;
+
+    private static string StageCaption(UpdateStatus st)
+    {
+        var target = string.IsNullOrEmpty(st.TargetVersion) ? "" : $" {st.TargetVersion}";
+        return st.Stage switch
+        {
+            AgentUpdateService.StageDownloading => $"Downloading update{target}… {(int)(Math.Clamp(st.Progress, 0, 1) * 100)}%",
+            "verifying"                         => "Verifying signature…",
+            "installing"                        => "Installing…",
+            AgentUpdateService.StageRestarting  => "Restarting agent…",
+            _                                   => "Updating…",
+        };
+    }
+
+    private void ShowUpdateBusy(string text)
+    {
+        _updateHost.Children.Clear();
+        _updateHost.Children.Add(UI.HStack(10,
+            new ProgressRing { IsActive = true, Width = 18, Height = 18 },
+            new TextBlock { Text = text, FontSize = 14, Foreground = UI.Secondary, VerticalAlignment = VerticalAlignment.Center }));
+    }
+
+    private void ShowUpdateProgress(UpdateStatus st, string? caption = null)
+    {
+        _updateHost.Children.Clear();
+        _updateBar.Foreground = UI.Acc;
+        _updateBar.Background = UI.Chip;
+        _updateHost.Children.Add(UI.HStack(10,
+            new ProgressRing { IsActive = true, Width = 18, Height = 18 },
+            _updateStage));
+        _updateHost.Children.Add(_updateBar);
+        ApplyUpdateStatus(st, caption);
+    }
+
+    private void ApplyUpdateStatus(UpdateStatus st, string? caption = null)
+    {
+        _updateStage.Text = caption ?? StageCaption(st);
+        _updateBar.Value  = Math.Clamp(st.Progress, 0, 1);
+    }
+
+    private void StartUpdatePolling()
+    {
+        StopUpdatePolling();
+        _updatePoll = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
+        _updatePoll.Tick += (_, _) => PollUpdateStatus();
+        _updatePoll.Start();
+    }
+
+    private void StopUpdatePolling()
+    {
+        _updatePoll?.Stop();
+        _updatePoll = null;
+    }
+
+    private void PollUpdateStatus()
+    {
+        var st = AgentUpdateService.Shared.Status();
+
+        if (IsActiveStage(st.Stage)) { ApplyUpdateStatus(st); return; }
+
+        // Дальше — терминальные стадии. На "restarting" процесс уже умирает
+        // (Environment.Exit в ApplyZip), так что сюда мы обычно просто не доживаем.
+        StopUpdatePolling();
+        switch (st.Stage)
+        {
+            case AgentUpdateService.StageError:
+                BuildUpdateFailed($"Update failed: {st.Error ?? "unknown error"}");
+                break;
+            case AgentUpdateService.StageDone:
+                BuildUpToDate();
+                break;
+            default:   // idle — установки нет, возвращаем карточку в исходное состояние
+                BuildUpdateIdle();
+                break;
+        }
     }
 
     // ── Report a bug ────────────────────────────────────────────────────────

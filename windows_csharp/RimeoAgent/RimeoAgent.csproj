@@ -40,6 +40,17 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Дефолтные веса движка рекомендаций. macOS кладёт этот же файл в Resources
+         бандла (см. build.yml), и SimilarityEngine ищет его рядом с исполняемым
+         файлом ДО первого удачного синка с облаком. Без этой строки на Windows
+         BundledConfigPath указывал в никуда: агент до первого ответа
+         /api/similarity_config работал бы на встроенных в код дефолтах, и
+         поправить веса из админки офлайн было бы нечем. -->
+    <Content Include="..\..\similarity_config.json">
+      <Link>similarity_config.json</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+
     <None Update="Assets\**">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

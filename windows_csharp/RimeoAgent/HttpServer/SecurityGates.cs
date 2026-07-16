@@ -35,6 +35,21 @@ public static class AccessControl
         "/api/agent_login", "/api/agent_signup",
         "/api/tunnel/start", "/api/tunnel/stop",
         "/api/report_bug",
+        // Мутации плейлистов (Фаза 0 — плейлисты из iOS). Без авторизации любой в той же
+        // сети переписывает оверлей чужой библиотеки. /api/playlist/recommendations
+        // остаётся ПУБЛИЧНЫМ (как /api/similar) — он только читает.
+        "/api/playlist/create", "/api/playlist/create_folder",
+        "/api/playlist/add", "/api/playlist/remove",
+        "/api/playlist/reorder", "/api/playlist/rename", "/api/playlist/delete",
+        // Фаза 6 — единственный роут, который пишет в НАСТОЯЩИЙ master.db Rekordbox
+        // (создание/переименование/удаление плейлистов, перезапись состава). Все роуты
+        // выше правят наш собственный оверлей, который не жалко выбросить; этот —
+        // незаменимую библиотеку. Неаутентифицированным POST'ом сюда любой сосед по
+        // Wi-Fi сносит диджею плейлисты, поэтому он в контрольной корзине, а не в
+        // «чтении» (риск 14). /sync/status тоже защищён — паритет с macOS
+        // (controlProtectedPaths), хотя это GET: он раскрывает состав очереди синка.
+        "/api/playlist/sync",
+        "/api/playlist/sync/status",
         // Самообновление по запросу с телефона: ставит новый бинарь и перезапускает
         // агент — без авторизации это удалённая подмена исполняемого файла.
         "/api/agent/update", "/api/agent/update/status",
@@ -95,22 +110,49 @@ public static class LibraryPathGuard
     private static string _cachedRootsSignature = "";
     private static List<string> _cachedCanonicalRoots = new();
 
-    /// Canonical absolute path: normalise `..` (GetFullPath) and resolve a
-    /// symlink/junction to its final target so an in-library link cannot escape.
+    /// Канонический абсолютный путь: убрать `..` (GetFullPath) и разрешить
+    /// symlink/junction в конечную цель, чтобы ссылка изнутри библиотеки не уводила
+    /// наружу.
+    ///
+    /// ⚠️ РЕЗОЛВИМ КАЖДЫЙ КОМПОНЕНТ, А НЕ ТОЛЬКО ПОСЛЕДНИЙ. Swift зовёт realpath(),
+    /// который разворачивает ссылки на ВСЕХ уровнях пути. Прошлая версия дёргала
+    /// ResolveLinkTarget только у листа — и этого достаточно, чтобы сбежать из
+    /// контейнмента через junction в СЕРЕДИНЕ пути:
+    ///     mklink /J D:\Music\esc C:\Users\<u>
+    ///     ?path=D:\Music\esc\.ssh\id_rsa
+    /// Лист (.ssh\id_rsa) ссылкой не является, ResolveLinkTarget вернул бы null,
+    /// путь остался бы «D:\Music\esc\.ssh\id_rsa» — формально внутри корня D:\Music,
+    /// а физически это C:\Users\<u>\.ssh\id_rsa. Регрессия 6002.
     public static string Canonical(string path)
     {
         try
         {
             var full = Path.GetFullPath(path);
-            try
+            var root = Path.GetPathRoot(full) ?? "";
+            if (root.Length == 0) return full;
+
+            var rest  = full.Substring(root.Length);
+            var parts = rest.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+                                   StringSplitOptions.RemoveEmptyEntries);
+
+            var cur = root;
+            foreach (var part in parts)
             {
-                var target = new FileInfo(full).ResolveLinkTarget(returnFinalTarget: true);
-                if (target != null) return Path.GetFullPath(target.FullName);
-                var dtarget = new DirectoryInfo(full).ResolveLinkTarget(returnFinalTarget: true);
-                if (dtarget != null) return Path.GetFullPath(dtarget.FullName);
+                cur = Path.Combine(cur, part);
+                try
+                {
+                    // returnFinalTarget: true разворачивает и цепочку ссылок целиком.
+                    // На не-ссылке вернёт null; на несуществующем пути (том не
+                    // примонтирован) — бросит или вернёт null, и мы остаёмся на
+                    // лексической форме, как и Swift в своём фолбэке.
+                    FileSystemInfo? target = Directory.Exists(cur)
+                        ? new DirectoryInfo(cur).ResolveLinkTarget(returnFinalTarget: true)
+                        : new FileInfo(cur).ResolveLinkTarget(returnFinalTarget: true);
+                    if (target != null) cur = Path.GetFullPath(target.FullName);
+                }
+                catch { /* не ссылка / нет доступа / не существует — берём как есть */ }
             }
-            catch { /* not a link / does not exist — use the normalised path */ }
-            return full;
+            return Path.GetFullPath(cur);
         }
         catch { return path; }
     }
@@ -134,6 +176,34 @@ public static class LibraryPathGuard
     public static bool IsContained(string path, IEnumerable<string> roots)
         => IsContainedCanonical(Canonical(path), roots.Select(Canonical));
 
+    /// Корень СИСТЕМНОГО тома (обычно "C:\") — прямой аналог "/" на macOS, который
+    /// Swift отбрасывает явно (`dir != "/"`).
+    ///
+    /// ⚠️ ЗАЧЕМ. Трек, лежащий ПРЯМО в корне системного диска ("C:\song.mp3"), даёт
+    /// корень "C:\" — и тогда IsContainedCanonical пропускает ЛЮБОЙ файл диска:
+    /// ?path=C:\Users\<u>\.ssh\id_rsa проходит через /stream, /waveform, /artwork.
+    /// Это ровно та дыра, которую закрывала задача 6002.
+    ///
+    /// Корни ДРУГИХ томов ("D:\", UNC-шара) НЕ отбрасываем осознанно: это аналог
+    /// /Volumes/KODAK, который macOS-агент разрешает. Иначе выделенный музыкальный
+    /// диск, где треки лежат прямо в корне, перестал бы играть вовсе — а системных
+    /// секретов там нет.
+    private static bool IsSystemVolumeRoot(string dir)
+    {
+        var root = Path.GetPathRoot(dir);
+        if (string.IsNullOrEmpty(root)) return false;
+        var trimmed = dir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var rootTrimmed = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (!string.Equals(trimmed, rootTrimmed, StringComparison.OrdinalIgnoreCase)) return false;
+
+        var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        var sysRoot = Path.GetPathRoot(windows);
+        if (string.IsNullOrEmpty(sysRoot)) return false;
+        return string.Equals(rootTrimmed,
+                             sysRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                             StringComparison.OrdinalIgnoreCase);
+    }
+
     /// Parent folder of every library track + the agent's cache (converted audio)
     /// and the Rekordbox share/db dir (cover art).
     public static List<string> AllowedRoots()
@@ -143,14 +213,15 @@ public static class LibraryPathGuard
         {
             if (string.IsNullOrEmpty(t.Location)) continue;
             var dir = Path.GetDirectoryName(t.Location);
-            if (!string.IsNullOrEmpty(dir)) roots.Add(dir!);
+            if (string.IsNullOrEmpty(dir) || IsSystemVolumeRoot(dir!)) continue;
+            roots.Add(dir!);
         }
         if (!string.IsNullOrEmpty(AppConfig.Shared.CacheDir)) roots.Add(AppConfig.Shared.CacheDir);
         var db = AppConfig.Shared.DbPath;
         if (!string.IsNullOrEmpty(db))
         {
             var rb = Path.GetDirectoryName(db);
-            if (!string.IsNullOrEmpty(rb))
+            if (!string.IsNullOrEmpty(rb) && !IsSystemVolumeRoot(rb!))
             {
                 roots.Add(rb!);
                 roots.Add(Path.Combine(rb!, "share"));

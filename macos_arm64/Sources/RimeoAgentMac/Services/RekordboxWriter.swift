@@ -670,9 +670,24 @@ final class RekordboxWriter {
         let dir: URL
         /// Какие суффиксы реально лежали в снимке (["", "-wal", "-shm"]).
         let suffixes: [String]
+        /// Какие соседние файлы реально лежали в снимке (masterPlaylists6.xml).
+        let siblings: [String]
     }
 
     private static let dbSuffixes = ["", "-wal", "-shm"]
+
+    /// ⚠️ ВТОРОЙ ОБЯЗАТЕЛЬНЫЙ МАНИФЕСТ — И ДО BUILD 255 ЕГО НЕ БЭКАПИЛИ.
+    ///
+    /// `masterPlaylists6.xml` лежит РЯДОМ с master.db (это не суффикс, а отдельное имя) и
+    /// является вторым источником правды о плейлистах: не обновил его — плейлистов в
+    /// Rekordbox просто не видно. `pyrekordbox.commit()` его ПИШЕТ (`playlist_xml.save()`).
+    ///
+    /// А снимок брали только с трёх файлов базы. Значит при откате (провал op, USN не
+    /// сдвинулся, verify не сошёлся) база возвращалась к прежнему состоянию, а манифест
+    /// оставался НОВЫЙ — со ссылками на плейлисты, которых в базе уже нет. То есть
+    /// «безопасный откат» сам оставлял библиотеку в рассогласованном виде: ровно та
+    /// тихая порча, ради предотвращения которой здесь и стоят и backup, и verify.
+    private static let dbSiblings = ["masterPlaylists6.xml"]
 
     private func backupsRoot() -> URL {
         AppConfig.shared.baseDir.appendingPathComponent("backups")
@@ -712,9 +727,28 @@ final class RekordboxWriter {
             try? fm.removeItem(at: dir)
             return nil
         }
-        let took = taken.map { $0.isEmpty ? "db" : $0 }.joined(separator: ",")
+
+        // Соседние манифесты (masterPlaylists6.xml) — см. комментарий к dbSiblings.
+        // Их отсутствие НЕ фатально (в свежей библиотеке XML может ещё не родиться), но
+        // если файл есть — он обязан попасть в снимок, иначе откат его не вернёт.
+        let dbDir = (dbPath as NSString).deletingLastPathComponent
+        var siblings: [String] = []
+        for name in Self.dbSiblings {
+            let src = (dbDir as NSString).appendingPathComponent(name)
+            guard fm.fileExists(atPath: src) else { continue }
+            do {
+                try fm.copyItem(atPath: src, toPath: dir.appendingPathComponent(name).path)
+                siblings.append(name)
+            } catch {
+                logger.warning("sync: backup of \(name) failed — \(error)")
+                try? fm.removeItem(at: dir)
+                return nil
+            }
+        }
+
+        let took = (taken.map { $0.isEmpty ? "db" : $0 } + siblings).joined(separator: ",")
         logger.info("sync: backup → \(dir.path) [\(took)]")
-        return Backup(dir: dir, suffixes: taken)
+        return Backup(dir: dir, suffixes: taken, siblings: siblings)
     }
 
     /// Откат. Порядок важен: сперва СНОСИМ живые -wal/-shm, потом кладём файлы из
@@ -735,6 +769,27 @@ final class RekordboxWriter {
                 logger.error("sync: RESTORE FAILED for \(base + suffix) — \(error); snapshot kept at \(backup.dir.path)")
             }
         }
+
+        // Манифесты. Откатываем ПОСЛЕ базы и по тому же принципу «вернуть ровно то, что
+        // было»: файл был в снимке → перезаписываем им живой; файла в снимке НЕ было, а
+        // сейчас он есть → его создал этот самый прогон, и откат обязан его убрать.
+        // Иначе XML остался бы новее базы и ссылался на плейлисты, которых уже нет.
+        let dbDir = (dbPath as NSString).deletingLastPathComponent
+        for name in Self.dbSiblings {
+            let live = (dbDir as NSString).appendingPathComponent(name)
+            if backup.siblings.contains(name) {
+                let src = backup.dir.appendingPathComponent(name)
+                do {
+                    try? fm.removeItem(atPath: live)
+                    try fm.copyItem(atPath: src.path, toPath: live)
+                } catch {
+                    logger.error("sync: RESTORE FAILED for \(name) — \(error); snapshot kept at \(backup.dir.path)")
+                }
+            } else if fm.fileExists(atPath: live) {
+                try? fm.removeItem(atPath: live)
+            }
+        }
+
         RekordboxParser.shared.invalidateCache()
         logger.warning("sync: master.db restored from \(backup.dir.path)")
     }
@@ -826,10 +881,28 @@ final class RekordboxWriter {
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
         guard proc.terminationStatus == 0 else {
-            // Хелпер отдаёт понятный код в stderr: {"error":"...","detail":"..."}.
+            // Хелпер отдаёт понятный код ПОСЛЕДНЕЙ строкой stderr: {"error":"...","detail":"..."}.
+            //
+            // ⚠️ РАНЬШЕ здесь парсился ВЕСЬ stderr как один JSON — и это тихо ломало
+            // САМЫЙ ОПАСНЫЙ путь. pyrekordbox пишет свои логи в stderr (проверено: при
+            // открытии базы без masterPlaylists6.xml он выдаёт «WARNING - No
+            // masterPlaylists6.xml found»). Тогда stderr = "WARNING…\n{"error":…}", и
+            // JSONSerialization по всей строке падает → code оставался "write_failed".
+            //
+            // А "write_failed" НЕ входит в preWriteErrorCodes ⇒ выполнялся restore().
+            // Если настоящей причиной был rekordbox_running (Rekordbox открылся между
+            // Барьером 1 и lock-probe), restore() подменял бы файлы под ЖИВЫМ Rekordbox —
+            // ровно та порча, ради предотвращения которой всё это написано.
+            //
+            // Берём последнюю непустую строку, начинающуюся с «{» — она устойчива к
+            // логам хелпера перед ней. Windows-порт делает так же.
             var code = "write_failed"
             var detail: String? = stderr.isEmpty ? nil : stderr
-            if let d = stderr.data(using: .utf8),
+            let lastJSON = stderr
+                .split(separator: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .last { $0.hasPrefix("{") }
+            if let line = lastJSON, let d = line.data(using: .utf8),
                let obj = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
                let e = obj["error"] as? String {
                 code = e
@@ -860,6 +933,21 @@ final class RekordboxWriter {
     /// Capability обязана отражать РЕАЛЬНУЮ способность, а не намерение.
     static func bundledSyncHelperPath() -> String? {
         let fm = FileManager.default
+
+        // Явное переопределение пути к хелперу (паритет с Windows).
+        // Зачем в проде: если хелпер придётся пересобрать (сменилась схема Rekordbox,
+        // всплыл баг в pyrekordbox), саппорт подсунет исправленный бинарь ОДНОМУ юзеру,
+        // не выкатывая релиз на всех. Проверку архитектуры при этом НЕ пропускаем: бинарь
+        // не той арки честнее показать как «синк недоступен», чем упасть при нажатии.
+        if let override = ProcessInfo.processInfo.environment["RIMEO_SYNC_HELPER"],
+           !override.isEmpty {
+            if fm.isExecutableFile(atPath: override), canRunOnThisMachine(override) {
+                logger.info("sync: using helper override RIMEO_SYNC_HELPER=\(override)")
+                return override
+            }
+            logger.warning("sync: RIMEO_SYNC_HELPER=\(override) ignored — missing or wrong architecture")
+        }
+
         let execDir = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
         let candidates = [
             execDir.appendingPathComponent("rbdb-sync-helper").path,

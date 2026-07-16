@@ -5,9 +5,27 @@ using RimeoAgent.Models;
 
 namespace RimeoAgent.Services;
 
+/// Метка «этот запрос породил наш собственный CloudRelay».
+///
+/// Релей переигрывает облачные запросы на 127.0.0.1 — с точки зрения HTTP-сервера он
+/// неотличим ни от cloudflared, ни от локального браузера: у всех троих пир loopback.
+/// Ключ генерится ОДИН раз на процесс и наружу не уходит, поэтому подделать метку из
+/// браузера или из локальной сети невозможно. Порт macOS-овского RelayMarker.
+public static class RelayMarker
+{
+    public const string HeaderName = "X-Rimeo-Relay-Key";
+    public static readonly string Key = Convert.ToHexString(
+        System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+}
+
 public sealed class CloudRelay
 {
     public static readonly CloudRelay Shared = new();
+
+    /// Что этот агент умеет — то же значение, что и на macOS (CloudRelay.swift:46).
+    /// Облако сейчас его не читает, но контракт обязан совпадать: разъедется здесь —
+    /// разъедется молча, и найдут это уже по жалобе.
+    public const string Capabilities = "playlists_v1";
 
     private readonly object _lock = new();
     private bool _running;
@@ -59,6 +77,23 @@ public sealed class CloudRelay
             var pollUrl   = $"{cloudUrl}/api/relay/poll/{AppConfig.Shared.AgentId}?token={cloudToken}";
             if (!string.IsNullOrEmpty(tunnel))
                 pollUrl += $"&tunnel={Uri.EscapeDataString(tunnel)}";
+
+            // Билд — телеметрия облака (и исторически гейт на именованный туннель).
+            pollUrl += $"&build={Uri.EscapeDataString(AppConfig.Shared.BuildNumber)}";
+            pollUrl += $"&caps={Uri.EscapeDataString(Capabilities)}";
+
+            // ⚠️ LAN-PSK ПО HEARTBEAT — САМЫЙ ВАЖНЫЙ ИЗ ТРЁХ.
+            //
+            // Уже связанный агент повторно /api/agent/login НЕ дёргает, поэтому линковка
+            // секрет не донесёт: канал только этот. Облако принимает его здесь
+            // (app.py: `request.args.get('lan_secret')`) и отдаёт телефону того же
+            // аккаунта, после чего телефон идёт к агенту НАПРЯМУЮ по локальной сети.
+            //
+            // Windows не слал его вообще. Следствие: у Windows-пользователей LAN-путь не
+            // включался НИКОГДА — телефон стримил через Cloudflare, стоя в одной комнате
+            // с ПК (на маке замеряли: 98 мс и 37 МБ/с по локалке против 1–7 с через
+            // туннель). Паритет с macOS (CloudRelay.swift:120).
+            pollUrl += $"&lan_secret={Uri.EscapeDataString(HttpServer.ApiRouter.EnsureLanSecret())}";
 
             LogTunnelIfChanged(tunnel);
 
@@ -179,8 +214,13 @@ public sealed class CloudRelay
         try
         {
             using var http = new HttpClient();
+            // Тот же набор параметров, что и в основном heartbeat: build + caps. Иначе
+            // внеочередной пуш при смене туннеля «омолаживал» бы запись агента в облаке
+            // БЕЗ билда, и телеметрия платформы разъезжалась бы с реальностью.
             var url = $"{d.CloudUrl}/api/relay/poll/{AppConfig.Shared.AgentId}" +
-                      $"?token={d.CloudToken}&tunnel={Uri.EscapeDataString(tunnelUrl)}";
+                      $"?token={d.CloudToken}&tunnel={Uri.EscapeDataString(tunnelUrl)}" +
+                      $"&build={Uri.EscapeDataString(AppConfig.Shared.BuildNumber)}" +
+                      $"&caps={Uri.EscapeDataString(Capabilities)}";
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
             await http.GetAsync(url, cts.Token);
             Log.Info($"Tunnel URL pushed to cloud: {tunnelUrl}");
@@ -234,9 +274,20 @@ public sealed class CloudRelay
             using var req  = new HttpRequestMessage(new HttpMethod(method), localUrl);
             if (body != null) req.Content = new ByteArrayContent(body);
 
+            // Метим запрос процессным секретом: для HTTP-сервера релей приходит с
+            // 127.0.0.1 — ровно как локальный браузер и как cloudflared. Без метки все
+            // три сливаются в один «local», и access-лог не может ответить на главный
+            // диагностический вопрос: телефон пришёл по локалке или через облако.
+            // Подделать метку из браузера нельзя — ключ рождается в этом процессе и
+            // никуда не уезжает. Паритет с macOS (RelayMarker в CloudRelay.swift).
+            req.Headers.TryAddWithoutValidation(RelayMarker.HeaderName, RelayMarker.Key);
+
             foreach (var (k, v) in headers)
             {
                 if (k.ToLower() == "host") continue;
+                // Метку из ОБЛАКА не пропускаем: иначе её мог бы прислать кто угодно
+                // снаружи и выдать свой запрос за релейный. Ставим её только сами, выше.
+                if (k.Equals(RelayMarker.HeaderName, StringComparison.OrdinalIgnoreCase)) continue;
                 if (!req.Headers.TryAddWithoutValidation(k, v))
                     req.Content?.Headers.TryAddWithoutValidation(k, v);
             }

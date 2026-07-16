@@ -613,10 +613,18 @@ func parseMasterDB(dbPath: String, mtime: Double) throws -> HelperLibraryData {
             }
         }
 
-        historyPlaylists = histMeta.map { id, meta in
-            HelperPlaylist(path: "hist:\(id)", date: meta.date, smart: false,
-                           history: true, history_id: id, name: meta.name)
-        }
+        // ⚠️ .sorted(by: id) — НЕ косметика. Порядок обхода Dictionary в Swift
+        // рандомизирован по процессу, поэтому без сортировки хелпер выдавал сессии
+        // истории в РАЗНОМ порядке на каждом запуске: два прогона на одной и той же
+        // базе давали разный playlists[]. Windows-парсер тут детерминирован, и без
+        // этой строки две платформы не могли совпасть в принципе — не из-за логики,
+        // а из-за хеш-сида процесса.
+        historyPlaylists = histMeta
+            .sorted { $0.key < $1.key }
+            .map { id, meta in
+                HelperPlaylist(path: "hist:\(id)", date: meta.date, smart: false,
+                               history: true, history_id: id, name: meta.name)
+            }
     } catch {
         historyPlaylists = []
     }
@@ -650,10 +658,19 @@ func parseMasterDB(dbPath: String, mtime: Double) throws -> HelperLibraryData {
     }
     // ⚠️ Раньше здесь был `.sorted { $0.path < $1.path }` — алфавит по пути. Именно он
     // (вместе с «папки вперёд» на клиенте) и выдавал себя за «Rekordbox order».
-    // Порядок Rekordbox — это Seq внутри родителя; сортируем по нему, path — лишь
-    // тайбрейк для детерминированности.
+    // Порядок Rekordbox — это Seq внутри родителя; сортируем по нему.
+    //
+    // Тайбрейк — по rekordbox_id, а НЕ по path. Seq уникален только ВНУТРИ родителя,
+    // поэтому одинаковый Seq у двух узлов означает, что они лежат в РАЗНЫХ папках
+    // (на живой библиотеке таких 24 группы), и их взаимный порядок в плоском списке
+    // ни на что не влияет: клиент всё равно собирает дерево по `parent`. Тайбрейк тут
+    // нужен ровно для детерминизма — и он обязан быть ОДИНАКОВЫМ на обеих платформах.
+    // Путь для этого не годится: Swift сравнивает String канонически, а C# —
+    // ординально по UTF-16, и на плейлисте с эмодзи (суррогатная пара!) или с
+    // диакритикой в NFD две платформы отсортировали бы их по-разному. id — чистый
+    // ASCII-номер, он сравнивается одинаково везде.
     let playlists = regularPlaylists.sorted {
-        ($0.seq ?? 0, $0.path) < ($1.seq ?? 0, $1.path)
+        ($0.seq ?? 0, $0.rekordbox_id ?? "") < ($1.seq ?? 0, $1.rekordbox_id ?? "")
     } + historyPlaylists
 
     return HelperLibraryData(

@@ -45,6 +45,12 @@ public partial class App : Application
         var background = AgentSettings.IsBackgroundCommandLine(Environment.GetCommandLineArgs());
         AgentSettings.LaunchedInBackground = background;
 
+        // [BOOT]-строка с данными о ПРЕДЫДУЩЕМ запуске (pid, uptime, exit=clean|unclean).
+        // Именно она отвечает на вопрос «агент упал или его перезапустили руками» —
+        // без неё в баг-репорте видно только, что агент стартовал, но не почему.
+        // Зовём ДО mutex-проверки: второй инстанс тоже обязан оставить след, иначе
+        // «клик по ярлыку ничего не сделал» нечем расследовать.
+        AgentLogger.Shared.Boot();
         Log.Info($"Rimeo Agent starting — {AppConfig.Shared.DisplayVersion}{(background ? " (background)" : "")}");
         AgentLogger.Shared.LogStartupDiagnostics();
 
@@ -55,6 +61,7 @@ public partial class App : Application
             // означало бы «клик по ярлыку ничего не делает» — поэтому будим первый.
             Log.Warn("Another Rimeo Agent instance is already running — asking it to show its window");
             SignalRunningInstance();
+            AgentLogger.Shared.MarkCleanExit();
             Environment.Exit(0);
             return;
         }
@@ -166,6 +173,14 @@ public partial class App : Application
 
         SafeStart("cloud relay", () => CloudRelay.Shared.StartIfLinked());
 
+        // Веса движка рекомендаций приезжают из админки (GET /api/similarity_config,
+        // синк раз в 600 с). Без ЭТОЙ строки метод StartCloudSync существовал, но его
+        // никто не звал: агент вечно сидел на встроенных дефолтах, и подкрутка весов в
+        // админке до Windows не доезжала вообще — при том что PARITY.md уже утверждал
+        // обратное. Классический мёртвый код: скомпилировано, покрыто комментарием,
+        // не вызвано.
+        SafeStart("similarity config sync", () => SimilarityEngine.Shared.StartCloudSync());
+
         SafeStart("cache prune", () => Services.CacheManager.Shared.ScheduleEnforce());
 
         // Ensure cloudflared/ffmpeg are present, THEN bring up the tunnel and
@@ -262,6 +277,11 @@ public partial class App : Application
         CloudRelay.Shared.Stop();
         _singleInstanceMutex?.ReleaseMutex();
         _singleInstanceMutex?.Dispose();
+        // Помечаем выход ШТАТНЫМ и дожидаемся слива очереди лога. Без этого следующий
+        // старт увидит exit=unclean и будет врать, что агент падал, — а падение и
+        // «пользователь вышел через трей» надо различать. Строго ПЕРЕД Exit(0):
+        // после него дописать в лог уже некому.
+        AgentLogger.Shared.MarkCleanExit();
         Environment.Exit(0);
     }
 }

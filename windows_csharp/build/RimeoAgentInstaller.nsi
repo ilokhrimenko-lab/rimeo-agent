@@ -41,6 +41,13 @@ Section "Install"
   DetailPrint "Stopping any running Rimeo Agent…"
   nsExec::ExecToLog 'taskkill /F /T /IM RimeoAgent.exe'
   nsExec::ExecToLog 'taskkill /F /T /IM cloudflared.exe'
+  ; Хелпер записи в Rekordbox. Он живёт секунды (агент запускает его на время Sync),
+  ; но именно в эти секунды он держит write-lock на своём .exe — а PyInstaller-onefile
+  ; вдобавок распаковывается во временную папку и держит её. Переустановка или
+  ; автообновление, попавшие в идущий Sync, упирались бы в "Error opening file for
+  ; writing" ПОСРЕДИ копирования файлов — то есть инсталлятор падал бы, оставив
+  ; полуустановленного агента. /T убивает и дерево процессов хелпера.
+  nsExec::ExecToLog 'taskkill /F /T /IM rbdb-sync-helper.exe'
   Sleep 1500
 
   SetOutPath "$INSTDIR"
