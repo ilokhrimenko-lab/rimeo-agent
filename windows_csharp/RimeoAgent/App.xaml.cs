@@ -25,15 +25,26 @@ public partial class App : Application
 
     public App()
     {
+        // Флаш ПОСЛЕ Log.Error здесь обязателен: рантайм убивает процесс сразу же
+        // после AppDomain.UnhandledException (событие уведомительное, предотвратить
+        // завершение нельзя), а запись в лог асинхронна — без синхронного слива
+        // самая важная строка, причина краша, рисковала не долететь до диска (см.
+        // инцидент 16.07: реальный процесс агента исчез без единой строки в логе).
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
             Log.Error($"Unhandled exception: {e.ExceptionObject}");
+            AgentLogger.Shared.Flush(TimeSpan.FromSeconds(2));
+        };
         TaskScheduler.UnobservedTaskException += (_, e) =>
         {
             Log.Error($"Unobserved task exception: {e.Exception}");
             e.SetObserved();
         };
         UnhandledException += (_, e) =>
+        {
             Log.Error($"Application unhandled exception: {e.Exception}");
+            AgentLogger.Shared.Flush(TimeSpan.FromSeconds(2));
+        };
 
         InitializeComponent();
     }
@@ -59,12 +70,17 @@ public partial class App : Application
         {
             // Раньше второй запуск просто молча умирал. С фоновым автостартом это
             // означало бы «клик по ярлыку ничего не делает» — поэтому будим первый.
+            // Не зовём MarkCleanExit()/BeginTracking() — этот процесс ничего не писал
+            // в run_state.json (см. AgentLogger.Boot), поэтому и чистить за собой
+            // нечего.
             Log.Warn("Another Rimeo Agent instance is already running — asking it to show its window");
             SignalRunningInstance();
-            AgentLogger.Shared.MarkCleanExit();
             Environment.Exit(0);
             return;
         }
+
+        // Только победитель mutex'а ведёт run_state.json — см. AgentLogger.Boot.
+        AgentLogger.Shared.BeginTracking();
 
         // Silent auto-update: install a build staged (downloaded) in the background
         // during the previous session BEFORE the UI/services come up, then relaunch.

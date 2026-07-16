@@ -48,6 +48,34 @@ import json
 import sys
 import uuid
 
+# Статичный SQLCipher-ключ формата Rekordbox 6/7 master.db — тот же самый, что
+# захардкожен в macOS-хелпере (RekordboxDBHelper/HelperMain.swift:4). Держать
+# оба места в синхроне при обновлении.
+#
+# ⚠️ БЕЗ ensure_key_cached() ниже pyrekordbox САМ полезет извлекать ключ:
+# Rekordbox6Database.__init__ первой же строкой зовёт get_config("rekordbox7"),
+# а та — _update_sqlite_key(), которая при неактуальном кэше (%APPDATA%\pyrekordbox\
+# rb.cache) сначала пробует достать ключ статически из app.asar, а если это не
+# вышло — открывает НАСТОЯЩИЙ rekordbox.exe через Frida, чтобы вытащить ключ
+# инъекцией в живой процесс (см. pyrekordbox/config.py: KeyExtractor). У
+# Rekordbox 7 UI живёт в отдельном Electron-процессе (rekordboxAgent.exe),
+# который форкается за секунды до того, как pyrekordbox убивает свой
+# Frida-spawn — поэтому окно Rekordbox остаётся видимым пользователю (баг,
+# пойманный Procmon 17.07.2026). Передать key= в конструктор НЕ спасает: этот
+# путь срабатывает раньше, чем конструктор вообще смотрит на свой параметр.
+# Правильный барьер — заранее записать валидный кэш-файл, тогда
+# _update_sqlite_key() видит актуальную версию и не лезет ни в asar, ни в Frida.
+REKORDBOX_DB_KEY = "402fd482c38817c35ffa8ffb8c7d93143b749e7d315df7a81732a1ff43608497"
+
+
+def ensure_key_cached():
+    """Пишет известный ключ в кэш pyrekordbox ДО первого Rekordbox6Database(),
+    чтобы _update_sqlite_key() не пыталась извлекать его сама (см. комментарий
+    у REKORDBOX_DB_KEY). Дёшево и идемпотентно — можно звать на каждый прогон."""
+    from pyrekordbox.config import write_db6_key_cache
+
+    write_db6_key_cache(REKORDBOX_DB_KEY)
+
 
 def fail(code, detail=""):
     """Понятная ошибка вместо stack-trace — её увидит iOS-юзер."""
@@ -97,8 +125,10 @@ def open_db(db_path):
     if not os.path.exists(want):
         fail("db_not_found", want)
 
+    ensure_key_cached()
+
     try:
-        db = Rekordbox6Database(path=want)
+        db = Rekordbox6Database(path=want, key=REKORDBOX_DB_KEY)
     except Exception as e:
         fail("db_open_failed", str(e))
 

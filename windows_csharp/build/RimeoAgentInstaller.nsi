@@ -1,6 +1,10 @@
 Unicode true
 ManifestSupportedOS all
-RequestExecutionLevel user
+; admin — иначе строки 69-72 (netsh http add urlacl / advfirewall) молча проваливаются
+; с "Access is denied" на обычной установке: сам RimeoAgent.exe (app.manifest) остаётся
+; asInvoker и без UAC при каждом запуске — элевейт нужен ТОЛЬКО инсталлятору, один раз,
+; чтобы one-time зарезервировать порт за "Everyone" (sddl=D:(A;;GX;;;WD)).
+RequestExecutionLevel admin
 
 !include "MUI2.nsh"
 

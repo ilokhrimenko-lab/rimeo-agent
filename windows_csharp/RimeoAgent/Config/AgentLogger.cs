@@ -327,6 +327,15 @@ public sealed class AgentLogger
     /// Пишет строку старта — с данными о ПРЕДЫДУЩЕМ запуске. Именно она отвечает на
     /// «агент падал или его перезапустили руками»: exit=unclean = MarkCleanExit() не
     /// звался, то есть процесс убит/упал (или его снёс апдейтер).
+    ///
+    /// ⚠️ ТОЛЬКО чтение + лог-строка, БЕЗ записи в run_state.json — зовётся ДО
+    /// mutex-проверки (второй инстанс тоже обязан оставить след в текстовом логе),
+    /// но если тут же писать файл, дубль-запуск (клик по ярлыку, пока агент уже в
+    /// трее) перехватывал бы run_state.json чужим pid за секунду до того, как сам
+    /// свернётся. Реальный инстанс это переживал молча: его heartbeat (см.
+    /// BeginTracking) видит чужой pid в файле и перестаёт его обновлять НАВСЕГДА —
+    /// и при следующем boot «prev=» показывал протухшую запись дубликата вместо
+    /// настоящей причины смерти реального процесса (инцидент 16.07).
     public void Boot()
     {
         var prev = "prev=(нет данных)";
@@ -340,6 +349,16 @@ public sealed class AgentLogger
                  + $"exit={(old.Clean ? "clean" : "unclean")})";
         }
 
+        var cfg = AppConfig.Shared;
+        Info($"[BOOT] ===== AGENT START pid={Environment.ProcessId} build={cfg.BuildNumber} port={AppConfig.Port} "
+           + $"log_max=5MB gens={Generations} {prev} =====");
+    }
+
+    /// Начинает вести run_state.json для ЭТОГО процесса: пишет его pid/started и
+    /// заводит heartbeat. Зовётся ТОЛЬКО победителем single-instance mutex'а (см.
+    /// App.xaml.cs) — то есть ровно один раз за реальную (не дублирующую) сессию.
+    public void BeginTracking()
+    {
         var pid = Environment.ProcessId;
         var now = DateTime.Now;
         WriteRunState(new RunState
@@ -349,10 +368,6 @@ public sealed class AgentLogger
             LastSeen  = now.ToString("o"),
             Clean     = false,
         });
-
-        var cfg = AppConfig.Shared;
-        Info($"[BOOT] ===== AGENT START pid={pid} build={cfg.BuildNumber} port={AppConfig.Port} "
-           + $"log_max=5MB gens={Generations} {prev} =====");
 
         // last_seen раз в минуту → uptime упавшего процесса восстановим с точностью ~1 мин.
         _heartbeat = new Timer(_ =>
@@ -376,15 +391,23 @@ public sealed class AgentLogger
         WriteRunState(st);
 
         Info($"[BOOT] ===== AGENT STOP pid={Environment.ProcessId} (clean) =====");
+        Flush(TimeSpan.FromSeconds(2));
+    }
 
-        // Дождаться слива очереди — иначе строка не долетит до диска (поток-писатель
-        // фоновый, рантайм убьёт его вместе с процессом). Таймаут: залипший диск не
-        // имеет права вешать выключение агента.
+    /// Синхронно дожидается, пока поток-писатель сольёт на диск всё, что уже стоит в
+    /// очереди (таймаут — залипший диск не должен вешать вызывающего). Запись в
+    /// очередь (Log/Info/Error) асинхронна: AutoFlush гарантирует диск только для
+    /// строк, которые писатель УЖЕ забрал из очереди. Обязателен перед любой точкой,
+    /// откуда рантайм может убить процесс сразу же (необработанное исключение) —
+    /// иначе самая важная строка, причина краша, может не долететь до файла (см.
+    /// инцидент 16.07: реальный процесс агента исчез без единой строки в логе).
+    public void Flush(TimeSpan timeout)
+    {
         try
         {
             using var done = new ManualResetEventSlim(false);
             _queue.Add(new Entry(null, done));
-            done.Wait(TimeSpan.FromSeconds(2));
+            done.Wait(timeout);
         }
         catch { }
     }
