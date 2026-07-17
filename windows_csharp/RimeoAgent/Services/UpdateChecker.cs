@@ -272,8 +272,16 @@ public sealed class UpdateChecker
         // Перезапуск в том же режиме: агент, поднятый автозапуском (--background),
         // после обновления не должен вылезти окном на передний план.
         var relaunchArgs = AgentSettings.LaunchedInBackground ? $" {AgentSettings.BackgroundFlag}" : "";
+        // taskkill ПЕРЕД xcopy: если rbdb-sync-helper.exe залип (напр. KeyExtractor
+        // из pyrekordbox виснет в while-без-таймаута, ждя ключ, который не пришёл —
+        // см. инцидент с авто-открытием Rekordbox), он держит свой .exe залоченным.
+        // xcopy результат не проверяет и следующая строка выполнится в любом
+        // случае — залоченный файл тихо останется СТАРЫМ, а RimeoAgent.exe при
+        // этом честно обновится: агент показывает новый билд, а конкретно этот
+        // хелпер — нет. Тот же приём, что уже есть в NSIS-инсталляторе на установке.
         File.WriteAllText(script, $@"@echo off
 timeout /t 2 /nobreak > nul
+taskkill /F /T /IM rbdb-sync-helper.exe > nul 2>&1
 xcopy /E /Y /I ""{newDirEsc}\*"" ""{current}\""
 start """" ""{Path.Combine(current, "RimeoAgent.exe")}""{relaunchArgs}
 ");
