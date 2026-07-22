@@ -167,6 +167,14 @@ final class DataStore {
                 // Atomic: a crash/shutdown mid-write must not leave a truncated
                 // JSON that fails to decode and resets the store (→ unpair).
                 try? raw.write(to: AppConfig.shared.dataFile, options: .atomic)
+                // H2: rimo_data.json holds the LAN PSK + cloud bearer token in the
+                // clear. Restrict it to the owner (0600) so another local user or a
+                // world-readable backup can't lift full-access credentials — the
+                // cloudflared creds next to it are already 0600. `.atomic` writes a
+                // fresh file under the default umask, so re-apply on every save.
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600],
+                    ofItemAtPath: AppConfig.shared.dataFile.path)
             }
         }
     }

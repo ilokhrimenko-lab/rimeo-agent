@@ -579,8 +579,11 @@ jobs:
             BUILD_NUMBER="${GITHUB_RUN_NUMBER}"
           fi
           echo "RELEASE_NAME=Release v1.0 (${BUILD_NUMBER})" >> "$GITHUB_ENV"
-          echo "MAC_ONLY=$( [[ '${{ github.ref_name }}' == mac-* ]] && echo true || echo false )" >> "$GITHUB_ENV"
-          echo "WIN_ONLY=$( [[ '${{ github.ref_name }}' == win-* ]] && echo true || echo false )" >> "$GITHUB_ENV"
+          # L7: use the shell var (set from GITHUB_REF_NAME above), NOT a ${{ }}
+          # expression interpolated straight into the script — a crafted tag name could
+          # otherwise break out of the quotes and inject shell.
+          echo "MAC_ONLY=$( [[ "$TAG_NAME" == mac-* ]] && echo true || echo false )" >> "$GITHUB_ENV"
+          echo "WIN_ONLY=$( [[ "$TAG_NAME" == win-* ]] && echo true || echo false )" >> "$GITHUB_ENV"
 
       - name: Upload to release (macOS + Windows)
         if: env.MAC_ONLY == 'false' && env.WIN_ONLY == 'false'

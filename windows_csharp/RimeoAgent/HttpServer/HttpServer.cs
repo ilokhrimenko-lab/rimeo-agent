@@ -125,7 +125,12 @@ public sealed class AgentHttpServer
                 body = ms.ToArray();
             }
 
-            agentReq = new AgentRequest(method, path, queryParams, headers, body);
+            var peer = PeerAddress(req);
+            agentReq = new AgentRequest(method, path, queryParams, headers, body)
+            {
+                // C1: unforgeable same-machine signal for the pairing_info loopback gate.
+                PeerIsLoopback = peer != null && IPAddress.IsLoopback(peer),
+            };
             await _router.RouteAsync(agentReq, resp);
         }
         catch (Exception ex)
@@ -429,4 +434,12 @@ public record AgentRequest(
     /// primary constructor сломало бы все существующие вызовы `new AgentRequest(...)`.
     /// "public" по умолчанию — путь, не требующий авторизации (AccessControl.RequiresAuth).
     public string Auth { get; set; } = "public";
+
+    /// True when the kernel-reported peer address is loopback (127.0.0.1 / ::1) — the
+    /// only UNFORGEABLE "same machine" signal. Set at construction from
+    /// HttpListenerRequest.RemoteEndPoint; used to gate /api/pairing_info (which hands
+    /// out the master PSK) to the agent's own WinUI over 127.0.0.1. Settable (not a
+    /// primary-constructor parameter) for the same reason as Auth: adding a positional
+    /// param would break every existing `new AgentRequest(...)` call.
+    public bool PeerIsLoopback { get; set; }
 }

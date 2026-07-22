@@ -55,8 +55,32 @@ public static class AccessControl
         "/api/agent/update", "/api/agent/update/status",
     };
 
-    public static bool RequiresAuth(string path) =>
-        DataProtectedPaths.Contains(path) || ControlProtectedPaths.Contains(path);
+    // Endpoints intentionally reachable WITHOUT the PSK/JWT gate. DEFAULT-DENY: the
+    // gate is an allow-list now — a path NOT here requires auth, so a route added
+    // later is protected by default instead of silently world-readable (the root-cause
+    // class of C1/M1/M4/M11). Kept small: handshake + read-only endpoints a fresh
+    // client / the web player hits before it holds a credential.
+    //
+    // ⚠️ /api/pairing_info stays here on purpose — its handler serves it to a loopback
+    // caller ONLY (the WinUI over 127.0.0.1; see PairingInfo/PeerIsLoopback), because
+    // the PSK gate cannot protect the endpoint that HANDS OUT the PSK. The analysis
+    // WRITE endpoints (start/stop/recheck) are deliberately ABSENT → now gated (M4
+    // unauth DoS). (Windows has no /api/admin/diag route.) DataProtectedPaths /
+    // ControlProtectedPaths above remain as the sensitivity taxonomy but no longer
+    // drive the gate.
+    public static readonly HashSet<string> PublicPaths = new()
+    {
+        "/api/pairing_info",   // handler-gated to loopback (WinUI over 127.0.0.1) only
+        "/api/check_pairing",
+        "/api/status", "/api/account", "/api/tunnel/status",
+        "/api/similar", "/api/playlist/recommendations",
+        "/api/analysis", "/api/analysis/status", "/api/analysis/track_list",
+        "/api/agent/update/status",
+    };
+
+    // DEFAULT-DENY: public only for PublicPaths; every other path — known today or
+    // added later — needs a PSK, JWT, or loopback/trusted origin.
+    public static bool RequiresAuth(string path) => !PublicPaths.Contains(path);
 
     /// Pure authorization core. Order: valid PSK → allow; else no named tunnel ⇒
     /// DENY (6001 fail-closed — was allow); else allow iff the server JWT validates.
@@ -306,6 +330,27 @@ public static class ComponentHostPolicy
         "github.com",
         "objects.githubusercontent.com",
         "release-assets.githubusercontent.com",
+    };
+
+    public static bool IsAllowed(string urlString)
+    {
+        if (!Uri.TryCreate(urlString, UriKind.Absolute, out var uri)) return false;
+        if (!string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase)) return false;
+        return AllowedHosts.Contains(uri.Host);
+    }
+}
+
+// Cloud endpoint pinning (M5: no PSK exfil / SSRF via attacker cloud_url).
+public static class CloudUrlPolicy
+{
+    // Hosts we will POST account link / login payloads to. Those payloads carry the
+    // LAN PSK (lan_secret), so a cloud_url from a request body / compound token must
+    // be pinned to the Rimeo cloud over https — otherwise a crafted value turns the
+    // agent into a PSK-exfiltration channel or an SSRF proxy (M5). The caller falls
+    // back to the baked RimeoAppUrl when this returns false.
+    public static readonly HashSet<string> AllowedHosts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "rimeo.app", "www.rimeo.app",
     };
 
     public static bool IsAllowed(string urlString)

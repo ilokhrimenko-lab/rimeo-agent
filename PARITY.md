@@ -153,3 +153,27 @@ PyInstaller-onefile, собирается на arm64-раннере и выхо�
 
 ⚠️ Имя `RimeoAgent_mac.zip` захардкожено в `UpdateChecker`. Переименуешь — автообновление
 у всех установленных агентов умрёт **молча**. Подробности: `memory/infrastructure.md`.
+
+## Безопасность (аудит build 259, фиксы 2026-07-22)
+
+Полная верификация находок → `memory/tasks/backlog.md` (секция «🔐 Аудит безопасности»).
+Статус фиксов: macOS верифицирован `swift build` + 32 теста; Windows — зеркало, C#-паттерны
+прогнаны в scratch-net8.0, полная сборка требует Windows/csfull-стенда.
+
+| Фикс | macOS | Windows | Замечание |
+|---|---|---|---|
+| **C1** pairing_info не отдаёт LAN PSK по сети | ✅ гейт `req.trusted` (только in-process UI) | ✅ гейт `PeerIsLoopback` (только 127.0.0.1) | Разный механизм: macOS UI зовёт роутер in-process (trusted), WinUI ходит по loopback+PSK. macOS строже (loopback-браузер тоже режется); на Windows остаётся DNS-rebind-остаток → L8/Host-header |
+| **Default-deny роутер** (`requiresAuth = !publicPaths`) | ✅ + 4 regression-теста | ✅ `PublicPaths` | Новый роут теперь protected по умолчанию (закрыл корень C1/M1/M4/M11 + NEW-diag) |
+| **M4** analysis start/stop/recheck за auth | ✅ | ✅ | убраны из publicPaths (обе) |
+| **M1** email/абс.пути только авторизованным | ✅ field-strip (status/account) | ✅ field-strip | `/api/admin/diag` теперь protected — но роут есть ТОЛЬКО на macOS |
+| **M11** `location` вырезан для неавториз. (similar/recs) | ✅ | ✅ | метадата остаётся, абс.путь — нет |
+| **M5** allow-list `cloud_url` (не слать PSK на чужой хост) | ✅ `CloudURLPolicy` | ✅ `CloudUrlPolicy` | аудит указал только Win — фикс на ОБЕИХ |
+| **M10** artwork fallback через path-guard | ✅ обе ветки (abs + `..`) | — (нет fallback на Win) | |
+| **NEW-3** валидация tunnel_id/hostname (YAML/traversal) | ✅ | ✅ | |
+| **NEW-4** не эхоить `cloud_token` в ответе link/login | ✅ | ✅ (link + login) | |
+| **L6** constant-time pairing-compare | ✅ | ✅ | |
+| **L6** CSPRNG для pairing-кода | ✅ (уже `SystemRandomNumberGenerator`) | ✅ был `new Random()` → `RandomNumberGenerator` | реальный фикс — только Windows |
+| **H2** rimo_data.json не world-readable | ✅ `chmod 0600` | ⏳ ACL/DPAPI — отложено | Слепая правка ACL рискует сломать чтение логина (=unpair всех). Нужен Windows-тест |
+| **L7** `${{ github.ref_name }}` не в run-шелл | ✅ build.yml (общий CI) | ✅ | через `$TAG_NAME` |
+| **H1** QR-секрет не уходит в api.qrserver.com | ✅ нейтрализован C1 (UI генерит QR локально) | ⏳ нужен локальный QR-энкодер | Windows-UI qrserver'ом рендерит pairing-QR; но pairing_info теперь loopback-only |
+| **H3/H4/H5/M6/M7/M9** CI/installer/подпись | ⏳ | ⏳ | требуют build-машины / signtool / SHA-lookup / Windows-теста инсталлятора — не правил вслепую |

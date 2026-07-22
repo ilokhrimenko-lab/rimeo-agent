@@ -80,11 +80,54 @@ final class SecurityGatesTests: XCTestCase {
     }
 
     func test_6004_publicHandshakeEndpoints_areNotGated() {
+        // These stay reachable without the PSK/JWT gate. `/api/pairing_info` is here
+        // too — but its HANDLER enforces req.trusted (see the C1 tests below), because
+        // the endpoint that hands out the PSK cannot be protected by a PSK gate.
         for p in ["/api/pairing_info", "/api/check_pairing", "/api/status",
                   "/api/account", "/api/similar", "/api/tunnel/status",
                   "/api/playlist/recommendations"] {
             XCTAssertFalse(AccessControl.requiresAuth(path: p), "\(p) must stay public")
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // C1 / default-deny — the auth gate is now an allow-list (requiresAuth == !public)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    func test_defaultDeny_unknownRoute_requiresAuth() {
+        // A route nobody classified (e.g. added later) must be protected BY DEFAULT,
+        // never silently world-readable. This is the tripwire for the C1/M1/M4/M11
+        // root cause (opt-in "default-open" authorization).
+        for p in ["/api/some_new_route", "/api/whatever", "/totally/unknown", "/"] {
+            XCTAssertTrue(AccessControl.requiresAuth(path: p), "\(p) must default to gated")
+        }
+    }
+
+    func test_M4_analysisWriteEndpoints_requireAuth() {
+        // Unauthenticated POST /api/analysis/start kicked off a full-library ffmpeg
+        // job (CPU/DoS). start/stop/recheck are now gated; the reads stay public.
+        for p in ["/api/analysis/start", "/api/analysis/stop", "/api/analysis/recheck"] {
+            XCTAssertTrue(AccessControl.requiresAuth(path: p), "\(p) must be gated (M4)")
+        }
+        for p in ["/api/analysis", "/api/analysis/status", "/api/analysis/track_list"] {
+            XCTAssertFalse(AccessControl.requiresAuth(path: p), "\(p) read stays public")
+        }
+    }
+
+    func test_M1_adminDiag_requiresAuth() {
+        // /api/admin/diag leaked absolute on-disk paths + the tunnel URL to anyone.
+        XCTAssertTrue(AccessControl.requiresAuth(path: "/api/admin/diag"),
+                      "admin/diag must be gated (M1)")
+    }
+
+    func test_C1_pairingInfo_overSocket_isForbidden() {
+        // The critical one: a NETWORK request (trusted == false, as every socket
+        // request is) must NOT receive the master PSK. The gate is skipped for
+        // pairing_info, so the handler's req.trusted guard is what stops the leak.
+        let resp = APIRouter.shared.route(HTTPRequest(
+            method: "GET", path: "/api/pairing_info",
+            queryParams: [:], headers: [:], body: Data(), trusted: false))
+        XCTAssertEqual(resp.status, 403, "pairing_info must be 403 over a socket")
     }
 
     func test_6004_playlistMutations_requireAuth() {

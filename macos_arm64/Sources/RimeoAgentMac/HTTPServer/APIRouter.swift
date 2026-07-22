@@ -433,7 +433,14 @@ final class APIRouter {
               !imagePath.isEmpty else { return nil }
 
         let fm = FileManager.default
-        if imagePath.hasPrefix("/"), fm.fileExists(atPath: imagePath) {
+        // M10: djmdContent.ImagePath comes from the Rekordbox DB, which a crafted /
+        // imported library controls. BOTH the absolute-path branch and the
+        // share-relative branch must clear the SAME library-containment guard the
+        // ?path= file endpoints use (LibraryPathGuard) — otherwise an ImagePath like
+        // "/Users/<u>/.ssh/id_rsa", or a "../../.." share-relative escape, would be
+        // served back as image bytes past the guard.
+        if imagePath.hasPrefix("/"), fm.fileExists(atPath: imagePath),
+           LibraryPathGuard.isAllowed(imagePath) {
             return imagePath
         }
 
@@ -441,7 +448,10 @@ final class APIRouter {
         let shareDir = (rbDir as NSString).appendingPathComponent("share")
         let rel = imagePath.hasPrefix("/") ? String(imagePath.dropFirst()) : imagePath
         let candidate = (shareDir as NSString).appendingPathComponent(rel)
-        return fm.fileExists(atPath: candidate) ? candidate : nil
+        guard fm.fileExists(atPath: candidate), LibraryPathGuard.isAllowed(candidate) else {
+            return nil
+        }
+        return candidate
     }
 
     // MARK: - /reveal
@@ -713,6 +723,17 @@ final class APIRouter {
     // MARK: - /api/pairing_info
 
     private func getPairingInfo(_ req: HTTPRequest) -> HTTPResponse {
+        // C1: this payload contains the persistent master LAN PSK (`secret`) + a cloud
+        // `mobile_token`. Serve it ONLY to the agent's own in-process UI (req.trusted).
+        // Every socket request — LAN, Cloudflare tunnel, cloud relay, or a same-machine
+        // browser drive-by (all leave trusted == false, HTTPServer.swift) — is refused,
+        // so the credential that authorises every protected endpoint is never handed to
+        // a network caller. The macOS UI renders its QR locally (QRCodeView) from the
+        // payload it gets via this in-process call, so nothing over the wire needs it.
+        guard req.trusted else {
+            logger.warning("Blocked non-trusted /api/pairing_info from \(req.clientIP)")
+            return .error("Forbidden", status: 403)
+        }
         let chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
         let code  = String((0..<5).map { _ in chars.randomElement()! })
 
@@ -797,7 +818,11 @@ final class APIRouter {
             return .error("code required", status: 400)
         }
         let stored = DataStore.shared.data.pairing_code
-        if stored == code.uppercased() || stored == code {
+        // L6: constant-time compare so response timing can't recover the code char by
+        // char. Empty stored ⇒ never matches (no code has been issued).
+        if !stored.isEmpty,
+           AccessControl.constantTimeEquals(stored, code.uppercased())
+            || AccessControl.constantTimeEquals(stored, code) {
             return .json(["status": "ok"])
         }
         return .error("Invalid pairing code", status: 403)
@@ -1185,7 +1210,8 @@ final class APIRouter {
               let json = try? JSONSerialization.jsonObject(with: data) else {
             return .error("Encode error", status: 500)
         }
-        return .json(["results": json])
+        // M11: unauthenticated callers get metadata but NOT absolute file paths.
+        return .json(["results": stripLocationsIfUnauthorized(json, authorized: isAuthorized(req))])
     }
 
     /// Ordered base membership to seed a first-time override of an existing
@@ -1404,7 +1430,8 @@ final class APIRouter {
               let resultsJSON = try? JSONSerialization.jsonObject(with: resultsData)
         else { return .error("Encode error", status: 500) }
 
-        return .json(["results": resultsJSON])
+        // M11: unauthenticated callers get metadata but NOT absolute file paths.
+        return .json(["results": stripLocationsIfUnauthorized(resultsJSON, authorized: isAuthorized(req))])
     }
 
     // MARK: - /api/logs
@@ -1429,12 +1456,16 @@ final class APIRouter {
         let data = DataStore.shared.data
         let dbExists = !cfg.dbPath.isEmpty && FileManager.default.fileExists(atPath: cfg.dbPath)
         let tunnel = currentTunnelInfo()
+        // M1: absolute on-disk paths leak the OS username + library layout. Only a
+        // trusted/authenticated caller gets them; anonymous callers see the existence
+        // booleans (which the UI needs) but not the paths themselves.
+        let authed = isAuthorized(req)
         return .json([
             "agent_id":   cfg.agentID,
             "version":    cfg.displayVersion,
-            "xml_path":   cfg.xmlPath,
+            "xml_path":   authed ? cfg.xmlPath : "",
             "xml_exists": FileManager.default.fileExists(atPath: cfg.xmlPath),
-            "db_path":    cfg.dbPath,
+            "db_path":    authed ? cfg.dbPath : "",
             "db_exists":  dbExists,
             "library_source": dbExists ? "db" : "xml",
             "cloud_url":  data.cloud_url,
@@ -1453,9 +1484,12 @@ final class APIRouter {
         let cfg  = AppConfig.shared
         let data = DataStore.shared.data
         let tunnel = currentTunnelInfo()
+        // M1: cloud_user_id is the account EMAIL. Disclose it only to a
+        // trusted/authenticated caller — never to an anonymous LAN/tunnel probe.
+        let authed = isAuthorized(req)
         return .json([
             "cloud_url":     data.cloud_url,
-            "cloud_user_id": data.cloud_user_id as Any,
+            "cloud_user_id": (authed ? data.cloud_user_id : nil) as Any,
             "is_linked":     !data.cloud_url.isEmpty,
             "agent_id":      cfg.agentID,
             "agent_url":     cfg.localAgentURL(),
@@ -1482,7 +1516,16 @@ final class APIRouter {
             cloudURL  = decoded.url.isEmpty ? cloudURL : decoded.url
             rawToken  = decoded.token
         }
-        if cloudURL.isEmpty { cloudURL = AppConfig.shared.rimeoAppURL }
+        // M5: the payload below carries the LAN PSK. cloud_url can come from the
+        // request body / compound token, so pin it to the Rimeo cloud over https —
+        // otherwise a crafted value exfiltrates the PSK / proxies an SSRF. Fall back to
+        // the baked rimeoAppURL when absent or off-list.
+        if cloudURL.isEmpty || !CloudURLPolicy.isAllowed(cloudURL) {
+            if !cloudURL.isEmpty {
+                logger.warning("Rejected off-list cloud_url in link_account: \(cloudURL)")
+            }
+            cloudURL = AppConfig.shared.rimeoAppURL
+        }
         cloudURL = cloudURL.hasSuffix("/") ? String(cloudURL.dropLast()) : cloudURL
 
         let cfg      = AppConfig.shared
@@ -1543,7 +1586,11 @@ final class APIRouter {
             TunnelProvisioner.shared.provisionIfNeeded()
         }
 
-        return .json(["status": "linked", "cloud_url": cloudURL, "result": result])
+        // NEW-4: do NOT echo the cloud's raw result blob (it carries cloud_token) back
+        // in the HTTP response. Strip the bearer secret before returning.
+        var safeResult = result
+        safeResult.removeValue(forKey: "cloud_token")
+        return .json(["status": "linked", "cloud_url": cloudURL, "result": safeResult])
     }
 
     // MARK: - /api/agent_login & /api/agent_signup (login-model)
@@ -1793,6 +1840,41 @@ final class APIRouter {
         guard let auth = req.headers["authorization"],
               auth.lowercased().hasPrefix("bearer ") else { return nil }
         return String(auth.dropFirst("bearer ".count))
+    }
+
+    /// True if the request is a trusted in-process call OR carries a valid credential
+    /// (PSK / server JWT). Re-runs the exact `AccessControl.decide` logic the gate
+    /// uses, but WITHOUT emitting a 401 — so a *public* endpoint can decide whether to
+    /// include sensitive fields (email, absolute paths, on-disk `location`) for the
+    /// caller. Used by M1 (status/account) and M11 (similar/recommendations).
+    private func isAuthorized(_ req: HTTPRequest) -> Bool {
+        if req.trusted { return true }
+        let secret   = DataStore.shared.data.lan_secret
+        let provided = req.queryParams["lan_token"] ?? bearerToken(req)
+        let aud      = TunnelManager.shared.namedHostname
+        let jwtToken = JWTValidator.extractToken(from: req)
+        return AccessControl.decide(
+            lanSecret: secret, providedToken: provided, namedHostname: aud,
+            jwtToken: jwtToken,
+            validate: { JWTValidator.validate(token: $0, expectedAudience: $1) }
+        ) == .allow
+    }
+
+    /// M11: strip the on-disk `location` from serialized similar/recommendation
+    /// results for UNAUTHENTICATED callers, so the public `/api/similar` +
+    /// `/api/playlist/recommendations` endpoints cannot be used to enumerate the whole
+    /// library's absolute file paths. Authenticated/trusted callers (the paired iOS
+    /// app, the agent UI) keep it — they need it to build /stream URLs. Input is the
+    /// `[ {track:{…,location}, score:{…}}, … ]` array these handlers already produce.
+    private func stripLocationsIfUnauthorized(_ json: Any, authorized: Bool) -> Any {
+        guard !authorized, var arr = json as? [[String: Any]] else { return json }
+        for i in arr.indices {
+            if var track = arr[i]["track"] as? [String: Any] {
+                track.removeValue(forKey: "location")
+                arr[i]["track"] = track
+            }
+        }
+        return arr
     }
 
     // MARK: - Helpers

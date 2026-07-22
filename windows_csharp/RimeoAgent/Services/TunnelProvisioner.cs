@@ -95,6 +95,25 @@ public sealed class TunnelProvisioner
         }
     }
 
+    /// A cloudflared tunnel UUID: hex digits + hyphens only. Rejecting anything else
+    /// blocks path traversal through the "{tunnelId}.json" credentials path and
+    /// injection into the YAML `tunnel:` line (NEW-3).
+    private static bool IsSafeTunnelId(string s)
+    {
+        if (s.Length is < 8 or > 64) return false;
+        foreach (var ch in s) if (!(Uri.IsHexDigit(ch) || ch == '-')) return false;
+        return true;
+    }
+
+    /// A DNS hostname: letters, digits, dot, hyphen. Rejecting whitespace/newlines/
+    /// colons blocks injection of extra YAML ingress rules into config.yml (NEW-3).
+    private static bool IsSafeHostname(string s)
+    {
+        if (s.Length is < 1 or > 253) return false;
+        foreach (var ch in s) if (!(char.IsLetterOrDigit(ch) || ch == '.' || ch == '-')) return false;
+        return true;
+    }
+
     private void Apply(Dictionary<string, JsonElement> r)
     {
         var tunnelId = r.TryGetValue("tunnel_id",       out var t) ? t.GetString() ?? "" : "";
@@ -103,6 +122,16 @@ public sealed class TunnelProvisioner
         if (tunnelId.Length == 0 || hostname.Length == 0 || credsB64.Length == 0)
         {
             Log.Warn("Tunnel provision: malformed payload, cannot apply");
+            return;
+        }
+
+        // NEW-3: tunnel_id + hostname are cloud-supplied. Before tunnel_id becomes a
+        // file path ("{tunnelId}.json") and both are interpolated into cloudflared's
+        // YAML config (ingress), validate them — a "../.." tunnel_id is a path
+        // traversal, a hostname with a newline injects extra YAML ingress rules.
+        if (!IsSafeTunnelId(tunnelId) || !IsSafeHostname(hostname))
+        {
+            Log.Warn("Tunnel provision: rejected unsafe tunnel_id/hostname");
             return;
         }
 

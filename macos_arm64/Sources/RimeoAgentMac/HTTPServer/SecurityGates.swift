@@ -61,11 +61,33 @@ enum AccessControl {
         "/api/agent/update/status",
     ]
 
+    /// Endpoints intentionally reachable WITHOUT the PSK/JWT gate. DEFAULT-DENY: the
+    /// gate is an allow-list now — a path NOT in this set requires auth, so a route
+    /// added later is protected by default instead of silently world-readable (the
+    /// root-cause class behind C1/M1/M4/M11). Kept deliberately small: handshake +
+    /// read-only endpoints a fresh client / the web player hits before it holds a
+    /// credential.
+    ///
+    /// ⚠️ `/api/pairing_info` stays here (its own handler serves it ONLY to the
+    /// in-process UI via `req.trusted` — the PSK/JWT gate can't protect the endpoint
+    /// that HANDS OUT the PSK). The analysis WRITE endpoints (start/stop/recheck) and
+    /// `/api/admin/diag` are deliberately ABSENT → they now require auth (M4 unauth
+    /// DoS / M1 path+tunnel disclosure). `dataProtectedPaths`/`controlProtectedPaths`
+    /// above remain as the sensitivity taxonomy but no longer drive the gate.
+    static let publicPaths: Set<String> = [
+        "/api/pairing_info",   // handler-gated to req.trusted (in-process UI only)
+        "/api/check_pairing",
+        "/api/status", "/api/account", "/api/tunnel/status",
+        "/api/similar", "/api/playlist/recommendations",
+        "/api/analysis", "/api/analysis/status", "/api/analysis/track_list",
+        "/api/agent/update/status",
+    ]
+
     /// True when a request to `path` must be authorised (PSK, JWT, or trusted
-    /// in-process origin). The router skips the gate only for public endpoints
-    /// (pairing handshake, status, similar, analysis reads).
+    /// in-process origin). DEFAULT-DENY: public only for `publicPaths`; every other
+    /// path — known today or added later — needs a credential.
     static func requiresAuth(path: String) -> Bool {
-        dataProtectedPaths.contains(path) || controlProtectedPaths.contains(path)
+        !publicPaths.contains(path)
     }
 
     /// Pure authorization core shared by the live `authGate`. Order:
@@ -404,6 +426,24 @@ enum ComponentHostPolicy {
     ]
 
     static func isAllowed(urlString: String) -> Bool {
+        guard let url = URL(string: urlString),
+              url.scheme?.lowercased() == "https",
+              let host = url.host?.lowercased() else { return false }
+        return allowedHosts.contains(host)
+    }
+}
+
+// MARK: - Cloud endpoint pinning (M5: no PSK exfil / SSRF via attacker cloud_url)
+
+enum CloudURLPolicy {
+    /// Hosts we will POST account link / login payloads to. Those payloads carry the
+    /// LAN PSK (`lan_secret`), so a `cloud_url` taken from a request body / compound
+    /// token must be pinned to the Rimeo cloud over https — otherwise a crafted value
+    /// turns the agent into a PSK-exfiltration channel or an SSRF proxy (M5). The
+    /// caller falls back to the baked rimeoAppURL when this returns false.
+    static let allowedHosts: Set<String> = ["rimeo.app", "www.rimeo.app"]
+
+    static func isAllowed(_ urlString: String) -> Bool {
         guard let url = URL(string: urlString),
               url.scheme?.lowercased() == "https",
               let host = url.host?.lowercased() else { return false }

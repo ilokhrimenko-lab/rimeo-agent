@@ -758,9 +758,24 @@ public sealed class ApiRouter
 
     private static async Task PairingInfo(AgentRequest req, HttpListenerResponse resp)
     {
+        // C1: this payload carries the persistent master LAN PSK (`secret`) + a cloud
+        // `mobile_token`. Serve it ONLY to a loopback caller — the agent's own WinUI
+        // over 127.0.0.1. A LAN peer or a Cloudflare-tunnel client never sees the
+        // credential that authorises every protected endpoint. pairing_info stays in
+        // AccessControl.PublicPaths (the PSK gate can't guard the endpoint that hands
+        // out the PSK); this loopback check is the real gate. Mirror of macOS
+        // getPairingInfo's req.trusted guard.
+        if (!req.PeerIsLoopback)
+        {
+            Log.Warn("Blocked non-loopback /api/pairing_info");
+            await WriteJson(resp, 403, new { error = "Forbidden" });
+            return;
+        }
         const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-        var rng  = new Random();
-        var code = new string(Enumerable.Range(0, 5).Select(_ => chars[rng.Next(chars.Length)]).ToArray());
+        // L6: cryptographically-secure pairing code (was System.Random — predictable).
+        var code = new string(Enumerable.Range(0, 5)
+            .Select(_ => chars[System.Security.Cryptography.RandomNumberGenerator.GetInt32(chars.Length)])
+            .ToArray());
 
         var psk = EnsureLanSecret();
         DataStore.Shared.Update(d => d.PairingCode = code);
@@ -833,8 +848,46 @@ public sealed class ApiRouter
         var code   = req.QueryParams.GetValueOrDefault("code", "");
         var stored = DataStore.Shared.Data.PairingCode;
         if (string.IsNullOrEmpty(code)) { await WriteJson(resp, 400, new { error = "code required" }); return; }
-        if (stored == code.ToUpper() || stored == code) await WriteJson(resp, 200, new { status = "ok" });
+        // L6: constant-time compare so response timing can't recover the code char by
+        // char. Empty stored ⇒ never matches (no code has been issued).
+        if (!string.IsNullOrEmpty(stored)
+            && (AccessControl.ConstantTimeEquals(stored, code.ToUpper())
+                || AccessControl.ConstantTimeEquals(stored, code)))
+            await WriteJson(resp, 200, new { status = "ok" });
         else await WriteJson(resp, 403, new { error = "Invalid pairing code" });
+    }
+
+    /// True if the request carries a valid credential (PSK / server JWT). Re-runs the
+    /// AccessControl.Decide logic the gate uses, WITHOUT writing a 401 — so a *public*
+    /// endpoint can decide whether to include sensitive fields (email, absolute paths,
+    /// on-disk `location`) for the caller. Used by M1 (status/account) and M11
+    /// (similar/recommendations). Windows has no in-process "trusted" origin (the WinUI
+    /// authenticates over loopback with the PSK), so there is no req.trusted branch.
+    private static bool IsAuthorized(AgentRequest req)
+    {
+        var secret   = DataStore.Shared.Data.LanSecret;
+        var provided = req.QueryParams.GetValueOrDefault("lan_token", "");
+        if (string.IsNullOrEmpty(provided)) provided = BearerToken(req) ?? "";
+        var aud      = TunnelManager.Shared.NamedHostname;
+        var jwtToken = JwtValidator.ExtractToken(req);
+        return AccessControl.Decide(secret, provided, aud, jwtToken, SafeValidate) == AccessDecision.Allow;
+    }
+
+    /// M11: strip the on-disk `location` from serialized similar/recommendation results
+    /// for UNAUTHENTICATED callers, so the public /api/similar +
+    /// /api/playlist/recommendations endpoints cannot enumerate the whole library's
+    /// absolute file paths. Authenticated callers keep it (iOS needs it to build
+    /// /stream URLs). Shape produced by those handlers: [ {track:{…,location}, score} ].
+    private static object StripLocationsIfUnauthorized(object results, bool authorized)
+    {
+        if (authorized) return results;
+        var node = System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(results));
+        if (node is System.Text.Json.Nodes.JsonArray arr)
+            foreach (var el in arr)
+                if (el is System.Text.Json.Nodes.JsonObject o
+                    && o["track"] is System.Text.Json.Nodes.JsonObject track)
+                    track.Remove("location");
+        return node ?? results;
     }
 
     // ── /api/save_note ───────────────────────────────────────────────────────
@@ -1258,7 +1311,8 @@ public sealed class ApiRouter
         var results = SimilarityEngine.Shared.RecommendForPlaylist(
             trackIds, lib, limit, useKey, exclude, offset);
 
-        await WriteJson(resp, 200, new { results });
+        // M11: unauthenticated callers get metadata but NOT absolute file paths.
+        await WriteJson(resp, 200, new { results = StripLocationsIfUnauthorized(results, IsAuthorized(req)) });
     }
 
     // ── Плейлисты: синк в Rekordbox (Фаза 6) ──────────────────────────────────
@@ -1517,7 +1571,8 @@ public sealed class ApiRouter
 
         // SimilarResult/MatchScore несут [JsonPropertyName] со snake_case — сериализуем как есть,
         // без ручного маппинга: так ключи не разъедутся при правке движка.
-        await WriteJson(resp, 200, new { results });
+        // M11: unauthenticated callers get metadata but NOT absolute file paths.
+        await WriteJson(resp, 200, new { results = StripLocationsIfUnauthorized(results, IsAuthorized(req)) });
     }
 
     // ── /api/status ───────────────────────────────────────────────────────────
@@ -1527,13 +1582,17 @@ public sealed class ApiRouter
         var cfg    = AppConfig.Shared;
         var data   = DataStore.Shared.Data;
         var tunnel = CurrentTunnelInfo();
+        // M1: absolute on-disk paths leak the OS username + library layout. Only a
+        // trusted/authenticated caller gets them; anonymous callers keep the existence
+        // booleans (which the UI needs) but not the paths.
+        var authed = IsAuthorized(req);
         await WriteJson(resp, 200, new
         {
             agent_id         = cfg.AgentId,
             version          = cfg.DisplayVersion,
-            xml_path         = cfg.XmlPath,
+            xml_path         = authed ? cfg.XmlPath : "",
             xml_exists       = File.Exists(cfg.XmlPath),
-            db_path          = cfg.DbPath,
+            db_path          = authed ? cfg.DbPath : "",
             db_exists        = File.Exists(cfg.DbPath),
             library_source   = File.Exists(cfg.DbPath) ? "db" : "xml",
             cloud_url        = data.CloudUrl,
@@ -1553,10 +1612,13 @@ public sealed class ApiRouter
         var cfg    = AppConfig.Shared;
         var data   = DataStore.Shared.Data;
         var tunnel = CurrentTunnelInfo();
+        // M1: cloud_user_id is the account EMAIL. Disclose it only to a
+        // trusted/authenticated caller — never to an anonymous LAN/tunnel probe.
+        var authed = IsAuthorized(req);
         await WriteJson(resp, 200, new
         {
             cloud_url         = data.CloudUrl,
-            cloud_user_id     = data.CloudUserId,
+            cloud_user_id     = authed ? data.CloudUserId : null,
             is_linked         = !string.IsNullOrEmpty(data.CloudUrl),
             agent_id          = cfg.AgentId,
             agent_url         = cfg.LocalAgentUrl(),
@@ -1593,7 +1655,16 @@ public sealed class ApiRouter
         }
         catch { }
 
-        if (string.IsNullOrEmpty(cloudUrl)) cloudUrl = AppConfig.RimeoAppUrl;
+        // M5: the payload below carries the LAN PSK. cloud_url can come from the
+        // request body / compound token, so pin it to the Rimeo cloud over https —
+        // otherwise a crafted value exfiltrates the PSK / proxies an SSRF. Fall back to
+        // the baked RimeoAppUrl when absent or off-list.
+        if (string.IsNullOrEmpty(cloudUrl) || !CloudUrlPolicy.IsAllowed(cloudUrl))
+        {
+            if (!string.IsNullOrEmpty(cloudUrl))
+                Log.Warn($"Rejected off-list cloud_url in link_account: {cloudUrl}");
+            cloudUrl = AppConfig.RimeoAppUrl;
+        }
         cloudUrl = cloudUrl.TrimEnd('/');
 
         var cfg     = AppConfig.Shared;
@@ -1635,6 +1706,8 @@ public sealed class ApiRouter
             AppState.Shared.RefreshFromData();
             CloudRelay.Shared.Start(cloudUrl, DataStore.Shared.Data.CloudToken);
 
+            // NEW-4: do NOT echo the cloud's raw result (it carries cloud_token) back.
+            result?.Remove("cloud_token");
             await WriteJson(resp, 200, new { status = "linked", cloud_url = cloudUrl, result });
         }
         catch (Exception ex) { await WriteJson(resp, 502, new { error = ex.Message }); }
@@ -1708,6 +1781,8 @@ public sealed class ApiRouter
             AppState.Shared.RefreshFromData();
             CloudRelay.Shared.Start(cloudUrl, cloudToken);
 
+            // NEW-4: do NOT echo the cloud's raw result (it carries cloud_token) back.
+            result?.Remove("cloud_token");
             await WriteJson(resp, 200, new { status = "ok", cloud_url = cloudUrl, result });
         }
         catch (Exception ex) { await WriteJson(resp, 502, new { error = ex.Message }); }

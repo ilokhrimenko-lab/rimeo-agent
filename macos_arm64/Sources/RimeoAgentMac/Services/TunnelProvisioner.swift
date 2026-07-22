@@ -92,12 +92,36 @@ final class TunnelProvisioner {
         return out
     }
 
+    /// A cloudflared tunnel UUID: hex digits + hyphens only. Rejecting anything else
+    /// blocks path traversal through the "{tunnelID}.json" credentials path and
+    /// injection into the YAML `tunnel:` line (NEW-3).
+    static func isSafeTunnelID(_ s: String) -> Bool {
+        guard (8...64).contains(s.count) else { return false }
+        return s.allSatisfy { $0.isHexDigit || $0 == "-" }
+    }
+
+    /// A DNS hostname: letters, digits, dot, hyphen. Rejecting whitespace/newlines/
+    /// colons blocks injection of extra YAML ingress rules into config.yml (NEW-3).
+    static func isSafeHostname(_ s: String) -> Bool {
+        guard (1...253).contains(s.count) else { return false }
+        return s.allSatisfy { $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" }
+    }
+
     private func apply(_ result: [String: Any]) {
         guard let tunnelID = result["tunnel_id"] as? String, !tunnelID.isEmpty,
               let hostname = result["hostname"] as? String, !hostname.isEmpty,
               let credsB64 = result["credentials_b64"] as? String, !credsB64.isEmpty,
               let creds = Data(base64Encoded: credsB64) else {
             logger.warning("Tunnel provision: malformed payload, cannot apply")
+            return
+        }
+
+        // NEW-3: tunnel_id + hostname are cloud-supplied. Before tunnel_id becomes a
+        // file path ("{tunnelID}.json") and both are interpolated into cloudflared's
+        // YAML config (ingress), validate them — a "../.." tunnel_id is a path
+        // traversal, a hostname with a newline injects extra YAML ingress rules.
+        guard Self.isSafeTunnelID(tunnelID), Self.isSafeHostname(hostname) else {
+            logger.warning("Tunnel provision: rejected unsafe tunnel_id/hostname")
             return
         }
 
