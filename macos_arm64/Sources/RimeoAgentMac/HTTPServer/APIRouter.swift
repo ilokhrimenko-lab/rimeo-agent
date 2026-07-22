@@ -1866,7 +1866,8 @@ final class APIRouter {
     /// library's absolute file paths. Authenticated/trusted callers (the paired iOS
     /// app, the agent UI) keep it — they need it to build /stream URLs. Input is the
     /// `[ {track:{…,location}, score:{…}}, … ]` array these handlers already produce.
-    private func stripLocationsIfUnauthorized(_ json: Any, authorized: Bool) -> Any {
+    /// `internal` (not `private`) so SecurityGatesTests can pin the strip behavior.
+    func stripLocationsIfUnauthorized(_ json: Any, authorized: Bool) -> Any {
         guard !authorized, var arr = json as? [[String: Any]] else { return json }
         for i in arr.indices {
             if var track = arr[i]["track"] as? [String: Any] {

@@ -130,6 +130,59 @@ final class SecurityGatesTests: XCTestCase {
         XCTAssertEqual(resp.status, 403, "pairing_info must be 403 over a socket")
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // M5 — cloud_url pinning (no PSK exfil / SSRF to an attacker host)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    func test_M5_cloudURLPolicy_pinsToRimeoHTTPS() {
+        XCTAssertTrue(CloudURLPolicy.isAllowed("https://rimeo.app"))
+        XCTAssertTrue(CloudURLPolicy.isAllowed("https://www.rimeo.app/api/agents/link"))
+        XCTAssertFalse(CloudURLPolicy.isAllowed("http://rimeo.app"))            // not https
+        XCTAssertFalse(CloudURLPolicy.isAllowed("https://evil.example"))        // off-list host
+        XCTAssertFalse(CloudURLPolicy.isAllowed("https://rimeo.app.evil.com"))  // suffix trick
+        XCTAssertFalse(CloudURLPolicy.isAllowed(""))
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW-3 — tunnel_id / hostname validation (YAML injection + path traversal)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    func test_NEW3_tunnelID_rejectsTraversalAndNonHex() {
+        XCTAssertTrue(TunnelProvisioner.isSafeTunnelID("a1b2c3d4-5678-90ab-cdef-1234567890ab"))
+        XCTAssertFalse(TunnelProvisioner.isSafeTunnelID("../../etc/passwd"))  // path traversal
+        XCTAssertFalse(TunnelProvisioner.isSafeTunnelID("id with space"))
+        XCTAssertFalse(TunnelProvisioner.isSafeTunnelID("short"))             // < 8 chars
+        XCTAssertFalse(TunnelProvisioner.isSafeTunnelID("zzzzzzzz"))          // non-hex
+    }
+
+    func test_NEW3_hostname_rejectsNewlineAndColon() {
+        XCTAssertTrue(TunnelProvisioner.isSafeHostname("abc.agent.rimeo.app"))
+        XCTAssertFalse(TunnelProvisioner.isSafeHostname("evil\ningress: bad"))  // YAML injection
+        XCTAssertFalse(TunnelProvisioner.isSafeHostname("host with space"))
+        XCTAssertFalse(TunnelProvisioner.isSafeHostname("http://x"))            // colon/slash
+        XCTAssertFalse(TunnelProvisioner.isSafeHostname(""))
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // M11 — strip on-disk `location` from public similar/recommendation results
+    // ─────────────────────────────────────────────────────────────────────────
+
+    func test_M11_stripsLocation_forUnauthorized_keepsMetadata() {
+        let input: [[String: Any]] = [
+            ["track": ["title": "T", "artist": "A", "location": "/Users/x/.ssh/id_rsa"],
+             "score": ["total": 1.0]],
+        ]
+        // Unauthorized: the absolute path is removed, the metadata is kept.
+        let stripped = APIRouter.shared.stripLocationsIfUnauthorized(input, authorized: false)
+        let strippedTrack = (stripped as? [[String: Any]])?.first?["track"] as? [String: Any]
+        XCTAssertNil(strippedTrack?["location"], "location must be stripped for unauth")
+        XCTAssertEqual(strippedTrack?["title"] as? String, "T", "metadata must be kept")
+        // Authorized: untouched (the paired iOS app needs location to stream).
+        let kept = APIRouter.shared.stripLocationsIfUnauthorized(input, authorized: true)
+        let keptTrack = (kept as? [[String: Any]])?.first?["track"] as? [String: Any]
+        XCTAssertEqual(keptTrack?["location"] as? String, "/Users/x/.ssh/id_rsa")
+    }
+
     func test_6004_playlistMutations_requireAuth() {
         for p in ["/api/playlist/create", "/api/playlist/create_folder",
                   "/api/playlist/add", "/api/playlist/remove",
