@@ -25,6 +25,13 @@ public sealed class RekordboxParser
     private double       _lastParseAt;
     private const double MinReparseInterval = 3.0;
 
+    // Текст последней ошибки чтения master.db (сменился ключ SQLCipher, поехала схема
+    // в новой версии Rekordbox). Без него UI не мог отличить «база не читается» от
+    // «библиотека честно пустая» и на любой ноль писал «could not be read».
+    // Паритет с macOS `RekordboxParser.masterDBError`.
+    private static string? _masterDbError;
+    public string? MasterDbError => _masterDbError;
+
     public LibraryData Parse()
     {
         lock (_lock) { return ApplyHistoryNames(ParseInternal()); }
@@ -74,7 +81,11 @@ public sealed class RekordboxParser
     private LibraryData ParseInternal()
     {
         var dbPath = AppConfig.Shared.DbPath;
-        if (AppConfig.Shared.DbSourceEnabled && !string.IsNullOrEmpty(dbPath) && File.Exists(dbPath))
+        var useDb  = AppConfig.Shared.DbSourceEnabled && !string.IsNullOrEmpty(dbPath) && File.Exists(dbPath);
+        // Источник БД выключили (или файла нет) — прошлая ошибка чтения больше не
+        // актуальна, иначе UI продолжал бы показывать предупреждение о master.db.
+        if (!useDb) _masterDbError = null;
+        if (useDb)
         {
             var mtime = DbMtime(dbPath);
             var key = $"db:{dbPath}";
@@ -273,6 +284,7 @@ public sealed class RekordboxParser
     {
         try
         {
+            _masterDbError = null;
             SQLitePCL.Batteries_V2.Init();
             var cs = new SqliteConnectionStringBuilder
             {
@@ -621,6 +633,7 @@ public sealed class RekordboxParser
         catch (Exception ex)
         {
             Log.Error($"master.db parse failed: {ex.Message}");
+            _masterDbError = ex.Message;
             return new LibraryData();
         }
     }

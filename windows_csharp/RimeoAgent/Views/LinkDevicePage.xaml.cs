@@ -44,6 +44,23 @@ public sealed partial class LinkDevicePage : Page
     private readonly TextBlock _footerLead   = new() { FontSize = 13, FontWeight = FontWeights.Medium, Foreground = UI.Secondary, VerticalAlignment = VerticalAlignment.Center };
     private readonly TextBlock _footerLinkLabel = new() { FontSize = 13, FontWeight = FontWeights.SemiBold, Foreground = UI.AccText };
     private Border   _sessionNote = null!;
+    private Border   _emblem      = null!;
+    private Button   _primaryBtn  = null!;
+    private readonly ProgressRing _primarySpinner = new()
+    {
+        IsActive = true, Width = 16, Height = 16, Foreground = UI.White,
+        VerticalAlignment = VerticalAlignment.Center, Visibility = Visibility.Collapsed
+    };
+    private Viewbox _primaryArrow = null!;
+    // Подсказка («Your session ended…») и ошибка входа — РАЗНЫЕ сообщения. Пока они
+    // делили один TextBlock, первая же ошибка стирала объяснение, зачем вообще
+    // показан экран входа. macOS держит их раздельно (infoMsg + statusMsg).
+    private readonly TextBlock _info = new()
+    {
+        FontSize = 13, FontWeight = FontWeights.Medium, TextWrapping = TextWrapping.Wrap,
+        TextAlignment = TextAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center,
+        Foreground = UI.Secondary, Width = 374, Visibility = Visibility.Collapsed
+    };
     private readonly TextBlock _status = new()
     {
         FontSize = 13, FontWeight = FontWeights.Medium, TextWrapping = TextWrapping.Wrap,
@@ -69,7 +86,7 @@ public sealed partial class LinkDevicePage : Page
         if (!string.IsNullOrEmpty(lastEmail))
         {
             _emailBox.Text = lastEmail;
-            ShowStatus("Your session ended — sign in to reconnect this agent.", ok: true);
+            ShowInfo("Your session ended — sign in to reconnect this agent.");
             Loaded += (_, _) => _passwordBox.Focus(FocusState.Programmatic);
         }
         else
@@ -78,10 +95,12 @@ public sealed partial class LinkDevicePage : Page
         }
     }
 
+    private const double TitleBarHeight = 52;
+
     private Grid Build()
     {
         var root = new Grid();
-        root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(52) });
+        root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(TitleBarHeight) });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
         var titlebar = BuildTitlebar();
@@ -114,30 +133,53 @@ public sealed partial class LinkDevicePage : Page
         grid.Children.Add(brand);
         TitleBarDragRegion = brand;
 
-        var controls = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        var controls = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Stretch };
         controls.Children.Add(WindowButton(UI.Icon(12, UI.WinCtrl, 1.6, "M5 12L19 12"),
             (_, _) => MainWindow.Instance?.MinimizeGate()));
         controls.Children.Add(WindowButton(UI.Icon(12, UI.WinCtrl, 1.6,
             "M6.5 5H17.5A1.5 1.5 0 0 1 19 6.5V17.5A1.5 1.5 0 0 1 17.5 19H6.5A1.5 1.5 0 0 1 5 17.5V6.5A1.5 1.5 0 0 1 6.5 5Z"),
             (_, _) => MainWindow.Instance?.ToggleMaximizeGate()));
         controls.Children.Add(WindowButton(UI.Icon(12, UI.WinCtrl, 1.6, "M6 6L18 18", "M18 6L6 18"),
-            (_, _) => MainWindow.Instance?.CloseGate()));
+            (_, _) => MainWindow.Instance?.CloseGate(), close: true));
         Grid.SetColumn(controls, 1);
         grid.Children.Add(controls);
 
         return new Border { Background = UI.WinChrome, Child = grid };
     }
 
-    private static Button WindowButton(UIElement icon, RoutedEventHandler onClick)
+    // Высота ровно по полосе титлбара (52): при 46 сверху и снизу оставалось по 3px
+    // пустоты, тогда как нативные caption-кнопки занимают полную высоту. У «закрыть» —
+    // красная подсветка на наведении, как в системном чроме Windows.
+    private static Button WindowButton(UIElement icon, RoutedEventHandler onClick, bool close = false)
     {
         var b = new Button
         {
-            Width = 46, Height = 46, Padding = new Thickness(0), CornerRadius = new CornerRadius(0),
-            BorderThickness = new Thickness(0), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+            Width = 46, Height = TitleBarHeight, Padding = new Thickness(0), CornerRadius = new CornerRadius(0),
+            BorderThickness = new Thickness(0), Background = UI.Clear,
+            VerticalAlignment = VerticalAlignment.Stretch,
             Content = icon
         };
+        var hover = close ? UI.Red : UI.Chip;
+        b.Resources["ButtonBackground"]             = UI.Clear;
+        b.Resources["ButtonBackgroundPointerOver"]  = hover;
+        b.Resources["ButtonBackgroundPressed"]      = hover;
+        b.Resources["ButtonBorderBrush"]            = UI.Clear;
+        b.Resources["ButtonBorderBrushPointerOver"] = UI.Clear;
+        b.Resources["ButtonBorderBrushPressed"]     = UI.Clear;
+        if (close)
+            b.PointerEntered += (_, _) => RecolorIcon(icon, UI.White);
+        if (close)
+            b.PointerExited += (_, _) => RecolorIcon(icon, UI.WinCtrl);
         b.Click += onClick;
         return b;
+    }
+
+    private static void RecolorIcon(UIElement icon, SolidColorBrush brush)
+    {
+        if (icon is Viewbox { Child: Canvas canvas })
+            foreach (var child in canvas.Children)
+                if (child is Microsoft.UI.Xaml.Shapes.Path p)
+                    p.Stroke = brush;
     }
 
     // ── Centered sign-in / create-account card ────────────────────────────────
@@ -150,14 +192,14 @@ public sealed partial class LinkDevicePage : Page
             HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center
         };
 
-        // Account emblem
-        gate.Children.Add(new Border
+        // Account emblem (в режиме Create account получает «плюс» — как на macOS)
+        _emblem = new Border
         {
             Width = 60, Height = 60, CornerRadius = new CornerRadius(17),
             Background = UI.LockBg, BorderBrush = UI.LockBrd, BorderThickness = new Thickness(1),
-            HorizontalAlignment = HorizontalAlignment.Center,
-            Child = UI.Icon(28, UI.Acc, 2, "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z", "M5 20a7 7 0 0 1 14 0")
-        });
+            HorizontalAlignment = HorizontalAlignment.Center
+        };
+        gate.Children.Add(_emblem);
 
         var headingBlock = new StackPanel
         {
@@ -179,10 +221,24 @@ public sealed partial class LinkDevicePage : Page
         form.Children.Add(BuildFooter());
         _sessionNote = BuildSessionNote();
         form.Children.Add(_sessionNote);
+        form.Children.Add(_info);
         form.Children.Add(_status);
         gate.Children.Add(form);
 
-        host.Children.Add(gate);
+        // Форма живёт на фиксированных ширинах и высоте ~600: при 150% системном
+        // масштабе в невысоком окне низ (кнопка входа) просто обрезался без шанса
+        // доскроллить.
+        host.Children.Add(new ScrollViewer
+        {
+            Content = gate,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            // Content-alignment обязателен: без него ScrollViewer прижимает форму к
+            // верху, и на большом окне она перестала бы стоять по центру.
+            VerticalContentAlignment = VerticalAlignment.Center,
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            Padding = new Thickness(0, 24, 0, 24)
+        });
         return host;
     }
 
@@ -198,7 +254,7 @@ public sealed partial class LinkDevicePage : Page
         _emailBox.Padding = new Thickness(0);
         _emailBox.VerticalAlignment = VerticalAlignment.Center;
         _emailBox.KeyDown += (_, e) => { if (e.Key == VirtualKey.Enter) Submit(); };
-        StripFieldChrome(_emailBox);
+        UI.StripFieldChrome(_emailBox);
 
         var icon = UI.Icon(17, UI.Dim, 2,
             "M4 5H20A1 1 0 0 1 21 6V18A1 1 0 0 1 20 19H4A1 1 0 0 1 3 18V6A1 1 0 0 1 4 5Z", "M3 7l9 6 9-6");
@@ -219,12 +275,10 @@ public sealed partial class LinkDevicePage : Page
         Grid.SetColumn(pwLabel, 0);
         headerRow.Children.Add(pwLabel);
 
-        _forgotBtn = new Button
-        {
-            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0), Padding = new Thickness(0),
-            Content = new TextBlock { Text = "Forgot password?", FontSize = 13, FontWeight = FontWeights.Medium, Foreground = UI.AccText }
-        };
-        _forgotBtn.Click += (_, _) => OpenForgot();
+        _forgotBtn = UI.LinkButton(
+            new TextBlock { Text = "Forgot password?", FontSize = 13, FontWeight = FontWeights.Medium, Foreground = UI.AccText },
+            (_, _) => OpenForgot());
+        _forgotBtn.Padding = new Thickness(0);
         _helper = new TextBlock { Text = "Use 8+ characters", FontSize = 13, Foreground = UI.Dim, VerticalAlignment = VerticalAlignment.Center, Visibility = Visibility.Collapsed };
 
         var right = new Grid { HorizontalAlignment = HorizontalAlignment.Right };
@@ -241,8 +295,15 @@ public sealed partial class LinkDevicePage : Page
         _passwordBox.Padding = new Thickness(0);
         _passwordBox.VerticalAlignment = VerticalAlignment.Center;
         _passwordBox.KeyDown += (_, e) => { if (e.Key == VirtualKey.Enter) Submit(); };
-        StripFieldChrome(_passwordBox);
-        _passwordBox.PasswordRevealMode = PasswordRevealMode.Hidden;
+        UI.StripFieldChrome(_passwordBox);
+        // Peek, а не Hidden: встроенный «глазок» был выключен, и при опечатке
+        // пользователь не мог себя проверить — только «Sign-in failed». На macOS
+        // кнопка показа пароля есть. Красим её в наш Dim, чтобы не выпадала из поля.
+        _passwordBox.PasswordRevealMode = PasswordRevealMode.Peek;
+        _passwordBox.Resources["TextControlButtonForeground"] = UI.Dim;
+        _passwordBox.Resources["TextControlButtonForegroundPointerOver"] = UI.AccText;
+        _passwordBox.Resources["TextControlButtonBackground"] = UI.Clear;
+        _passwordBox.Resources["TextControlButtonBackgroundPointerOver"] = UI.Chip;
 
         var lockIcon = UI.Icon(17, UI.Dim, 2,
             "M5 11H19A1 1 0 0 1 20 12V20A1 1 0 0 1 19 21H5A1 1 0 0 1 4 20V12A1 1 0 0 1 5 11Z", "M8 11V8a4 4 0 0 1 8 0v3");
@@ -278,25 +339,8 @@ public sealed partial class LinkDevicePage : Page
         };
     }
 
-    // Strip the WinUI TextBox/PasswordBox default-template chrome (inner fill, border,
-    // focus underline, rounded corners) so only the outer custom InputRow Border shows.
-    // Setting local Background/BorderThickness alone is not enough — the PointerOver/
-    // Focused visual states re-apply TextControl* theme brushes; override them on the
-    // control's own Resources (the same technique MainWindow uses for NavigationView).
-    private static void StripFieldChrome(Control c)
-    {
-        var clear = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-        foreach (var key in new[]
-        {
-            "TextControlBackground", "TextControlBackgroundPointerOver",
-            "TextControlBackgroundFocused", "TextControlBackgroundDisabled",
-            "TextControlBorderBrush", "TextControlBorderBrushPointerOver",
-            "TextControlBorderBrushFocused", "TextControlBorderBrushDisabled",
-        })
-            c.Resources[key] = clear;
-        c.Resources["TextControlBorderThemeThickness"] = new Thickness(0);
-        c.CornerRadius = new CornerRadius(0);
-    }
+    // Снятие системного хрома с полей переехало в UI.StripFieldChrome — тем же приёмом
+    // теперь лечатся поля на Settings (баг-репорт, лимит кэша).
 
     private Button BuildPrimaryButton()
     {
@@ -305,8 +349,10 @@ public sealed partial class LinkDevicePage : Page
             Orientation = Orientation.Horizontal, Spacing = 9,
             HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center
         };
+        _primaryArrow = UI.Icon(17, UI.White, 2.1, "M5 12H19", "M13 6l6 6-6 6");
+        content.Children.Add(_primarySpinner);
         content.Children.Add(_primaryLabel);
-        content.Children.Add(UI.Icon(17, UI.White, 2.1, "M5 12H19", "M13 6l6 6-6 6"));
+        content.Children.Add(_primaryArrow);
 
         var b = new Button
         {
@@ -327,7 +373,10 @@ public sealed partial class LinkDevicePage : Page
         b.Resources["ButtonForegroundPressed"]      = UI.White;
         b.Resources["ButtonBorderBrushPointerOver"] = clearBrush;
         b.Resources["ButtonBorderBrushPressed"]     = clearBrush;
+        b.Resources["ButtonBackgroundDisabled"]     = UI.Alpha(UI.Acc, 0xB0);
+        b.Resources["ButtonForegroundDisabled"]     = UI.White;
         b.Click += (_, _) => Submit();
+        _primaryBtn = b;
         return b;
     }
 
@@ -335,12 +384,8 @@ public sealed partial class LinkDevicePage : Page
     {
         var stack = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 5, HorizontalAlignment = HorizontalAlignment.Center };
         stack.Children.Add(_footerLead);
-        var linkBtn = new Button
-        {
-            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0), Padding = new Thickness(0),
-            Content = _footerLinkLabel
-        };
-        linkBtn.Click += (_, _) => ToggleMode();
+        var linkBtn = UI.LinkButton(_footerLinkLabel, (_, _) => ToggleMode());
+        linkBtn.Padding = new Thickness(0);
         stack.Children.Add(linkBtn);
         return stack;
     }
@@ -378,6 +423,18 @@ public sealed partial class LinkDevicePage : Page
         _footerLead.Text = _isSignIn ? "New to Rimeo?" : "Already have an account?";
         _footerLinkLabel.Text = _isSignIn ? "Create account" : "Sign in";
         _sessionNote.Visibility = _isSignIn ? Visibility.Visible : Visibility.Collapsed;
+
+        // В busy менялся только текст: стрелка «→» оставалась, спиннера не было, и
+        // кнопка выглядела нажимаемой (macOS: ProgressView + скрытая стрелка + disabled).
+        _primarySpinner.Visibility = _busy ? Visibility.Visible : Visibility.Collapsed;
+        _primaryArrow.Visibility   = _busy ? Visibility.Collapsed : Visibility.Visible;
+        if (_primaryBtn != null) _primaryBtn.IsEnabled = !_busy;
+
+        // Эмблема в режиме создания аккаунта получает «плюс».
+        _emblem.Child = _isSignIn
+            ? UI.Icon(28, UI.Acc, 2, "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z", "M5 20a7 7 0 0 1 14 0")
+            : UI.Icon(28, UI.Acc, 2, "M11 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z", "M4 20a7 7 0 0 1 12.5-4.3",
+                                     "M18 15.5v6", "M15 18.5h6");
     }
 
     private void ToggleMode()
@@ -447,5 +504,11 @@ public sealed partial class LinkDevicePage : Page
         _status.Visibility = Visibility.Visible;
         _status.Text = text;
         _status.Foreground = ok ? UI.Secondary : UI.Red;
+    }
+
+    private void ShowInfo(string text)
+    {
+        _info.Visibility = Visibility.Visible;
+        _info.Text = text;
     }
 }

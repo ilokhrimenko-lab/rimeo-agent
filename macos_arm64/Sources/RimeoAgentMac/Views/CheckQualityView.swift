@@ -89,7 +89,7 @@ struct CheckQualityRootView: View {
             Text("Check quality")
                 .font(.system(size: 23, weight: .bold))
                 .foregroundColor(C.text)
-            Text("Frequency analysis · spec")
+            Text("Frequency analysis · spek")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(C.dim)
         }

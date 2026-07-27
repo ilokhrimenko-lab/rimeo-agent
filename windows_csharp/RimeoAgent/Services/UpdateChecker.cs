@@ -125,6 +125,21 @@ public sealed class UpdateChecker
 
     private static string StagedZipPath => Path.Combine(AppConfig.Shared.BaseDir, "staged_update.zip");
 
+    /// <summary>
+    /// Версия уже скачанного (застейдженного) билда, который применится на следующем
+    /// запуске — или null, если ничего не скачано. Нужна UI: без неё Settings
+    /// предлагали «Check for Updates», хотя новый билд уже лежал на диске.
+    /// </summary>
+    public string? StagedVersion
+    {
+        get
+        {
+            var tag = DataStore.Shared.Data.StagedUpdateTag;
+            if (string.IsNullOrEmpty(tag) || !File.Exists(StagedZipPath)) return null;
+            return ParseBuild(tag) > ParseBuild(AppConfig.Shared.BuildNumber) ? tag : null;
+        }
+    }
+
     // Hourly background check: if a strictly-newer build is available, download its
     // zip to a staging file and record the tag. No UI — installed on next launch.
     public void CheckAndStageSilently()

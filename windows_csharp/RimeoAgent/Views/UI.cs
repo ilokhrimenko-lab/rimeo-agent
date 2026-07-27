@@ -53,7 +53,16 @@ internal static class UI
     public static SolidColorBrush Btn2Txt    => new(Pick(0x2B3445, 0xE6E8EC));
     public static SolidColorBrush SegTrack   => new(Pick(0xEBEDF1, 0x23262E));
     public static SolidColorBrush SegActive  => new(Pick(0xFFFFFF, 0x363C46));
+    public static SolidColorBrush SwitchOff  => new(Pick(0xD7DAE0, 0x3A3F49)); // выключенный тумблер
     public static SolidColorBrush White      => new(Microsoft.UI.Colors.White);
+    public static SolidColorBrush Clear      => new(Microsoft.UI.Colors.Transparent);
+
+    /// <summary>Тот же цвет с другой альфой — для мягких подложек и ховеров.</summary>
+    public static SolidColorBrush Alpha(SolidColorBrush b, byte alpha)
+    {
+        var c = b.Color;
+        return new SolidColorBrush(Color.FromArgb(alpha, c.R, c.G, c.B));
+    }
 
     // ── Link Device gate (custom window chrome + code cells) ─────────────────
     public static SolidColorBrush WinChrome  => new(Pick(0xFFFFFF, 0x16181C)); // titlebar strip
@@ -101,7 +110,9 @@ internal static class UI
         Text = text,
         FontSize = 30,
         FontWeight = FontWeights.ExtraBold,
-        Foreground = Text
+        Foreground = Text,
+        // Без переноса заголовок обрезается в узком окне и на 150% системном масштабе.
+        TextWrapping = TextWrapping.Wrap
     };
 
     public static TextBlock Subtitle(string text) => new()
@@ -129,6 +140,25 @@ internal static class UI
         TextTrimming = TextTrimming.CharacterEllipsis
     };
 
+    /// <summary>
+    /// Путь моноширинным: длинный урезается ПО СЕРЕДИНЕ, чтобы осталось имя файла.
+    /// Обычное многоточие в конце (единственный режим WinUI) съедало ровно то, ради
+    /// чего путь и показан — macOS для путей использует `.truncationMode(.middle)`.
+    /// </summary>
+    public static TextBlock MonoPath(string path, SolidColorBrush? color = null, double size = 13)
+    {
+        const int max = 62, head = 16;
+        var text = path;
+        if (path.Length > max)
+        {
+            var tail = path[^(max - head - 1)..];
+            text = $"{path[..head]}…{tail}";
+        }
+        var tb = Mono(text, color, size);
+        tb.TextTrimming = TextTrimming.CharacterEllipsis;   // страховка на узком окне
+        return tb;
+    }
+
     public static TextBlock SectionLabel(string text) => new()
     {
         Text = text.ToUpperInvariant(),
@@ -154,7 +184,11 @@ internal static class UI
 
         if (trailing != null)
         {
-            trailing.VerticalAlignment = VerticalAlignment.Bottom;
+            // По верхней строке заголовка, а не по низу блока: с Bottom пилюля версии
+            // на Settings вставала на уровень подзаголовка. macOS выравнивает по базовой
+            // линии тайтла (`HStack(alignment: .firstTextBaseline)`).
+            trailing.VerticalAlignment = VerticalAlignment.Top;
+            trailing.Margin = new Thickness(12, 10, 0, 0);
             Grid.SetColumn(trailing, 1);
             grid.Children.Add(trailing);
         }
@@ -173,33 +207,66 @@ internal static class UI
     };
 
     // ── Buttons ─────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Пришпиливает заливку/текст/обводку кнопки ко всем визуальным состояниям.
+    /// Без этого шаблон WinUI в PointerOver/Pressed подменяет фон `ContentPresenter`
+    /// на системный (почти белый) — у Primary белый текст оказывался на белом фоне,
+    /// то есть кнопка «исчезала» под курсором. Точечный обход уже жил в LinkDevicePage;
+    /// теперь он общий для всей дизайн-системы.
+    /// </summary>
+    private static void PinStates(Button b, SolidColorBrush bg, SolidColorBrush fg,
+                                  SolidColorBrush? border = null, SolidColorBrush? hoverBg = null)
+    {
+        var over = hoverBg ?? bg;
+        b.Resources["ButtonBackground"]             = bg;
+        b.Resources["ButtonBackgroundPointerOver"]  = over;
+        b.Resources["ButtonBackgroundPressed"]      = over;
+        b.Resources["ButtonBackgroundDisabled"]     = bg;
+        b.Resources["ButtonForeground"]             = fg;
+        b.Resources["ButtonForegroundPointerOver"]  = fg;
+        b.Resources["ButtonForegroundPressed"]      = fg;
+        b.Resources["ButtonForegroundDisabled"]     = fg;
+        b.Resources["ButtonBorderBrush"]            = border ?? Clear;
+        b.Resources["ButtonBorderBrushPointerOver"] = border ?? Clear;
+        b.Resources["ButtonBorderBrushPressed"]     = border ?? Clear;
+        b.Resources["ButtonBorderBrushDisabled"]    = border ?? Clear;
+    }
+
     public static Button PrimaryButton(string title, RoutedEventHandler onClick, SolidColorBrush? bg = null)
     {
+        var fill = bg ?? Acc;
         var b = new Button
         {
             Content = new TextBlock { Text = title, FontSize = 14, FontWeight = FontWeights.SemiBold, Foreground = White },
-            Background = bg ?? Acc,
+            Background = fill,
             BorderThickness = new Thickness(0),
             CornerRadius = new CornerRadius(13),
             Padding = new Thickness(20, 11, 20, 11),
             HorizontalAlignment = HorizontalAlignment.Left
         };
+        // Ховер — тот же акцент чуть светлее/темнее, а не системный белый.
+        PinStates(b, fill, White, null, Alpha(fill, 0xE0));
         b.Click += onClick;
         return b;
     }
 
     public static Button SecondaryButton(string title, RoutedEventHandler onClick, SolidColorBrush? fg = null)
     {
+        var ink = fg ?? Btn2Txt;
         var b = new Button
         {
-            Content = new TextBlock { Text = title, FontSize = 14, FontWeight = FontWeights.SemiBold, Foreground = fg ?? Btn2Txt },
+            Content = new TextBlock { Text = title, FontSize = 14, FontWeight = FontWeights.SemiBold, Foreground = ink },
             Background = Btn2,
             BorderBrush = Btn2Brd,
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(12),
-            Padding = new Thickness(16, 9, 16, 9),
+            // Вертикальный padding 11, как у Primary: иначе в одной строке (Settings →
+            // «Clear Cache» рядом с «Save») кнопки разной высоты.
+            Padding = new Thickness(16, 11, 16, 11),
             HorizontalAlignment = HorizontalAlignment.Left
         };
+        PinStates(b, Btn2, ink, Btn2Brd, Chip);
         b.Click += onClick;
         return b;
     }
@@ -214,9 +281,27 @@ internal static class UI
             BorderBrush = RedBrd,
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(12),
-            Padding = new Thickness(16, 9, 16, 9),
+            Padding = new Thickness(16, 11, 16, 11),
             HorizontalAlignment = HorizontalAlignment.Left
         };
+        PinStates(b, RedSoft, Red, RedBrd, Alpha(Red, 0x22));
+        b.Click += onClick;
+        return b;
+    }
+
+    /// <summary>Кнопка-ссылка: только текст акцентом, без фона и рамки во всех состояниях.</summary>
+    public static Button LinkButton(UIElement content, RoutedEventHandler onClick)
+    {
+        var b = new Button
+        {
+            Content = content,
+            Background = Clear,
+            BorderThickness = new Thickness(0),
+            Padding = new Thickness(2, 6, 2, 6),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            HorizontalContentAlignment = HorizontalAlignment.Left
+        };
+        PinStates(b, Clear, AccText, Clear, Chip);
         b.Click += onClick;
         return b;
     }
@@ -224,8 +309,88 @@ internal static class UI
     public static ToggleSwitch Toggle(bool on, Action<bool> changed)
     {
         var t = new ToggleSwitch { IsOn = on, OnContent = null, OffContent = null, MinWidth = 0 };
+        // Включённый тумблер по умолчанию красится ЛИЧНЫМ акцентом Windows (у кого-то
+        // розовым) — в дизайн-системе он обязан быть Acc, а выключенный — SwitchOff
+        // (macOS `RimeoSwitchStyle`).
+        foreach (var key in new[] { "ToggleSwitchFillOn", "ToggleSwitchFillOnPointerOver", "ToggleSwitchFillOnPressed" })
+            t.Resources[key] = Acc;
+        foreach (var key in new[] { "ToggleSwitchStrokeOn", "ToggleSwitchStrokeOnPointerOver", "ToggleSwitchStrokeOnPressed" })
+            t.Resources[key] = Acc;
+        foreach (var key in new[] { "ToggleSwitchFillOff", "ToggleSwitchFillOffPointerOver", "ToggleSwitchFillOffPressed" })
+            t.Resources[key] = SwitchOff;
+        foreach (var key in new[] { "ToggleSwitchStrokeOff", "ToggleSwitchStrokeOffPointerOver", "ToggleSwitchStrokeOffPressed" })
+            t.Resources[key] = SwitchOff;
+        t.Resources["ToggleSwitchKnobFillOn"]  = White;
+        t.Resources["ToggleSwitchKnobFillOnPointerOver"] = White;
+        t.Resources["ToggleSwitchKnobFillOnPressed"] = White;
         t.Toggled += (s, _) => changed(((ToggleSwitch)s).IsOn);
         return t;
+    }
+
+    /// <summary>Чекбокс в акценте Rimeo вместо системного (macOS `RimeoCheckboxStyle`).</summary>
+    public static CheckBox Checkbox(bool on, string label, Action<bool> changed)
+    {
+        var c = new CheckBox
+        {
+            IsChecked = on,
+            Content = new TextBlock { Text = label, FontSize = 15, FontWeight = FontWeights.Medium, Foreground = Text }
+        };
+        foreach (var key in new[]
+        {
+            "CheckBoxCheckBackgroundFillChecked", "CheckBoxCheckBackgroundFillCheckedPointerOver",
+            "CheckBoxCheckBackgroundFillCheckedPressed",
+            "CheckBoxCheckBackgroundStrokeChecked", "CheckBoxCheckBackgroundStrokeCheckedPointerOver",
+            "CheckBoxCheckBackgroundStrokeCheckedPressed",
+        })
+            c.Resources[key] = Acc;
+        c.Resources["CheckBoxCheckGlyphForegroundChecked"] = White;
+        c.Checked   += (_, _) => changed(true);
+        c.Unchecked += (_, _) => changed(false);
+        return c;
+    }
+
+    /// <summary>Спиннер в акценте Rimeo (по умолчанию берёт системный акцент Windows).</summary>
+    public static ProgressRing Spinner(double size = 18) =>
+        new() { IsActive = true, Width = size, Height = size, Foreground = Acc };
+
+    /// <summary>
+    /// Снимает системный хром с TextBox/PasswordBox (внутренняя заливка, рамка,
+    /// акцентное подчёркивание при фокусе), чтобы виден был только наш контейнер.
+    /// Локальных Background/BorderThickness мало: состояния PointerOver/Focused
+    /// заново применяют TextControl*-кисти темы.
+    /// </summary>
+    public static void StripFieldChrome(Control c)
+    {
+        foreach (var key in new[]
+        {
+            "TextControlBackground", "TextControlBackgroundPointerOver",
+            "TextControlBackgroundFocused", "TextControlBackgroundDisabled",
+            "TextControlBorderBrush", "TextControlBorderBrushPointerOver",
+            "TextControlBorderBrushFocused", "TextControlBorderBrushDisabled",
+        })
+            c.Resources[key] = Clear;
+        c.Resources["TextControlBorderThemeThickness"] = new Thickness(0);
+        c.Resources["TextControlBorderThemeThicknessFocused"] = new Thickness(0);
+        c.CornerRadius = new CornerRadius(0);
+    }
+
+    /// <summary>
+    /// Поле ввода в оформлении Rimeo: наша заливка/рамка/радиус вместо системных,
+    /// системный хром снят. Для полей, которые живут БЕЗ внешнего контейнера
+    /// (баг-репорт, лимит кэша) — в отличие от `InputRow` на экране входа.
+    /// </summary>
+    public static void StyleField(Control c, double radius = 12)
+    {
+        StripFieldChrome(c);
+        c.Background  = Field;
+        c.BorderBrush = Brd;
+        c.BorderThickness = new Thickness(1);
+        c.CornerRadius = new CornerRadius(radius);
+        c.Foreground = Text;
+        c.Resources["TextControlButtonForeground"] = Dim;              // «глазок» / крестик очистки
+        c.Resources["TextControlButtonForegroundPointerOver"] = AccText;
+        c.Resources["TextControlButtonBackground"] = Clear;
+        c.Resources["TextControlButtonBackgroundPointerOver"] = Chip;
     }
 
     // ── Status & steps ──────────────────────────────────────────────────────

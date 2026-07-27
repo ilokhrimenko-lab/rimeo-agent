@@ -1,7 +1,6 @@
 using System;
 using System.ComponentModel;
 using System.Net.Http;
-using System.Text.Json;
 using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -24,6 +23,19 @@ public sealed partial class AccountPage : Page
         { "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z", "M3 12h18M12 3c2.5 2.5 2.5 15 0 18M12 3c-2.5 2.5-2.5 15 0 18" };
     private static readonly string[] PhoneIcon =
         { "M9 2H15A2 2 0 0 1 17 4V20A2 2 0 0 1 15 22H9A2 2 0 0 1 7 20V4A2 2 0 0 1 9 2Z", "M11 18h2" };
+    // Статус аккаунта. Раньше это был FontIcon с глифами Segoe MDL2 — но обе строки
+    // глифов в исходнике были ПУСТЫМИ (потерялись при редактировании), поэтому иконка
+    // не рисовалась вовсе, а Spacing строки оставался: заголовок уезжал вправо
+    // относительно кнопки Sign out. Векторные пути не зависят от системного шрифта.
+    private static readonly string[] CheckCircleIcon =
+        { "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z", "M8 12.5l2.5 2.5L16 9.5" };
+    private static readonly string[] AlertCircleIcon =
+        { "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z", "M12 7.5v5.5", "M12 16.4h.01" };
+
+    private const double StatusIconSize = 22;
+    private const double StatusGap      = 11;
+    /// <summary>Отступ текстовой колонки статуса: ширина иконки + Spacing строки.</summary>
+    private const double StatusIndent   = StatusIconSize + StatusGap;
 
     private readonly StackPanel _statusHost  = new() { Orientation = Orientation.Vertical, Spacing = 16 };
     private readonly StackPanel _devicesHost = new() { Orientation = Orientation.Vertical, Spacing = 11 };
@@ -34,9 +46,8 @@ public sealed partial class AccountPage : Page
     {
         InitializeComponent();
         Content = Build();
-        RebuildStatus();
+        RefreshAccount();
         RebuildDevices();
-        _ = RefreshAccount();
         AppState.Shared.PropertyChanged += OnAppStateChanged;
         Unloaded += (_, _) => AppState.Shared.PropertyChanged -= OnAppStateChanged;
     }
@@ -44,12 +55,13 @@ public sealed partial class AccountPage : Page
     private void OnAppStateChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(AppState.PhoneConnected) ||
-            e.PropertyName == nameof(AppState.CloudLinked))
+            e.PropertyName == nameof(AppState.CloudLinked) ||
+            e.PropertyName == nameof(AppState.CloudEmail))
         {
             DispatcherQueue.TryEnqueue(() =>
             {
                 RebuildDevices();
-                _ = RefreshAccount();   // link state changed → refresh top status too
+                RefreshAccount();   // link state changed → refresh top status too
             });
         }
     }
@@ -117,18 +129,29 @@ public sealed partial class AccountPage : Page
             FontWeight = FontWeights.SemiBold, Foreground = UI.AccText,
             VerticalAlignment = VerticalAlignment.Center
         });
-        var btn = new Button
+        // Без явного выравнивания Button тянулся на всю ширину карточки и центрировал
+        // содержимое — ссылка уезжала в середину, хотя список над ней и подпись под ней
+        // выровнены влево.
+        Button btn = null!;
+        btn = UI.LinkButton(row, (_, _) =>
         {
-            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
-            BorderThickness = new Thickness(0), Padding = new Thickness(2, 6, 2, 0), Content = row
-        };
-        var flyout = new Flyout { Content = BuildQRFlyout() };
-        btn.Click += (_, _) =>
-        {
-            try { flyout.ShowAt(btn); }
+            try { QRFlyout().ShowAt(btn); }
             catch (Exception ex) { Log.Error($"Show QR flyout failed: {ex.Message}"); }
-        };
+        });
+        btn.Margin = new Thickness(0, 2, 0, 0);
         return btn;
+    }
+
+    /// <summary>Флайаут в оформлении Rimeo: системный презентер даёт свой фон и радиус 8.</summary>
+    private static Flyout QRFlyout()
+    {
+        var style = new Style(typeof(FlyoutPresenter));
+        style.Setters.Add(new Setter(Control.BackgroundProperty, UI.Surf));
+        style.Setters.Add(new Setter(Control.BorderBrushProperty, UI.CardBrd));
+        style.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(1)));
+        style.Setters.Add(new Setter(Control.CornerRadiusProperty, new CornerRadius(18)));
+        style.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(20)));
+        return new Flyout { Content = BuildQRFlyout(), FlyoutPresenterStyle = style };
     }
 
     // QR popover mirroring macOS: a code that points at rimeo.app/open so the user
@@ -148,29 +171,38 @@ public sealed partial class AccountPage : Page
             ? new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(qrPath))
             : new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(
                 new Uri($"https://api.qrserver.com/v1/create-qr-code/?size=360x360&data={Uri.EscapeDataString(PhoneAppUrl)}"));
-        panel.Children.Add(new Border
+
+        var qrImage = new Microsoft.UI.Xaml.Controls.Image { Width = 180, Height = 180, Source = qrSource };
+        var qrBox = new Border
         {
-            Background = new SolidColorBrush(Microsoft.UI.Colors.White),
+            Background = UI.White,
             CornerRadius = new CornerRadius(10), Padding = new Thickness(8),
             HorizontalAlignment = HorizontalAlignment.Center,
-            Child = new Microsoft.UI.Xaml.Controls.Image
+            Child = qrImage
+        };
+        // Ассет мог не попасть в сборку, а удалённый рендер QR недоступен офлайн —
+        // без этого пользователь видел бы пустой белый квадрат 180×180 без объяснения.
+        qrImage.ImageFailed += (_, _) =>
+        {
+            qrBox.Background = UI.Chip;
+            qrBox.Child = new TextBlock
             {
-                Width = 180, Height = 180,
-                Source = qrSource
-            }
-        });
+                Width = 180, Height = 180, FontSize = 13, Foreground = UI.Secondary,
+                Text = $"Open {AppConfig.RimeoAppUrl.Replace("https://", "")}/open on your phone",
+                TextWrapping = TextWrapping.Wrap, TextAlignment = TextAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center
+            };
+        };
+        panel.Children.Add(qrBox);
 
-        var openBtn = new Button
-        {
-            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
-            BorderThickness = new Thickness(0), HorizontalAlignment = HorizontalAlignment.Center,
-            Content = new TextBlock { Text = "Open in browser instead", FontSize = 12, FontWeight = FontWeights.SemiBold, Foreground = UI.AccText }
-        };
-        openBtn.Click += async (_, _) =>
-        {
-            try { await Launcher.LaunchUriAsync(new Uri(PhoneAppUrl)); }
-            catch (Exception ex) { Log.Error($"Open phone-app link failed: {ex.Message}"); }
-        };
+        var openBtn = UI.LinkButton(
+            new TextBlock { Text = "Open in browser instead", FontSize = 12, FontWeight = FontWeights.SemiBold, Foreground = UI.AccText },
+            async (_, _) =>
+            {
+                try { await Launcher.LaunchUriAsync(new Uri(PhoneAppUrl)); }
+                catch (Exception ex) { Log.Error($"Open phone-app link failed: {ex.Message}"); }
+            });
+        openBtn.HorizontalAlignment = HorizontalAlignment.Center;
         panel.Children.Add(openBtn);
 
         return panel;
@@ -226,15 +258,9 @@ public sealed partial class AccountPage : Page
     {
         _statusHost.Children.Clear();
 
-        var color = _linked ? UI.Green : UI.Red;
-        var icon = new FontIcon
-        {
-            Glyph = _linked ? "" : "",   // CheckMark / Error
-            FontFamily = new FontFamily("Segoe MDL2 Assets"),
-            FontSize = 20,
-            Foreground = color,
-            VerticalAlignment = VerticalAlignment.Center
-        };
+        var icon = UI.Icon(StatusIconSize, _linked ? UI.Green : UI.Red, 2,
+            _linked ? CheckCircleIcon : AlertCircleIcon);
+        icon.VerticalAlignment = VerticalAlignment.Center;
 
         var textStack = new StackPanel { Orientation = Orientation.Vertical, Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
         textStack.Children.Add(new TextBlock
@@ -242,32 +268,44 @@ public sealed partial class AccountPage : Page
             Text = _linked ? "Signed in to Rimeo" : "Not signed in",
             FontSize = 17, FontWeight = FontWeights.Bold, Foreground = UI.Text, TextWrapping = TextWrapping.Wrap
         });
-        if (_linked)
-            textStack.Children.Add(new TextBlock { Text = _who, FontSize = 13, FontWeight = FontWeights.Medium, Foreground = UI.Secondary, TextWrapping = TextWrapping.Wrap });
-
-        _statusHost.Children.Add(UI.HStack(11, icon, textStack));
-
-        if (_linked)
-            _statusHost.Children.Add(UI.DestructiveButton("Sign out", Unlink_Click));
-    }
-
-    private async Task RefreshAccount()
-    {
-        try
+        textStack.Children.Add(new TextBlock
         {
-            using var http = new HttpClient();
-            var json = await http.GetStringAsync($"http://127.0.0.1:{AppConfig.Port}/api/account");
-            var obj = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json);
-            if (obj == null) return;
+            Text = _linked ? _who : "Sign in with your Rimeo account to connect this computer.",
+            FontSize = 13, FontWeight = FontWeights.Medium, Foreground = UI.Secondary,
+            TextWrapping = TextWrapping.Wrap
+        });
 
-            _linked = obj.TryGetValue("is_linked", out var l) && l.GetBoolean();
-            var email = obj.TryGetValue("cloud_user_id", out var e) ? e.GetString() ?? "" : "";
-            _who = !string.IsNullOrEmpty(email) ? email : DataStore.Shared.Data.CloudUrl;
+        _statusHost.Children.Add(UI.HStack(StatusGap, icon, textStack));
 
-            DispatcherQueue.TryEnqueue(RebuildStatus);
-        }
-        catch { }
+        // Кнопка выравнивается по левому краю текстовой колонки, а не по краю карточки —
+        // иначе заголовок и действие висят на разных вертикалях.
+        var action = _linked
+            ? UI.DestructiveButton("Sign out", Unlink_Click)
+            : UI.PrimaryButton("Sign in", SignIn_Click);
+        action.Margin = new Thickness(StatusIndent, 0, 0, 0);
+        _statusHost.Children.Add(action);
     }
+
+    // Состояние аккаунта берём из локального стора, а НЕ из GET /api/account: тот
+    // отдаёт cloud_user_id только авторизованному вызывающему (lan_token/JWT), а
+    // страница ходила без токена — email всегда приходил null и подпись сваливалась
+    // на fallback "https://rimeo.app". macOS-агент читает appState.cloudEmail так же.
+    private void RefreshAccount()
+    {
+        var data = DataStore.Shared.Data;
+        _linked = !string.IsNullOrEmpty(data.CloudUrl);
+        var email = AppState.Shared.CloudEmail;
+        if (string.IsNullOrEmpty(email)) email = data.CloudUserId ?? "";
+        _who = !string.IsNullOrEmpty(email) ? email : data.CloudUrl;
+
+        RebuildStatus();
+    }
+
+    // "Not signed in" без выхода на форму входа — тупик: гейт показывался только при
+    // старте процесса, так что после Sign out (или принудительного разлогина облаком)
+    // вернуться было некуда. Возвращаем окно на экран входа.
+    private void SignIn_Click(object sender, RoutedEventArgs e)
+        => MainWindow.Instance?.ReturnToLinkGate();
 
     private async void Unlink_Click(object sender, RoutedEventArgs e)
     {
@@ -275,7 +313,7 @@ public sealed partial class AccountPage : Page
         {
             using var http = new HttpClient();
             await http.PostAsync($"http://127.0.0.1:{AppConfig.Port}/api/unlink_account?lan_token={Uri.EscapeDataString(RimeoAgent.Models.DataStore.Shared.Data.LanSecret)}", new StringContent(""));
-            await RefreshAccount();
+            RefreshAccount();
         }
         catch (Exception ex) { Log.Error($"Sign out failed: {ex.Message}"); }
     }

@@ -19,8 +19,17 @@ namespace RimeoAgent.Views;
 // DSP lives in Services/SpectrumAnalyzer.cs (a port of Spek's pipeline).
 public sealed partial class CheckSpekPage : Page
 {
-    private readonly StackPanel _content = new() { Spacing = 14 };
+    // Ширина как на macOS (`.frame(maxWidth: 760, alignment: .leading)`): без неё
+    // спектрограмма и «How to read» расползались на весь широкий монитор.
+    private readonly StackPanel _content = new()
+    {
+        Spacing = 14, MaxWidth = 760, HorizontalAlignment = HorizontalAlignment.Left
+    };
     private string _fileName = "";
+
+    // Пунктирная рамка и иконка drop-зоны: перекрашиваются, пока файл висит над окном.
+    private Rectangle? _dropFrame;
+    private Viewbox?   _dropIcon;
 
     // Time axis is laid out against the live spectrogram width (it's a Star column),
     // so it's repositioned on the image's SizeChanged.
@@ -34,13 +43,14 @@ public sealed partial class CheckSpekPage : Page
         var (scroll, stack) = UI.Page(22);
         stack.Children.Add(UI.ScreenHeader(
             "Check spek",
-            "Frequency analysis · spec — check whether a track is genuine lossless or a re-encode."));
+            "Frequency analysis · spek — check whether a track is genuine lossless or a re-encode."));
         stack.Children.Add(_content);
         Content = scroll;
 
-        AllowDrop = true;
-        DragOver += OnDragOver;
-        Drop     += OnDrop;
+        AllowDrop  = true;
+        DragOver  += OnDragOver;
+        DragLeave += OnDragLeave;
+        Drop      += OnDrop;
 
         ShowIdle();
     }
@@ -57,7 +67,7 @@ public sealed partial class CheckSpekPage : Page
     {
         _content.Children.Clear();
         var v = new StackPanel { Spacing = 14, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 44, 0, 44) };
-        v.Children.Add(new ProgressRing { IsActive = true, Width = 40, Height = 40 });
+        v.Children.Add(UI.Spinner(40));
         v.Children.Add(new TextBlock { Text = "Analyzing audio…", FontSize = 14, FontWeight = FontWeights.Medium, Foreground = UI.Secondary, HorizontalAlignment = HorizontalAlignment.Center });
         _content.Children.Add(UI.Card(v, 20));
     }
@@ -68,7 +78,7 @@ public sealed partial class CheckSpekPage : Page
         var v = new StackPanel { Spacing = 12, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 30, 0, 30) };
         v.Children.Add(new TextBlock { Text = "Couldn't analyze this file", FontSize = 16, FontWeight = FontWeights.SemiBold, Foreground = UI.Text, HorizontalAlignment = HorizontalAlignment.Center });
         v.Children.Add(new TextBlock { Text = "The file couldn't be decoded. Try another audio file.", FontSize = 13, Foreground = UI.Secondary, HorizontalAlignment = HorizontalAlignment.Center, TextWrapping = TextWrapping.Wrap });
-        v.Children.Add(UI.PrimaryButton("Open audio file…", (_, _) => OpenPicker()));
+        v.Children.Add(CenteredOpenButton());
         _content.Children.Add(UI.Card(v, 20));
     }
 
@@ -80,9 +90,13 @@ public sealed partial class CheckSpekPage : Page
         var toolbar = new Grid();
         toolbar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         toolbar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        // Иконка волны перед именем файла — как на macOS-тулбаре.
+        var fnIcon = UI.Icon(14, UI.AccText, 2, "M3 12h2M7 8v8M11 5v14M15 9v6M19 11h2");
+        fnIcon.VerticalAlignment = VerticalAlignment.Center;
         var fn = new TextBlock { Text = _fileName, FontSize = 13, FontWeight = FontWeights.Medium, Foreground = UI.Secondary, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
-        Grid.SetColumn(fn, 0);
-        toolbar.Children.Add(fn);
+        var fnRow = UI.HStack(10, fnIcon, fn);
+        Grid.SetColumn(fnRow, 0);
+        toolbar.Children.Add(fnRow);
         var another = UI.SecondaryButton("Open another", (_, _) => OpenPicker());
         Grid.SetColumn(another, 1);
         toolbar.Children.Add(another);
@@ -109,16 +123,36 @@ public sealed partial class CheckSpekPage : Page
 
     // ── Drop zone ───────────────────────────────────────────────────────────────
 
+    // UI.PrimaryButton по умолчанию прижат влево (HorizontalAlignment.Left) — так он и
+    // стоит в карточках-списках. В центрированных блоках (drop-зона, экран ошибки)
+    // ширину колонки задаёт самая длинная строка текста, и кнопка съезжала к её левому
+    // краю вместо оси текста.
+    private Button CenteredOpenButton()
+    {
+        var b = UI.PrimaryButton("Open audio file…", (_, _) => OpenPicker());
+        b.HorizontalAlignment = HorizontalAlignment.Center;
+        return b;
+    }
+
     private FrameworkElement BuildDropZone()
     {
         var v = new StackPanel { Spacing = 18, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+
+        // Крупная иконка над заголовком — macOS ставит `waveform.badge.magnifyingglass`
+        // 48pt; без неё главный empty-state страницы был просто двумя строками текста.
+        _dropIcon = UI.Icon(48, UI.Dim, 1.6,
+            "M3 12h2M7 8v8M11 5v14M15 8v8M19 11h2",
+            "M17.5 17.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z", "M20 20l2.5 2.5");
+        _dropIcon.HorizontalAlignment = HorizontalAlignment.Center;
+        v.Children.Add(_dropIcon);
+
         var titles = new StackPanel { Spacing = 6, HorizontalAlignment = HorizontalAlignment.Center };
         titles.Children.Add(new TextBlock { Text = "Drop an audio file here", FontSize = 17, FontWeight = FontWeights.SemiBold, Foreground = UI.Text, HorizontalAlignment = HorizontalAlignment.Center });
         titles.Children.Add(new TextBlock { Text = "WAV · AIFF · MP3 · FLAC · M4A — or click to choose", FontSize = 13, Foreground = UI.Secondary, HorizontalAlignment = HorizontalAlignment.Center });
         v.Children.Add(titles);
-        v.Children.Add(UI.PrimaryButton("Open audio file…", (_, _) => OpenPicker()));
+        v.Children.Add(CenteredOpenButton());
 
-        var dashed = new Rectangle
+        _dropFrame = new Rectangle
         {
             RadiusX = 18, RadiusY = 18,
             StrokeThickness = 1.5,
@@ -127,11 +161,27 @@ public sealed partial class CheckSpekPage : Page
             Fill = UI.Surf
         };
         var grid = new Grid { Height = 300 };
-        grid.Children.Add(dashed);
+        grid.Children.Add(_dropFrame);
         var centered = new Grid { HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Center };
         centered.Children.Add(v);
         grid.Children.Add(centered);
         return grid;
+    }
+
+    // Обратная связь на перетаскивание: раньше DragOver только разрешал операцию, и
+    // зона никак не откликалась на файл под курсором (macOS красит фон в accSoft,
+    // рамку и иконку — в acc).
+    private void HighlightDropZone(bool active)
+    {
+        if (_dropFrame != null)
+        {
+            _dropFrame.Stroke = active ? UI.Acc : UI.CardBrd;
+            _dropFrame.Fill   = active ? UI.AccSoft : UI.Surf;
+        }
+        if (_dropIcon?.Child is Canvas canvas)
+            foreach (var child in canvas.Children)
+                if (child is Microsoft.UI.Xaml.Shapes.Path p)
+                    p.Stroke = active ? UI.Acc : UI.Dim;
     }
 
     // ── Metadata chips ───────────────────────────────────────────────────────────
@@ -165,12 +215,13 @@ public sealed partial class CheckSpekPage : Page
         bool genuine = r.Verdict == SpekVerdict.Genuine;
         var accent = genuine ? UI.Green : UI.Amber;
 
-        var glyph = new TextBlock
-        {
-            Text = genuine ? "✓" : "!",
-            FontSize = 18, FontWeight = FontWeights.Bold, Foreground = UI.White,
-            HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center
-        };
+        // Векторная галочка / восклицательный знак вместо текстовых «✓» и «!»:
+        // текстовый «!» в круге 40px читался слабо и зависел от системного шрифта.
+        var glyph = genuine
+            ? UI.Icon(19, UI.White, 2.4, "M5 12.5l4.5 4.5L19 7.5")
+            : UI.Icon(19, UI.White, 2.4, "M12 6.5v7", "M12 17.2h.01");
+        glyph.HorizontalAlignment = HorizontalAlignment.Center;
+        glyph.VerticalAlignment = VerticalAlignment.Center;
         var circle = new Border { Width = 40, Height = 40, CornerRadius = new CornerRadius(20), Background = accent, Child = glyph };
 
         var texts = new StackPanel { Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
@@ -363,12 +414,21 @@ public sealed partial class CheckSpekPage : Page
 
     private void OnDragOver(object sender, DragEventArgs e)
     {
-        if (e.DataView.Contains(StandardDataFormats.StorageItems))
-            e.AcceptedOperation = DataPackageOperation.Copy;
+        if (!e.DataView.Contains(StandardDataFormats.StorageItems)) return;
+        e.AcceptedOperation = DataPackageOperation.Copy;
+        if (e.DragUIOverride != null)
+        {
+            e.DragUIOverride.Caption = "Analyze in Rimeo";
+            e.DragUIOverride.IsGlyphVisible = false;
+        }
+        HighlightDropZone(true);
     }
+
+    private void OnDragLeave(object sender, DragEventArgs e) => HighlightDropZone(false);
 
     private async void OnDrop(object sender, DragEventArgs e)
     {
+        HighlightDropZone(false);
         if (!e.DataView.Contains(StandardDataFormats.StorageItems)) return;
         var items = await e.DataView.GetStorageItemsAsync();
         var file = items.OfType<StorageFile>().FirstOrDefault();

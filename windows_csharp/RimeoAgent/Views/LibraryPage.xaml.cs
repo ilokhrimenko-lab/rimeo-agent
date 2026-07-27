@@ -19,6 +19,7 @@ public sealed partial class LibraryPage : Page
     // work (Reload / age refresh) can live-update whatever block is on screen now.
     private string _dbAgeText = "";
     private string _statusText = "";
+    private string? _masterDbError;
     private TextBlock? _dbAgeBlock;
     private TextBlock? _statusBlock;
     private readonly StackPanel _stack;
@@ -45,8 +46,34 @@ public sealed partial class LibraryPage : Page
             "Turn on the sources Rimeo reads your tracks from — you can use both at once."));
 
         _stack.Children.Add(TopTabs());
+        if (_masterDbError != null) _stack.Children.Add(MasterDbWarning(_masterDbError));
         _stack.Children.Add(DbCard());
         _stack.Children.Add(XmlCard());
+    }
+
+    // Карточка «master.db не читается» — паритет с macOS. Без неё единственным следом
+    // сломанной базы была строка «0 tracks…» под кнопкой Reload: человек не понимал,
+    // что делать, хотя выход есть — экспортировать XML и включить его ниже.
+    private static Border MasterDbWarning(string err)
+    {
+        var head = UI.HStack(8,
+            UI.Icon(16, UI.Amber, 2, "M12 4.5 2.8 20h18.4L12 4.5Z", "M12 10v4.5", "M12 17.4h.01"),
+            new TextBlock { Text = "master.db could not be read", FontSize = 14, FontWeight = FontWeights.SemiBold, Foreground = UI.Amber, VerticalAlignment = VerticalAlignment.Center });
+
+        var detail = new TextBlock
+        {
+            Text = err.Length > 200 ? err[..200] : err,
+            FontSize = 12, FontFamily = new FontFamily("Consolas"), Foreground = UI.Dim,
+            TextWrapping = TextWrapping.Wrap, MaxLines = 3, TextTrimming = TextTrimming.CharacterEllipsis
+        };
+
+        var hint = new TextBlock
+        {
+            Text = "Rimeo could not open the Rekordbox database. As a workaround, export XML from Rekordbox and enable it below.",
+            FontSize = 13, Foreground = UI.Secondary, TextWrapping = TextWrapping.Wrap
+        };
+
+        return UI.Card(UI.VStack(8, head, hint, detail), 18);
     }
 
     // ── Top tabs: Rekordbox (active) / Other DJ software (SOON) ──────────────
@@ -97,7 +124,7 @@ public sealed partial class LibraryPage : Page
         var dotColor    = !enabled ? UI.Dim : (exists ? UI.Green : UI.Red);
         var statusText  = !enabled ? "Off" : (exists ? "Connected" : "Not found");
 
-        var header = SourceHeader("", UI.AccText, UI.AccSoft, "Rekordbox database", dotColor, statusText, dotColor, toggle);
+        var header = SourceHeader(DbIcon, UI.AccText, UI.AccSoft, "Rekordbox database", dotColor, statusText, dotColor, toggle);
 
         _dbAgeBlock = new TextBlock
         {
@@ -113,10 +140,10 @@ public sealed partial class LibraryPage : Page
         };
 
         var body = UI.VStack(14,
-            UI.Mono(string.IsNullOrEmpty(AppConfig.Shared.DbPath) ? "—" : AppConfig.Shared.DbPath),
+            UI.MonoPath(string.IsNullOrEmpty(AppConfig.Shared.DbPath) ? "—" : AppConfig.Shared.DbPath),
             _dbAgeBlock,
             _statusBlock,
-            UI.PrimaryButton("Reload Library", Reload_Click));
+            UI.PrimaryButton("Reload library", Reload_Click));
         body.Opacity = enabled ? 1.0 : 0.5;
 
         return UI.Card(UI.VStack(14, header, body));
@@ -146,12 +173,12 @@ public sealed partial class LibraryPage : Page
         else if (string.IsNullOrEmpty(xmlPath)) { statusText = "No file selected"; dotColor = UI.Dim; }
         else                       { statusText = "File not found"; dotColor = UI.Red; }
 
-        var header = SourceHeader("", UI.Dim, UI.Chip, "Exported XML file", dotColor, statusText, dotColor, toggle);
+        var header = SourceHeader(XmlIcon, UI.Dim, UI.Chip, "Exported XML file", dotColor, statusText, dotColor, toggle);
 
         var bodyChildren = new List<UIElement>();
-        if (!string.IsNullOrEmpty(xmlPath)) bodyChildren.Add(UI.Mono(xmlPath));
+        if (!string.IsNullOrEmpty(xmlPath)) bodyChildren.Add(UI.MonoPath(xmlPath));
         bodyChildren.Add(UI.SecondaryButton(
-            string.IsNullOrEmpty(xmlPath) ? "Select rekordbox.xml" : "Change XML Path",
+            string.IsNullOrEmpty(xmlPath) ? "Select rekordbox.xml" : "Change XML path",
             PickXml_Click));
         var body = UI.VStack(14, bodyChildren.ToArray());
         body.Opacity = enabled ? 1.0 : 0.5;
@@ -160,7 +187,17 @@ public sealed partial class LibraryPage : Page
     }
 
     // ── Source card header: icon + title + status + toggle ──────────────────
-    private static Grid SourceHeader(string glyph, SolidColorBrush iconTint, SolidColorBrush iconBg,
+    // Иконки источников: векторные пути на 24×24, как везде в UI (`UI.Icon`).
+    // Раньше это были единственные FontIcon/Segoe MDL2 в интерфейсе — чужие по
+    // стилистике штриховым иконкам остальных экранов; семантика взята с macOS
+    // (цилиндр БД / текстовый документ).
+    private static readonly string[] DbIcon =
+        { "M12 7.5c4.4 0 8-1.1 8-2.5S16.4 2.5 12 2.5 4 3.6 4 5s3.6 2.5 8 2.5Z",
+          "M20 5v14c0 1.4-3.6 2.5-8 2.5S4 20.4 4 19V5", "M20 12c0 1.4-3.6 2.5-8 2.5S4 13.4 4 12" };
+    private static readonly string[] XmlIcon =
+        { "M6 2.5h7L19 8v13.5H6z", "M13 2.5V8h6", "M9 13h6M9 17h4" };
+
+    private static Grid SourceHeader(string[] iconPaths, SolidColorBrush iconTint, SolidColorBrush iconBg,
         string title, SolidColorBrush dotColor, string statusText, SolidColorBrush statusColor, ToggleSwitch toggle)
     {
         var grid = new Grid { VerticalAlignment = VerticalAlignment.Center };
@@ -172,7 +209,7 @@ public sealed partial class LibraryPage : Page
         {
             Width = 40, Height = 40, CornerRadius = new CornerRadius(11), Background = iconBg,
             VerticalAlignment = VerticalAlignment.Center,
-            Child = new FontIcon { Glyph = glyph, FontFamily = new FontFamily("Segoe MDL2 Assets"), FontSize = 18, Foreground = iconTint }
+            Child = UI.Icon(18, iconTint, 2, iconPaths)
         };
         Grid.SetColumn(iconBox, 0);
         grid.Children.Add(iconBox);
@@ -232,12 +269,22 @@ public sealed partial class LibraryPage : Page
         {
             RekordboxParser.Shared.InvalidateCache();
             var result = RekordboxParser.Shared.Parse();
+            var err    = RekordboxParser.Shared.MasterDbError;
             var source = result.Source ?? (AppConfig.Shared.DbExists ? "db" : "xml");
             DispatcherQueue.TryEnqueue(() =>
             {
-                SetStatus(result.Tracks.Count > 0
-                    ? $"✓ {result.Tracks.Count} tracks, {result.Playlists.Count} playlists  ({source})"
-                    : "0 tracks — library source could not be read");
+                // Три исхода, а не два: пустой Rekordbox — это НЕ ошибка чтения.
+                // Раньше человек с пустой библиотекой получал ложную тревогу
+                // «library source could not be read» (macOS различает их).
+                if (result.Tracks.Count > 0)
+                    SetStatus($"✓ {result.Tracks.Count} tracks, {result.Playlists.Count} playlists  ({source})");
+                else if (err != null)
+                    SetStatus("0 tracks — library source could not be read");
+                else
+                    SetStatus("0 tracks loaded");
+
+                _masterDbError = err;
+                Rebuild();
                 RefreshDatabaseAge();
             });
         });

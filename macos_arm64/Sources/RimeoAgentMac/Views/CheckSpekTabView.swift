@@ -19,7 +19,7 @@ struct CheckSpekTabView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 ScreenHeader(title: "Check spek",
-                             subtitle: "Frequency analysis · spec — check whether a track is genuine lossless or a re-encode.")
+                             subtitle: "Frequency analysis · spek — check whether a track is genuine lossless or a re-encode.")
                 content
             }
             .frame(maxWidth: .infinity, alignment: .leading)

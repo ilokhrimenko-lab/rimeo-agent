@@ -35,6 +35,30 @@ public sealed partial class MainWindow : Window
         // (custom titlebar + pairing-code entry); otherwise go straight to the shell.
         if (AppState.Shared.CloudLinked) BuildShell();
         else ShowLinkGate();
+
+        // Гейт показывался ТОЛЬКО на старте процесса. После Sign out (или когда
+        // облако выселило этот агент — вход с другого компьютера) оболочка оставалась
+        // на экране с карточкой "Not signed in", из которой некуда идти: залипшее
+        // состояние до перезапуска. macOS реактивен (ContentView: `if !cloudLinked
+        // { LinkDeviceView() }`) — повторяем это здесь.
+        AppState.Shared.PropertyChanged += OnCloudLinkChanged;
+    }
+
+    private void OnCloudLinkChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(AppState.CloudLinked)) return;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (AppState.Shared.CloudLinked) { if (_inGate) ExitLinkGate(); }
+            else if (!_inGate) ShowLinkGate();
+        });
+    }
+
+    /// <summary>Возврат на экран входа из оболочки (кнопка Sign in на вкладке Account).</summary>
+    internal void ReturnToLinkGate()
+    {
+        if (_inGate) return;
+        DispatcherQueue.TryEnqueue(ShowLinkGate);
     }
 
     // ── Link-device gate ──────────────────────────────────────────────────────
@@ -68,6 +92,9 @@ public sealed partial class MainWindow : Window
     {
         DispatcherQueue.TryEnqueue(() =>
         {
+            // Успешный вход зовёт нас дважды: колбэком onLinked и реакцией на
+            // CloudLinked=true. Второй проход пересобрал бы уже построенную оболочку.
+            if (!_inGate) return;
             _inGate = false;
             try
             {
@@ -108,7 +135,7 @@ public sealed partial class MainWindow : Window
 
         _contentFrame = new Frame
         {
-            Content = CreateStatusView("Rimeo Agent is starting...")
+            Content = CreateStatusView("Rimeo Agent is starting…")
         };
 
         _navView = new NavigationView
@@ -143,6 +170,20 @@ public sealed partial class MainWindow : Window
         _navView.Resources["NavigationViewExpandedPaneBackground"] = UI.Sidebar;
         _navView.Resources["NavigationViewCompactPaneBackground"]  = UI.Sidebar;
         _navView.Background = UI.Sidebar;
+
+        // Выделенный пункт красился системной «таблеткой» с личным акцентом Windows —
+        // единственное место в UI, где цвет выбирал не мы. Переводим на токены Rimeo
+        // (macOS `NavRow`: фон accSoft, иконка и текст accText).
+        _navView.Resources["NavigationViewItemBackgroundSelected"]                  = UI.AccSoft;
+        _navView.Resources["NavigationViewItemBackgroundSelectedPointerOver"]       = UI.AccSoft;
+        _navView.Resources["NavigationViewItemBackgroundSelectedPressed"]           = UI.AccSoft;
+        _navView.Resources["NavigationViewItemForegroundSelected"]                  = UI.AccText;
+        _navView.Resources["NavigationViewItemForegroundSelectedPointerOver"]       = UI.AccText;
+        _navView.Resources["NavigationViewItemForegroundSelectedPressed"]           = UI.AccText;
+        _navView.Resources["NavigationViewItemForeground"]                          = UI.BodyTxt;
+        _navView.Resources["NavigationViewItemForegroundPointerOver"]               = UI.Text;
+        _navView.Resources["NavigationViewItemBackgroundPointerOver"]               = UI.Chip;
+        _navView.Resources["NavigationViewSelectionIndicatorForeground"]            = UI.Acc;
     }
 
     private static bool ResolveDark(ElementTheme t) => t switch
@@ -195,10 +236,19 @@ public sealed partial class MainWindow : Window
         var logoPath = System.IO.Path.Combine(System.AppContext.BaseDirectory, "Assets", "rimeo1024.png");
         if (System.IO.File.Exists(logoPath))
         {
-            badge = new Microsoft.UI.Xaml.Controls.Image
+            // В Border с обрезкой: голый Image давал квадратный логотип, тогда как
+            // fallback-плашка рядом скруглена на 9, и macOS клипает в RoundedRectangle(9).
+            badge = new Microsoft.UI.Xaml.Controls.Border
             {
-                Width = 30, Height = 30, VerticalAlignment = VerticalAlignment.Center,
-                Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(logoPath))
+                Width = 30, Height = 30, CornerRadius = new CornerRadius(9),
+                VerticalAlignment = VerticalAlignment.Center,
+                Background = UI.Clear,
+                Child = new Microsoft.UI.Xaml.Controls.Image
+                {
+                    Width = 30, Height = 30,
+                    Stretch = Microsoft.UI.Xaml.Media.Stretch.UniformToFill,
+                    Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(logoPath))
+                }
             };
         }
         else
@@ -211,19 +261,23 @@ public sealed partial class MainWindow : Window
             };
         }
         var name = new TextBlock { Text = "Rimeo", FontSize = 17, FontWeight = Microsoft.UI.Text.FontWeights.ExtraBold, Foreground = UI.Text, VerticalAlignment = VerticalAlignment.Center };
-        var tag = new TextBlock { Text = "Agent", FontSize = 11, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = UI.Dim, VerticalAlignment = VerticalAlignment.Center };
+        // «Agent» кеглем 11 рядом с 17: по центру он висел посреди большого слова.
+        // Сажаем на общую базовую линию (macOS: `.padding(.top, 3)`).
+        var tag = new TextBlock { Text = "Agent", FontSize = 11, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = UI.Dim, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, 0, 3) };
         var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Margin = new Thickness(14, 8, 14, 10) };
         row.Children.Add(badge); row.Children.Add(name); row.Children.Add(tag);
         return row;
     }
 
-    private static StackPanel BuildFooter()
+    private static Border BuildFooter()
     {
         var dot = new Microsoft.UI.Xaml.Shapes.Ellipse { Width = 7, Height = 7, Fill = UI.Green, VerticalAlignment = VerticalAlignment.Center };
         var label = new TextBlock { Text = "Agent online", FontSize = 12, FontWeight = Microsoft.UI.Text.FontWeights.Medium, Foreground = UI.Secondary, VerticalAlignment = VerticalAlignment.Center };
         var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Margin = new Thickness(20, 11, 20, 11) };
         row.Children.Add(dot); row.Children.Add(label);
-        return row;
+        // Хайрлайн сверху — как на macOS (`.overlay(Rectangle().frame(height: 1) …)`):
+        // без него статус агента сливался с последним пунктом навигации.
+        return new Border { BorderBrush = UI.Brd, BorderThickness = new Thickness(0, 1, 0, 0), Child = row };
     }
 
     private void NavView_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
@@ -358,12 +412,15 @@ public sealed partial class MainWindow : Window
             Text = message,
             FontSize = 18,
             TextWrapping = TextWrapping.Wrap,
-            Foreground = new SolidColorBrush(Microsoft.UI.Colors.Gray),
+            Foreground = UI.Secondary,
             Margin = new Thickness(24)
         };
 
+        // Без фона под текстом просвечивал системный, а не UI.Bg — в тёмной теме
+        // на светлой Windows экран загрузки был белым пятном.
         return new Grid
         {
+            Background = UI.Bg,
             Children = { text }
         };
     }

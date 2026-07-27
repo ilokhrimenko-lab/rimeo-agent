@@ -26,8 +26,23 @@ public sealed partial class LogsPage : Page
     private readonly TextBlock    _cacheUsage   = new() { FontSize = 22, FontWeight = FontWeights.ExtraBold, Foreground = UI.Text, Text = "0.00 GB used" };
     private readonly ProgressBar  _cacheBar     = new() { Minimum = 0, Maximum = 3, Value = 0, Height = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly TextBlock    _cacheMax     = new() { FontSize = 13, FontWeight = FontWeights.Medium, Foreground = UI.Dim, Text = "of 3 GB max", VerticalAlignment = VerticalAlignment.Center };
-    private readonly TextBox      _cacheMaxBox  = new() { Width = 64, Text = "3", TextAlignment = TextAlignment.Center };
-    private readonly TextBlock    _cacheStatus  = new() { FontSize = 12, Visibility = Visibility.Collapsed };
+    // Число в поле «Max cache» висело выше и правее центра: WinUI растягивает TextBox
+    // по высоте строки, но content-alignment у него Top, а дефолтный TextControlThemePadding
+    // несимметричен по горизонтали — центрирование считалось от смещённой области.
+    private readonly TextBox      _cacheMaxBox  = new()
+    {
+        Width = 64, Text = "3", FontSize = 14,
+        TextAlignment = TextAlignment.Center,
+        VerticalContentAlignment = VerticalAlignment.Center,
+        Padding = new Thickness(0)
+    };
+    // Сообщение живёт в звёздной колонке между «Clear Cache» и группой «Max cache»:
+    // текст ошибки произвольной длины без обрезки резало по глифу.
+    private readonly TextBlock    _cacheStatus  = new()
+    {
+        FontSize = 12, Visibility = Visibility.Collapsed,
+        TextTrimming = TextTrimming.CharacterEllipsis
+    };
 
     private readonly StackPanel _themeHost = new() { Orientation = Orientation.Horizontal, Spacing = 4 };
 
@@ -74,13 +89,7 @@ public sealed partial class LogsPage : Page
 
         // AGENT SETTINGS
         stack.Children.Add(UI.SectionLabel("Agent settings"));
-        var launch = new CheckBox
-        {
-            IsChecked = AgentSettings.LaunchAtLogin,
-            Content = new TextBlock { Text = "Open Rimeo agent at system startup", FontSize = 15, FontWeight = FontWeights.Medium, Foreground = UI.Text }
-        };
-        launch.Checked   += (_, _) => SetLaunch(true);
-        launch.Unchecked += (_, _) => SetLaunch(false);
+        var launch = UI.Checkbox(AgentSettings.LaunchAtLogin, "Open Rimeo agent at system startup", SetLaunch);
         stack.Children.Add(UI.Card(UI.VStack(8, launch, _settingsStatus)));
 
         // SOFTWARE UPDATE
@@ -89,17 +98,19 @@ public sealed partial class LogsPage : Page
 
         // REPORT A BUG
         stack.Children.Add(UI.SectionLabel("Report a bug"));
-        _bugBox.Background = UI.Field;
+        // Раньше задавались только локальные кисти: состояния PointerOver/Focused
+        // перекрашивали поле в системный белый и рисовали акцентное подчёркивание.
+        UI.StyleField(_bugBox);
         _bugBox.BorderBrush = UI.CardBrd;
-        _bugBox.CornerRadius = new CornerRadius(12);
-        _bugButtonHost.Children.Add(UI.PrimaryButton("Send Report", SendBug_Click));
+        _bugBox.Padding = new Thickness(12, 10, 12, 10);
+        _bugButtonHost.Children.Add(UI.PrimaryButton("Send report", SendBug_Click));
         var bugCard = UI.VStack(14,
             UI.Body("Describe the issue — the last 200 log lines are attached automatically.", UI.Secondary, 13),
             _bugBox,
             UI.HStack(10,
                 _bugButtonHost,
-                UI.SecondaryButton("Copy Log", CopyLog_Click),
-                UI.SecondaryButton("Open Log", OpenLog_Click)),
+                UI.SecondaryButton("Copy log", CopyLog_Click),
+                UI.SecondaryButton("Open log", OpenLog_Click)),
             _bugStatus);
         stack.Children.Add(UI.Card(bugCard));
 
@@ -120,18 +131,32 @@ public sealed partial class LogsPage : Page
         controls.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         controls.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         controls.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        var clearBtn = UI.DestructiveButton("Clear Cache", ClearCache_Click);
+        var clearBtn = UI.DestructiveButton("Clear cache", ClearCache_Click);
         Grid.SetColumn(clearBtn, 0); controls.Children.Add(clearBtn);
         _cacheStatus.VerticalAlignment = VerticalAlignment.Center;
         _cacheStatus.Margin = new Thickness(12, 0, 0, 0);
         Grid.SetColumn(_cacheStatus, 1); controls.Children.Add(_cacheStatus);
 
-        _cacheMaxBox.Background = UI.Field;
-        _cacheMaxBox.BorderBrush = UI.Brd;
-        _cacheMaxBox.CornerRadius = new CornerRadius(12);
+        UI.StyleField(_cacheMaxBox);
+        // «GB» рядом с числом: в голом боксе на 64px «3» не говорило, гигабайты это
+        // или проценты (macOS кладёт единицу прямо в поле).
+        var maxBox = new Border
+        {
+            Background = UI.Field, BorderBrush = UI.Brd, BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(12), Padding = new Thickness(12, 0, 12, 0),
+            VerticalAlignment = VerticalAlignment.Stretch,
+            Child = UI.HStack(6,
+                _cacheMaxBox,
+                new TextBlock { Text = "GB", FontSize = 12, FontWeight = FontWeights.Medium, Foreground = UI.Dim, VerticalAlignment = VerticalAlignment.Center })
+        };
+        _cacheMaxBox.Background = UI.Clear;
+        _cacheMaxBox.BorderThickness = new Thickness(0);
+        _cacheMaxBox.Width = 34;
+        _cacheMaxBox.MaxLength = 3;
+
         var right = UI.HStack(10,
             new TextBlock { Text = "Max cache", FontSize = 13, FontWeight = FontWeights.Medium, Foreground = UI.Secondary, VerticalAlignment = VerticalAlignment.Center },
-            _cacheMaxBox,
+            maxBox,
             UI.PrimaryButton("Save", SaveMaxCache_Click));
         Grid.SetColumn(right, 2); controls.Children.Add(right);
 
@@ -157,14 +182,27 @@ public sealed partial class LogsPage : Page
     private Button ThemeSeg(AppTheme value, string label)
     {
         var active = ThemeManager.Theme == value;
+        var fill   = active ? UI.SegActive : UI.Clear;
+        var ink    = active ? UI.Text : UI.Secondary;
         var btn = new Button
         {
-            Content = new TextBlock { Text = label, FontSize = 14, FontWeight = active ? FontWeights.SemiBold : FontWeights.Medium, Foreground = active ? UI.Text : UI.Secondary },
-            Background = active ? UI.SegActive : new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+            Content = new TextBlock { Text = label, FontSize = 14, FontWeight = active ? FontWeights.SemiBold : FontWeights.Medium, Foreground = ink },
+            Background = fill,
             BorderThickness = new Thickness(0),
             CornerRadius = new CornerRadius(11),
             Padding = new Thickness(18, 9, 18, 9)
         };
+        // Иначе шаблон подставит системный почти-белый ховер прямо внутрь тёмной
+        // сегмент-дорожки.
+        btn.Resources["ButtonBackground"]            = fill;
+        btn.Resources["ButtonBackgroundPointerOver"] = active ? UI.SegActive : UI.Chip;
+        btn.Resources["ButtonBackgroundPressed"]     = active ? UI.SegActive : UI.Chip;
+        btn.Resources["ButtonForeground"]            = ink;
+        btn.Resources["ButtonForegroundPointerOver"] = UI.Text;
+        btn.Resources["ButtonForegroundPressed"]     = UI.Text;
+        btn.Resources["ButtonBorderBrush"]            = UI.Clear;
+        btn.Resources["ButtonBorderBrushPointerOver"] = UI.Clear;
+        btn.Resources["ButtonBorderBrushPressed"]     = UI.Clear;
         btn.Click += (_, _) =>
         {
             ThemeManager.Theme = value;
@@ -185,7 +223,7 @@ public sealed partial class LogsPage : Page
     private void BuildUpdateIdle()
     {
         // Установку мог запустить телефон (POST /api/agent/update) ещё до того, как
-        // открыли Settings. Показывать в этот момент "Check for Updates" — врать:
+        // открыли Settings. Показывать в этот момент "Check for updates" — врать:
         // спрашиваем состояние у сервиса и, если он занят, сразу рисуем прогресс.
         var st = AgentUpdateService.Shared.Status();
         if (IsActiveStage(st.Stage)) { ShowUpdateProgress(st); StartUpdatePolling(); return; }
@@ -195,13 +233,72 @@ public sealed partial class LogsPage : Page
             return;
         }
 
+        // Тихий фоновой апдейтер мог УЖЕ скачать новый билд (CheckAndStageSilently) —
+        // он поставится на следующем запуске. Молчать об этом и показывать «Check for
+        // Updates» значит врать: билд лежит на диске, а UI об этом ни слова.
+        var staged = UpdateChecker.Shared.StagedVersion;
+        if (!string.IsNullOrEmpty(staged)) { BuildUpdateStaged(staged); return; }
+
         _updateHost.Children.Clear();
-        _updateHost.Children.Add(UI.HStack(12,
-            new TextBlock { Text = "Check whether a newer build is available", FontSize = 14, Foreground = UI.Secondary, VerticalAlignment = VerticalAlignment.Center },
-            UI.SecondaryButton("Check for Updates", (_, _) => RunUpdateCheck())));
+        _updateHost.Children.Add(UpdateRow(
+            IconRefresh, UI.AccText, UI.AccSoft,
+            "Software updates", "Check whether a newer build is available",
+            UI.SecondaryButton("Check for updates", (_, _) => RunUpdateCheck())));
     }
 
-    // "Check for Updates" НЕ идёт через AgentUpdateService намеренно: он ничего не
+    // ── Строка состояния обновления: иконка в плашке 38×38 + два текста + действие ──
+    private static readonly string[] IconRefresh =
+        { "M20 12a8 8 0 1 1-2.34-5.66", "M20 4v4h-4" };
+    private static readonly string[] IconCheck =
+        { "M5 12.5l4.5 4.5L19 7.5" };
+    private static readonly string[] IconDownload =
+        { "M12 4v11", "M7.5 11l4.5 4.5 4.5-4.5", "M5 20h14" };
+    private static readonly string[] IconClock =
+        { "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z", "M12 7.5V12l3 2" };
+    private static readonly string[] IconWarn =
+        { "M12 4.5 2.8 20h18.4L12 4.5Z", "M12 10v4.5", "M12 17.4h.01" };
+
+    private static Grid UpdateRow(string[] icon, SolidColorBrush tint, SolidColorBrush bg,
+                                  string title, string? subtitle, FrameworkElement? action)
+    {
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        var box = new Border
+        {
+            Width = 38, Height = 38, CornerRadius = new CornerRadius(11), Background = bg,
+            VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 14, 0),
+            Child = UI.Icon(19, tint, 2, icon)
+        };
+        Grid.SetColumn(box, 0); grid.Children.Add(box);
+
+        var texts = new StackPanel { Orientation = Orientation.Vertical, Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
+        texts.Children.Add(new TextBlock { Text = title, FontSize = 15, FontWeight = FontWeights.SemiBold, Foreground = UI.Text, TextWrapping = TextWrapping.Wrap });
+        if (!string.IsNullOrEmpty(subtitle))
+            texts.Children.Add(new TextBlock { Text = subtitle, FontSize = 13, Foreground = UI.Dim, TextWrapping = TextWrapping.Wrap });
+        Grid.SetColumn(texts, 1); grid.Children.Add(texts);
+
+        if (action != null)
+        {
+            action.VerticalAlignment = VerticalAlignment.Center;
+            action.Margin = new Thickness(14, 0, 0, 0);
+            Grid.SetColumn(action, 2); grid.Children.Add(action);
+        }
+        return grid;
+    }
+
+    private void BuildUpdateStaged(string version)
+    {
+        _updateHost.Children.Clear();
+        _updateHost.Children.Add(UpdateRow(
+            IconClock, UI.Amber, UI.Alpha(UI.Amber, 0x24),
+            $"Will update to {version} on next launch", "Already downloaded — restart the agent to apply it now.",
+            UI.SecondaryButton("Update now", (_, _) => UpdateNow())));
+    }
+
+    // "Check for updates" НЕ идёт через AgentUpdateService намеренно: он ничего не
     // ставит и не должен занимать слот _running (иначе проверка из UI блокировала бы
     // обновление с телефона). Единственная правка — честная обработка сбоя сети:
     // QueryLatest глотает исключения и возвращает null, поэтому null+LastCheckError
@@ -226,32 +323,33 @@ public sealed partial class LogsPage : Page
     private void BuildUpToDate()
     {
         _updateHost.Children.Clear();
-        _updateHost.Children.Add(UI.HStack(10,
-            new Microsoft.UI.Xaml.Shapes.Ellipse { Width = 12, Height = 12, Fill = UI.Green, VerticalAlignment = VerticalAlignment.Center },
-            new TextBlock { Text = "Rimeo agent is up to date", FontSize = 14, Foreground = UI.Text, VerticalAlignment = VerticalAlignment.Center },
-            UI.SecondaryButton("Check Again", (_, _) => RunUpdateCheck())));
+        // Номер текущего билда рядом — на macOS он есть, а на Windows «up to date»
+        // было без единой цифры, и понять, ЧТО именно установлено, было нельзя.
+        _updateHost.Children.Add(UpdateRow(
+            IconCheck, UI.Green, UI.GreenSoft,
+            "Rimeo agent is up to date", AppConfig.Shared.DisplayVersion,
+            UI.SecondaryButton("Check again", (_, _) => RunUpdateCheck())));
     }
 
     private void BuildUpdateAvailable(UpdateInfo info)
     {
         _updateHost.Children.Clear();
-        var lines = UI.VStack(2,
-            new TextBlock { Text = $"Update available: {info.Version}", FontSize = 15, FontWeight = FontWeights.SemiBold, Foreground = UI.Text });
-        if (!string.IsNullOrEmpty(info.Notes))
-            lines.Children.Add(new TextBlock { Text = info.Notes, FontSize = 12, Foreground = UI.Dim, TextWrapping = TextWrapping.Wrap });
-
-        _updateHost.Children.Add(lines);
-        _updateHost.Children.Add(UI.PrimaryButton("Update Now", (_, _) => UpdateNow()));
+        var notes = string.IsNullOrEmpty(info.Notes) ? null : info.Notes;
+        _updateHost.Children.Add(UpdateRow(
+            IconDownload, UI.AccText, UI.AccSoft,
+            $"Update available: {info.Version}", notes, null));
+        _updateHost.Children.Add(UI.PrimaryButton("Update now", (_, _) => UpdateNow()));
     }
 
     private void BuildUpdateFailed(string message)
     {
         _updateHost.Children.Clear();
-        _updateHost.Children.Add(new TextBlock { Text = message, FontSize = 14, Foreground = UI.Red, TextWrapping = TextWrapping.Wrap });
-        _updateHost.Children.Add(UI.SecondaryButton("Try Again", (_, _) => RunUpdateCheck()));
+        _updateHost.Children.Add(UpdateRow(
+            IconWarn, UI.Red, UI.RedSoft, message, null,
+            UI.SecondaryButton("Try again", (_, _) => RunUpdateCheck())));
     }
 
-    /// Кнопка "Update Now". Ставит НЕ сама, а через AgentUpdateService.Start():
+    /// Кнопка "Update now". Ставит НЕ сама, а через AgentUpdateService.Start():
     /// у него есть флаг _running (защита от двух одновременных установок — кнопка +
     /// запрос с телефона) и он же ведёт стадию/прогресс для /api/agent/update/status.
     /// `info` из BuildUpdateAvailable намеренно не передаём: Start() перепроверяет
@@ -321,7 +419,7 @@ public sealed partial class LogsPage : Page
     {
         _updateHost.Children.Clear();
         _updateHost.Children.Add(UI.HStack(10,
-            new ProgressRing { IsActive = true, Width = 18, Height = 18 },
+            UI.Spinner(),
             new TextBlock { Text = text, FontSize = 14, Foreground = UI.Secondary, VerticalAlignment = VerticalAlignment.Center }));
     }
 
@@ -331,7 +429,7 @@ public sealed partial class LogsPage : Page
         _updateBar.Foreground = UI.Acc;
         _updateBar.Background = UI.Chip;
         _updateHost.Children.Add(UI.HStack(10,
-            new ProgressRing { IsActive = true, Width = 18, Height = 18 },
+            UI.Spinner(),
             _updateStage));
         _updateHost.Children.Add(_updateBar);
         ApplyUpdateStatus(st, caption);
@@ -386,7 +484,7 @@ public sealed partial class LogsPage : Page
         var desc = _bugBox.Text.Trim();
         if (string.IsNullOrEmpty(desc)) { ShowBug("Please describe the issue.", ok: false); return; }
 
-        ShowBug("Sending…", ok: true);
+        ShowBugProgress("Sending…");
         try
         {
             using var http = new HttpClient();
@@ -398,9 +496,31 @@ public sealed partial class LogsPage : Page
                 ShowBug("✓ Bug report sent!", ok: true);
                 _bugBox.Text = "";
             }
-            else ShowBug($"Error {(int)resp.StatusCode}", ok: false);
+            // Голое «Error 502» не говорит ничего: сервер присылает причину в теле —
+            // показываем её (macOS достаёт `detail` из ответа).
+            else ShowBug(await ErrorDetail(resp), ok: false);
         }
         catch (Exception ex) { ShowBug($"Error: {ex.Message}", ok: false); }
+    }
+
+    private static async Task<string> ErrorDetail(HttpResponseMessage resp)
+    {
+        var code = (int)resp.StatusCode;
+        try
+        {
+            var body = (await resp.Content.ReadAsStringAsync()).Trim();
+            if (string.IsNullOrEmpty(body)) return $"Error {code}";
+            try
+            {
+                var obj = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body);
+                foreach (var key in new[] { "error", "detail", "message" })
+                    if (obj?.TryGetValue(key, out var el) == true && el.ValueKind == JsonValueKind.String)
+                        return $"Error {code}: {el.GetString()}";
+            }
+            catch { /* тело не JSON — покажем как есть */ }
+            return $"Error {code}: {(body.Length > 160 ? body[..160] : body)}";
+        }
+        catch { return $"Error {code}"; }
     }
 
     private void CopyLog_Click(object sender, RoutedEventArgs e)
@@ -431,6 +551,15 @@ public sealed partial class LogsPage : Page
         _bugStatus.Foreground = ok ? UI.Green : UI.Red;
     }
 
+    // Промежуточное состояние — нейтральным серым, как «Clearing…»/«Applying limit…»
+    // в кэше. Зелёное «Sending…» читалось как «отправлено».
+    private void ShowBugProgress(string text)
+    {
+        _bugStatus.Visibility = Visibility.Visible;
+        _bugStatus.Text = text;
+        _bugStatus.Foreground = UI.Dim;
+    }
+
     // ── Cache ───────────────────────────────────────────────────────────────
     private void RefreshCacheSize()
     {
@@ -453,6 +582,10 @@ public sealed partial class LogsPage : Page
             {
                 _cacheUsage.Text = $"{gb:F2} GB used";
                 _cacheBar.Value = Math.Min(gb, _cacheBar.Maximum);
+                // Переполненный кэш выглядел так же спокойно, как пустой (macOS:
+                // >90% красный, >70% янтарный).
+                var fill = _cacheBar.Maximum > 0 ? gb / _cacheBar.Maximum : 0;
+                _cacheBar.Foreground = fill > 0.9 ? UI.Red : fill > 0.7 ? UI.Amber : UI.Acc;
             });
         });
     }
