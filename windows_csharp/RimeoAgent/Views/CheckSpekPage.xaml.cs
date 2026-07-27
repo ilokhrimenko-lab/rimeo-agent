@@ -19,12 +19,15 @@ namespace RimeoAgent.Views;
 // DSP lives in Services/SpectrumAnalyzer.cs (a port of Spek's pipeline).
 public sealed partial class CheckSpekPage : Page
 {
-    // Ширина как на macOS (`.frame(maxWidth: 760, alignment: .leading)`): без неё
-    // спектрограмма и «How to read» расползались на весь широкий монитор.
-    private readonly StackPanel _content = new()
-    {
-        Spacing = 14, MaxWidth = 760, HorizontalAlignment = HorizontalAlignment.Left
-    };
+    // ⚠️ Никаких MaxWidth/HorizontalAlignment здесь. `MaxWidth = 760` + `Left` на этом
+    // StackPanel схлопнули drop-зону в квадратик ~300px (build 261): при выравнивании
+    // Left панель меряется ПО СОДЕРЖИМОМУ, а содержимое — текст «WAV · AIFF …», так что
+    // MaxWidth не разворачивал её обратно. Да и на macOS предел 760 висит только на
+    // карточке РЕЗУЛЬТАТА, а drop-зона там `.frame(maxWidth: .infinity)`.
+    private readonly StackPanel _content = new() { Spacing = 14 };
+
+    /// <summary>Предел ширины карточки результата — как `maxWidth: 760` на macOS.</summary>
+    private const double ResultMaxWidth = 760;
     private string _fileName = "";
 
     // Пунктирная рамка и иконка drop-зоны: перекрашиваются, пока файл висит над окном.
@@ -117,8 +120,27 @@ public sealed partial class CheckSpekPage : Page
         var chart   = BuildChart(r);   chart.Margin   = new Thickness(0, 18, 0, 0); body.Children.Add(chart);
         var howto   = BuildHowTo();    howto.Margin   = new Thickness(0, 16, 0, 0); body.Children.Add(howto);
 
-        _content.Children.Add(toolbar);
-        _content.Children.Add(UI.Card(body, 22));
+        // Предел ширины — только на результате (тулбар + карточка), а не на всей
+        // странице: спектрограмма на широком мониторе иначе расползается, но пустая
+        // drop-зона обязана занимать всю ширину.
+        _content.Children.Add(LimitWidth(toolbar));
+        _content.Children.Add(LimitWidth(UI.Card(body, 22)));
+    }
+
+    /// <summary>
+    /// «Не шире 760, но прижато влево» — аналог `.frame(maxWidth: 760, alignment: .leading)`.
+    /// Через `MaxWidth` на самом элементе не выходит: со `Stretch` WinUI центрирует
+    /// остаток, а с `Left` элемент меряется по содержимому и схлопывается (ровно это
+    /// и случилось с drop-зоной в 261). Ограничение вешаем на КОЛОНКУ сетки.
+    /// </summary>
+    private static Grid LimitWidth(FrameworkElement child)
+    {
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star), MaxWidth = ResultMaxWidth });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        Grid.SetColumn(child, 0);
+        grid.Children.Add(child);
+        return grid;
     }
 
     // ── Drop zone ───────────────────────────────────────────────────────────────
@@ -138,11 +160,14 @@ public sealed partial class CheckSpekPage : Page
     {
         var v = new StackPanel { Spacing = 18, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
 
-        // Крупная иконка над заголовком — macOS ставит `waveform.badge.magnifyingglass`
-        // 48pt; без неё главный empty-state страницы был просто двумя строками текста.
-        _dropIcon = UI.Icon(48, UI.Dim, 1.6,
-            "M3 12h2M7 8v8M11 5v14M15 8v8M19 11h2",
-            "M17.5 17.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z", "M20 20l2.5 2.5");
+        // Крупная иконка над заголовком — macOS ставит `waveform.badge.magnifyingglass`.
+        // Пути ОБЯЗАНЫ умещаться в сетку 24×24: в 261 лупа уходила за границу (ручка до
+        // 22.5,22.5) и налезала на правые столбики — иконка читалась как каша из чёрточек.
+        // Волна сдвинута влево, лупа целиком внутри поля и столбиков не касается.
+        _dropIcon = UI.Icon(48, UI.Dim, 1.7,
+            "M1.8 11.2v1.6", "M5.4 7.6v8.8", "M9 3.8v16.4", "M12.6 8.6v6.8",
+            "M17.9 17.6a3.3 3.3 0 1 0 0-6.6 3.3 3.3 0 0 0 0 6.6Z",
+            "M20.4 17.1 22.4 19.1");
         _dropIcon.HorizontalAlignment = HorizontalAlignment.Center;
         v.Children.Add(_dropIcon);
 

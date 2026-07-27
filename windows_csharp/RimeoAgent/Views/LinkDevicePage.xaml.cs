@@ -124,9 +124,24 @@ public sealed partial class LinkDevicePage : Page
         var brand = new StackPanel
         {
             Orientation = Orientation.Horizontal, Spacing = 7, VerticalAlignment = VerticalAlignment.Center,
-            Padding = new Thickness(22, 0, 0, 0),
+            Padding = new Thickness(18, 0, 0, 0),
             Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent)
         };
+        // Логотип в титлбаре: без него гейт выглядел «чужим» рядом с оболочкой, где
+        // системный титлбар показывает иконку приложения.
+        var logoPath = System.IO.Path.Combine(System.AppContext.BaseDirectory, "Assets", "rimeo1024.png");
+        if (System.IO.File.Exists(logoPath))
+            brand.Children.Add(new Border
+            {
+                Width = 18, Height = 18, CornerRadius = new CornerRadius(5),
+                VerticalAlignment = VerticalAlignment.Center, Background = UI.Clear,
+                Margin = new Thickness(0, 0, 2, 0),
+                Child = new Microsoft.UI.Xaml.Controls.Image
+                {
+                    Width = 18, Height = 18, Stretch = Microsoft.UI.Xaml.Media.Stretch.UniformToFill,
+                    Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(logoPath))
+                }
+            });
         brand.Children.Add(new TextBlock { Text = "Rimeo", FontSize = 13, FontWeight = FontWeights.Bold, Foreground = UI.TitleInk, CharacterSpacing = -10 });
         brand.Children.Add(new TextBlock { Text = "Agent", FontSize = 13, FontWeight = FontWeights.Medium, Foreground = UI.TitleDim, CharacterSpacing = -10 });
         Grid.SetColumn(brand, 0);
@@ -252,7 +267,6 @@ public sealed partial class LinkDevicePage : Page
         _emailBox.Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
         _emailBox.BorderThickness = new Thickness(0);
         _emailBox.Padding = new Thickness(0);
-        _emailBox.VerticalAlignment = VerticalAlignment.Center;
         _emailBox.KeyDown += (_, e) => { if (e.Key == VirtualKey.Enter) Submit(); };
         UI.StripFieldChrome(_emailBox);
 
@@ -293,7 +307,6 @@ public sealed partial class LinkDevicePage : Page
         _passwordBox.Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
         _passwordBox.BorderThickness = new Thickness(0);
         _passwordBox.Padding = new Thickness(0);
-        _passwordBox.VerticalAlignment = VerticalAlignment.Center;
         _passwordBox.KeyDown += (_, e) => { if (e.Key == VirtualKey.Enter) Submit(); };
         UI.StripFieldChrome(_passwordBox);
         // Peek, а не Hidden: встроенный «глазок» был выключен, и при опечатке
@@ -326,7 +339,16 @@ public sealed partial class LinkDevicePage : Page
         Grid.SetColumn(icon, 0);
         grid.Children.Add(icon);
 
-        control.VerticalAlignment = VerticalAlignment.Center;
+        // Текст сидел ВЫШЕ середины поля: `VerticalAlignment.Center` центрирует сам
+        // контрол (его MinHeight 32 в поле высотой 46), но текст ВНУТРИ контрола
+        // WinUI прижимает к верху — `VerticalContentAlignment` по умолчанию Top.
+        // Ровно та же болячка, что была у поля «Max cache» на Settings.
+        control.VerticalAlignment = VerticalAlignment.Stretch;
+        if (control is Control c)
+        {
+            c.VerticalContentAlignment = VerticalAlignment.Center;
+            c.MinHeight = 0;
+        }
         Grid.SetColumn(control, 1);
         grid.Children.Add(control);
 
@@ -392,14 +414,27 @@ public sealed partial class LinkDevicePage : Page
 
     private Border BuildSessionNote()
     {
-        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 9, VerticalAlignment = VerticalAlignment.Center };
-        row.Children.Add(UI.Icon(15, UI.Dim, 2, "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z", "M12 16v-4", "M12 8h.01"));
-        row.Children.Add(new TextBlock
+        // Grid, а не горизонтальный StackPanel: в StackPanel текст меряется бесконечной
+        // шириной и НЕ переносится, поэтому раньше стояла жёсткая `Width = 320` — она и
+        // упирала строку в правый край карточки, отрывая «other.» на вторую строку.
+        var row = new Grid { VerticalAlignment = VerticalAlignment.Center };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+        var noteIcon = UI.Icon(15, UI.Dim, 2, "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z", "M12 16v-4", "M12 8h.01");
+        noteIcon.VerticalAlignment = VerticalAlignment.Center;
+        noteIcon.Margin = new Thickness(0, 0, 9, 0);
+        Grid.SetColumn(noteIcon, 0);
+        row.Children.Add(noteIcon);
+
+        var noteText = new TextBlock
         {
             Text = "One agent per account — signing in here signs out any other.",
             FontSize = 13, Foreground = UI.Secondary, TextWrapping = TextWrapping.Wrap,
-            VerticalAlignment = VerticalAlignment.Center, Width = 320
-        });
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        Grid.SetColumn(noteText, 1);
+        row.Children.Add(noteText);
         return new Border
         {
             Background = UI.Surf, BorderBrush = UI.CardBrd, BorderThickness = new Thickness(1),
