@@ -26,15 +26,15 @@ public sealed partial class LogsPage : Page
     private readonly TextBlock    _cacheUsage   = new() { FontSize = 22, FontWeight = FontWeights.ExtraBold, Foreground = UI.Text, Text = "0.00 GB used" };
     private readonly ProgressBar  _cacheBar     = new() { Minimum = 0, Maximum = 3, Value = 0, Height = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly TextBlock    _cacheMax     = new() { FontSize = 13, FontWeight = FontWeights.Medium, Foreground = UI.Dim, Text = "of 3 GB max", VerticalAlignment = VerticalAlignment.Center };
-    // Число в поле «Max cache» висело выше и правее центра: WinUI растягивает TextBox
-    // по высоте строки, но content-alignment у него Top, а дефолтный TextControlThemePadding
-    // несимметричен по горизонтали — центрирование считалось от смещённой области.
+    // Число в поле «Max cache» висело выше и правее центра. По вертикали лечит
+    // UI.CenterFieldText (см. разбор шаблона там же), по горизонтали — TextAlignment
+    // при обнулённом Padding: дефолтный TextControlThemePadding несимметричен, и центр
+    // считался от смещённой области. Ширину держит контейнер-Border, а не поле, поэтому
+    // MinWidth темы (64) тоже обязан быть снят — иначе поле не станет уже 64.
     private readonly TextBox      _cacheMaxBox  = new()
     {
-        Width = 64, Text = "3", FontSize = 14,
-        TextAlignment = TextAlignment.Center,
-        VerticalContentAlignment = VerticalAlignment.Center,
-        Padding = new Thickness(0)
+        Text = "3", FontSize = 14,
+        TextAlignment = TextAlignment.Center
     };
     // Сообщение живёт в звёздной колонке между «Clear Cache» и группой «Max cache»:
     // текст ошибки произвольной длины без обрезки резало по глифу.
@@ -151,6 +151,10 @@ public sealed partial class LogsPage : Page
         };
         _cacheMaxBox.Background = UI.Clear;
         _cacheMaxBox.BorderThickness = new Thickness(0);
+        // Порядок важен: CenterFieldText гасит MinWidth/MinHeight из темы, и только
+        // ПОСЛЕ этого заданная ширина 34 вообще достижима (иначе тема держит 64).
+        UI.CenterFieldText(_cacheMaxBox);
+        UI.HideClearButton(_cacheMaxBox);
         _cacheMaxBox.Width = 34;
         _cacheMaxBox.MaxLength = 3;
 

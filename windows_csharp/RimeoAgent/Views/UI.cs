@@ -371,7 +371,57 @@ internal static class UI
             c.Resources[key] = Clear;
         c.Resources["TextControlBorderThemeThickness"] = new Thickness(0);
         c.Resources["TextControlBorderThemeThicknessFocused"] = new Thickness(0);
+        // Внутренние кнопки поля («глазок» у пароля, крестик очистки у TextBox) иначе
+        // остаются системного цвета и выпадают из поля.
+        c.Resources["TextControlButtonForeground"] = Dim;
+        c.Resources["TextControlButtonForegroundPointerOver"] = AccText;
+        c.Resources["TextControlButtonBackground"] = Clear;
+        c.Resources["TextControlButtonBackgroundPointerOver"] = Chip;
         c.CornerRadius = new CornerRadius(0);
+    }
+
+    /// <summary>
+    /// Однострочное поле, текст которого обязан стоять РОВНО по центру контейнера.
+    ///
+    /// Почему не работает «очевидное» `VerticalContentAlignment = Center` (проверено по
+    /// шаблонам WinUI, `CommonStyles/TextBox_themeresources.xaml` и `PasswordBox_…`):
+    /// текст живёт в `ScrollViewer x:Name="ContentElement"`, и в шаблоне у него
+    /// НЕТ привязки к `VerticalContentAlignment` — только
+    /// `Padding="{TemplateBinding Padding}"`. То есть свойство контрола не участвует
+    /// в раскладке вообще, а ScrollViewer прижимает содержимое к верху.
+    ///
+    /// Поэтому единственный честный способ — не растягивать контрол на высоту поля, а
+    /// сжать его до высоты строки и центрировать целиком. Мешают этому две вещи:
+    /// у TextBox минимумы приходят Style-сеттерами (`MinHeight`/`MinWidth` контрола),
+    /// а у PasswordBox `BorderElement` привязан к ThemeResource НАПРЯМУЮ
+    /// (`MinHeight="{ThemeResource TextControlThemeMinHeight}"`), мимо свойств контрола.
+    /// Гасим оба пути, иначе поле не станет ниже 32 и текст снова уедет вверх.
+    /// </summary>
+    public static void CenterFieldText(Control c)
+    {
+        c.Resources["TextControlThemeMinHeight"] = 0.0;   // PasswordBox: BorderElement ← ThemeResource
+        c.Resources["TextControlThemeMinWidth"]  = 0.0;   // без этого узкое поле не уже 64
+        c.MinHeight = 0;                                   // TextBox: BorderElement ← TemplateBinding
+        c.MinWidth  = 0;
+        c.Padding   = new Thickness(0);
+        c.VerticalAlignment = VerticalAlignment.Center;    // ключевое: НЕ Stretch
+        c.VerticalContentAlignment = VerticalAlignment.Center;
+    }
+
+    /// <summary>
+    /// Прячет системную кнопку очистки («крестик») внутри TextBox.
+    /// В шаблоне она живёт в колонке Auto шириной 30 и всплывает при фокусе с
+    /// непустым текстом — в узком поле (лимит кэша, 34px) она бы отъела почти всю
+    /// ширину и раздавила цифру ровно в момент редактирования. Это же 30px и есть
+    /// причина, по которой тема держит `TextControlThemeMinWidth = 64`.
+    /// </summary>
+    public static void HideClearButton(TextBox t)
+    {
+        var s = new Style(typeof(Button));
+        s.Setters.Add(new Setter(UIElement.VisibilityProperty, Visibility.Collapsed));
+        s.Setters.Add(new Setter(FrameworkElement.WidthProperty, 0.0));
+        s.Setters.Add(new Setter(FrameworkElement.MinWidthProperty, 0.0));
+        t.Resources["DeleteButtonStyle"] = s;
     }
 
     /// <summary>

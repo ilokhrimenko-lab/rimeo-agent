@@ -339,16 +339,12 @@ public sealed partial class LinkDevicePage : Page
         Grid.SetColumn(icon, 0);
         grid.Children.Add(icon);
 
-        // Текст сидел ВЫШЕ середины поля: `VerticalAlignment.Center` центрирует сам
-        // контрол (его MinHeight 32 в поле высотой 46), но текст ВНУТРИ контрола
-        // WinUI прижимает к верху — `VerticalContentAlignment` по умолчанию Top.
-        // Ровно та же болячка, что была у поля «Max cache» на Settings.
-        control.VerticalAlignment = VerticalAlignment.Stretch;
-        if (control is Control c)
-        {
-            c.VerticalContentAlignment = VerticalAlignment.Center;
-            c.MinHeight = 0;
-        }
+        // Текст сидел выше середины поля. Первая попытка (Stretch + VerticalContentAlignment)
+        // не помогла и не могла: в шаблоне WinUI ContentElement не привязан к
+        // VerticalContentAlignment, а Stretch только растягивал его на все 46 —
+        // текст как был у верхней кромки, так и остался. Разбор → UI.CenterFieldText.
+        if (control is Control c) UI.CenterFieldText(c);
+        else control.VerticalAlignment = VerticalAlignment.Center;
         Grid.SetColumn(control, 1);
         grid.Children.Add(control);
 
