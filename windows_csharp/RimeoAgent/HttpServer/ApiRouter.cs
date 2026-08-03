@@ -211,8 +211,18 @@ public sealed class ApiRouter
         // no 16-bit down-convert and no AIFF→WAV.
         var raw     = req.QueryParams.GetValueOrDefault("raw", "") is "1" or "true";
         var ext     = Path.GetExtension(path).TrimStart('.').ToLower();
+        // Explicit representation request — beats any "who is asking" heuristic. A client
+        // that caches bytes (the iOS prefix cache) must get the SAME representation on every
+        // route; mixing two of them inside one asset plays back as white noise.
+        //   fmt=original — byte-for-byte source (same effect as raw=1, no "download" meaning)
+        //   fmt=wav      — force the WAV conversion (web player: wavesurfer can't decode AIFF)
+        // Empty → previous behaviour, so older clients are unaffected. fmt=wav needs no branch
+        // here: on Windows AIFF is converted for every client anyway, and on both platforms the
+        // flag only ever applies to AIFF — so asking for it changes nothing on this side.
+        var fmt           = req.QueryParams.GetValueOrDefault("fmt", "").ToLower();
+        var wantsOriginal = raw || fmt == "original";
 
-        Log.Info($"Stream request: track={trackId}, preload={preload}, raw={raw}, path={path}");
+        Log.Info($"Stream request: track={trackId}, preload={preload}, raw={raw}, fmt={(fmt.Length == 0 ? "-" : fmt)}, path={path}");
 
         if (!File.Exists(path))
         {
@@ -231,12 +241,16 @@ public sealed class ApiRouter
         catch (IOException) { /* sharing/transient lock — let the normal flow handle it */ }
 
         string finalPath = path;
+        // Which representation actually goes on the wire. Sent back as `X-Rimeo-Variant` so a
+        // byte-caching client can compare it against what it stored instead of guessing from
+        // the size: original | wav | wav16.
+        var variant = "original";
         // Hi-res discriminator: Rekordbox bitrate > 2000 kbps. raw=1 forces the lossless
         // original, so skip the lookup/down-convert entirely in that case.
-        var bitrate = raw ? 0 : (RekordboxParser.Shared.TrackById(trackId)?.Bitrate ?? 0);
-        var isHiRes = !raw && bitrate > HiResBitrateThreshold;
+        var bitrate = wantsOriginal ? 0 : (RekordboxParser.Shared.TrackById(trackId)?.Bitrate ?? 0);
+        var isHiRes = !wantsOriginal && bitrate > HiResBitrateThreshold;
 
-        if (raw)
+        if (wantsOriginal)
         {
             // Lossless original — no conversion. A preload probe has nothing to warm.
             if (preload) { await WriteJson(resp, 200, new { status = "preloading" }); return; }
@@ -251,15 +265,20 @@ public sealed class ApiRouter
                 await WriteJson(resp, 200, new { status = "preloading" }); return;
             }
             finalPath = await AudioService.Shared.Ensure16BitWav(path, trackId);
+            variant   = "wav16";
         }
         else if (ext is "aif" or "aiff")
         {
+            // NB: unlike macOS (which serves AIFF as-is to src=ios), Windows converts for every
+            // client. Deliberate for now — flipping it would change the bytes under prefix
+            // caches built by already-shipped iOS builds. Tracked in PARITY.md.
             if (preload)
             {
                 _ = Task.Run(() => AudioService.Shared.EnsureWav(path, trackId));
                 await WriteJson(resp, 200, new { status = "preloading" }); return;
             }
             finalPath = await AudioService.Shared.EnsureWav(path, trackId);
+            variant   = "wav";
         }
         else if (preload)
         { await WriteJson(resp, 200, new { status = "preloading" }); return; }
@@ -299,6 +318,9 @@ public sealed class ApiRouter
         resp.StatusCode  = hasRange ? 206 : 200;
         resp.ContentType = mime;
         resp.Headers.Add("Accept-Ranges",  "bytes");
+        // Representation marker — the iOS prefix cache drops its entry when this flips
+        // instead of splicing bytes from two different files into one asset.
+        resp.Headers.Add("X-Rimeo-Variant", variant);
         if (hasRange) resp.Headers.Add("Content-Range",  $"bytes {start}-{end}/{size}");
         resp.ContentLength64 = length;
 

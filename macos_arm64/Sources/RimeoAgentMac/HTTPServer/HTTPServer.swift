@@ -18,7 +18,13 @@ func parseFormQuery(_ queryString: String) -> [String: String] {
     // In that case naive split-by-& truncates the path.
     if let pathStart = queryString.range(of: "path=")?.upperBound {
         let tail = String(queryString[pathStart...])
-        let terminators = ["&id=", "&preload=", "&code=", "&limit=", "&use_key="]
+        // ВСЕ параметры, которые клиенты дописывают после `path`. Список должен покрывать их
+        // целиком: пропущенный ключ означает, что `path` съест хвост запроса и файл «исчезнет»
+        // (404 на существующий трек). Так вело себя `&src=`/`&fmt=`/`&token=` — они здесь
+        // отсутствовали, и порядок параметров у клиента становился негласным контрактом.
+        let terminators = ["&id=", "&preload=", "&code=", "&limit=", "&use_key=",
+                           "&src=", "&raw=", "&fmt=", "&token=", "&session=", "&lan_token=",
+                           "&dl="]
         var endIndex = tail.endIndex
         for term in terminators {
             if let r = tail.range(of: term), r.lowerBound < endIndex {

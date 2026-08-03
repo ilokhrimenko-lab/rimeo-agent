@@ -180,6 +180,15 @@ final class APIRouter {
         let ext     = (resolvedPath as NSString).pathExtension.lowercased()
         let rangeHeader = req.headers["range"] ?? "(none)"
         let src = req.queryParams["src"] ?? "unknown"
+        // Явный запрос представления — приоритетнее эвристики по `src`. Клиент, который
+        // кеширует байты (iOS prefix-кеш), обязан получать ОДНО И ТО ЖЕ представление на
+        // всех маршрутах; «кто спросил» — ненадёжный признак (iOS по LAN исторически не
+        // слал src → попадал в web-ветку и получал WAV вместо AIFF, а через туннель —
+        // оригинал; склейка двух представлений в одном asset'е звучала как белый шум).
+        //   fmt=original — байт-в-байт исходник (как raw=1, но без семантики «скачивание»)
+        //   fmt=wav      — гарантированная WAV-конверсия (веб-плеер: wavesurfer не ест AIFF)
+        // Пусто → прежнее поведение (обратная совместимость со старыми клиентами).
+        let fmt = (req.queryParams["fmt"] ?? "").lowercased()
 
         logger.info("Stream request: src=\(src), track=\(trackID), preload=\(preload), range=\(rangeHeader), raw_path=\(filePath), resolved_path=\(resolvedPath)")
         if filePath != resolvedPath {
@@ -222,7 +231,12 @@ final class APIRouter {
         // stalls the player, so serve a 16-bit/44.1/stereo WAV instead. Bypassed by raw=1
         // (download/offline must stay byte-for-byte lossless) and when bitrate is unknown.
         let bitrate = RekordboxParser.shared.track(byID: trackID)?.bitrate ?? 0
-        let isHiRes = !raw && bitrate > APIRouter.hiResBitrateThreshold
+        // Само правило живёт в чистом, покрытом тестами `StreamVariant.decide` — здесь только
+        // исполнение решения. Значение уедет клиенту заголовком `X-Rimeo-Variant`.
+        let variant = StreamVariant.decide(ext: ext, raw: raw, fmt: fmt, src: src,
+                                           bitrate: bitrate,
+                                           hiResThreshold: APIRouter.hiResBitrateThreshold).rawValue
+        let isHiRes = (variant == "wav16")
 
         if isHiRes {
             if preload {
@@ -244,11 +258,10 @@ final class APIRouter {
                 return .error("Audio conversion failed — retry in a moment", status: 503)
             }
         } else {
-            // AIFF needs WAV conversion only for the web player (wavesurfer.js can't decode AIFF).
-            // iOS AVPlayer plays AIFF natively, so skip the ffmpeg step entirely for src=ios —
-            // saves ~1-3s per track and removes ffmpeg/Pipe pressure on the agent.
-            // raw=1 also skips this — the download must be the byte-for-byte original.
-            let needsAIFFConversion = !raw && (ext == "aif" || ext == "aiff") && src != "ios"
+            // AIFF → WAV нужен веб-плееру (wavesurfer.js не декодирует AIFF); iOS играет AIFF
+            // нативно, поэтому для него ffmpeg-шаг пропускается (экономит 1–3 c на треке).
+            // Само правило — в `StreamVariant.decide`.
+            let needsAIFFConversion = (variant == "wav")
             if needsAIFFConversion {
                 if preload {
                     DispatchQueue.global(qos: .utility).async {
@@ -317,7 +330,7 @@ final class APIRouter {
 
         let length    = end - start + 1
         let respStatus = hasRange ? 206 : 200
-        logger.debug("Stream response: track=\(trackID), status=\(respStatus), mime=\(mime), bytes=\(start)-\(end)/\(size), length=\(length), final_path=\(finalPath)")
+        logger.debug("Stream response: track=\(trackID), status=\(respStatus), mime=\(mime), variant=\(variant), bytes=\(start)-\(end)/\(size), length=\(length), final_path=\(finalPath)")
         StreamDiag.record(trackID: trackID, path: filePath, resolvedPath: resolvedPath,
                           status: respStatus, range: rangeHeader, preload: preload, bytes: length, note: "ok")
 
@@ -325,6 +338,10 @@ final class APIRouter {
             "Content-Type":   mime,
             "Content-Length": "\(length)",
             "Accept-Ranges":  "bytes",
+            // Какое представление файла в теле ответа. Клиентский байтовый кеш сверяет его
+            // с сохранённым и, если представление сменилось, выбрасывает кеш ВМЕСТО того,
+            // чтобы склеить чужие байты (WAV-префикс + AIFF-хвост = белый шум).
+            "X-Rimeo-Variant": variant,
         ]
         if hasRange {
             headers["Content-Range"] = "bytes \(start)-\(end)/\(size)"
