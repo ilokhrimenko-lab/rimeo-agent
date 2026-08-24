@@ -34,6 +34,10 @@ public sealed class AudioService
             if (File.Exists(cached)) return cached;
 
             Log.Info($"Converting AIFF → WAV: {trackId}");
+            // The cache dir can be purged at runtime; recreate it or ffmpeg's
+            // output open fails and /stream 503s this track (bug_reports #89).
+            if (!AppConfig.Shared.EnsureCacheDir())
+                Log.Warn($"AIFF conversion: cache dir unavailable (mkdir failed): track={trackId}, dir={AppConfig.Shared.CacheDir}");
             var result = RunProcess("ffmpeg", new[] { "-i", path, "-f", "wav", cached, "-y" }, 120);
             if (!result.Success || !File.Exists(cached))
                 throw new Exception($"AIFF conversion failed: {result.Stderr}");
@@ -62,6 +66,10 @@ public sealed class AudioService
             if (File.Exists(cached)) return cached;
 
             Log.Info($"Converting hi-res → 16-bit WAV: {trackId}");
+            // The cache dir can be purged at runtime; recreate it or ffmpeg's
+            // output open fails and /stream 503s this track (bug_reports #89).
+            if (!AppConfig.Shared.EnsureCacheDir())
+                Log.Warn($"16-bit conversion: cache dir unavailable (mkdir failed): track={trackId}, dir={AppConfig.Shared.CacheDir}");
             var result = RunProcess("ffmpeg",
                 new[] { "-i", path, "-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2", "-f", "wav", cached, "-y" }, 120);
             if (!result.Success || !File.Exists(cached))
@@ -135,6 +143,9 @@ public sealed class AudioService
         }
 
         var out_ = new Dictionary<string, object> { ["duration"] = duration, ["peaks"] = peaks.ToArray() };
+        // Recreate the cache dir if purged at runtime, else the write silently
+        // fails and every request recomputes the waveform (bug_reports #89).
+        AppConfig.Shared.EnsureCacheDir();
         try
         {
             File.WriteAllText(cacheFile, System.Text.Json.JsonSerializer.Serialize(out_));
@@ -157,6 +168,10 @@ public sealed class AudioService
         }, 12);
         if (string.IsNullOrWhiteSpace(probe.Stdout.Trim())) return null;
 
+        // Recreate the cache dir if purged at runtime, else ffmpeg's output open
+        // fails and artwork never caches (bug_reports #89).
+        if (!AppConfig.Shared.EnsureCacheDir())
+            Log.Warn($"Artwork extraction: cache dir unavailable (mkdir failed): track={trackId}, dir={AppConfig.Shared.CacheDir}");
         var result = RunProcess("ffmpeg", new[]
         {
             "-v", "error", "-i", path, "-map", "0:v:0", "-an",

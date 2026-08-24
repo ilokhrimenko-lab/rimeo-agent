@@ -73,7 +73,7 @@ final class AppConfig {
         #endif
 
         try? FileManager.default.createDirectory(at: baseDir,  withIntermediateDirectories: true)
-        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        Self.createCacheDir(cacheDir)
 
         // Persistent agent ID
         let idFile = baseDir.appendingPathComponent("agent_id")
@@ -112,6 +112,29 @@ final class AppConfig {
         // Restored review session: if the persisted XML points at our generated
         // review library, stay in review mode across restarts.
         if xmlPath.hasSuffix("review_active.xml") { reviewMode = true }
+    }
+
+    /// Idempotently (re)create the cache directory. Must be called at startup AND
+    /// before every cache write: the dir lives under Application Support and can be
+    /// purged at runtime (disk cleaner / manual clear) while the agent keeps running.
+    /// When it's gone, ffmpeg output fails with "No such file or directory" and
+    /// /stream 503s every track that needs conversion (AIFF→WAV, hi-res→16-bit),
+    /// while plain 16-bit tracks still stream — a ragged, silent breakage. See
+    /// bug_reports #89 (2026-08-24). Creating the dir once at startup is not enough.
+    @discardableResult
+    func ensureCacheDir() -> Bool {
+        return Self.createCacheDir(cacheDir)
+    }
+
+    /// Silent (no logging): this runs inside `init`, and the file logger's own
+    /// init reads `AppConfig.shared` — touching `logger` here would re-enter a
+    /// half-initialized AppConfig. Callers log failures at their own site.
+    @discardableResult
+    static func createCacheDir(_ dir: URL) -> Bool {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        if fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue { return true }
+        return (try? fm.createDirectory(at: dir, withIntermediateDirectories: true)) != nil
     }
 
     /// Switch the agent to the built-in royalty-free review library (15 tracks),

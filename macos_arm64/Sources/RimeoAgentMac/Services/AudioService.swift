@@ -49,6 +49,11 @@ final class AudioService {
         } else {
             logger.warning("AIFF conversion ffmpeg missing: track=\(trackID)")
         }
+        // The cache dir can be purged at runtime; recreate it or ffmpeg's output
+        // open fails with "No such file or directory" → 503 (bug_reports #89).
+        if !AppConfig.shared.ensureCacheDir() {
+            logger.warning("AIFF conversion: cache dir unavailable (mkdir failed): track=\(trackID), dir=\(AppConfig.shared.cacheDir.path)")
+        }
         let result = runFFmpegWithStdin(["-f", "aiff", "-i", "pipe:0", "-f", "wav", cached.path, "-y"],
                                        inputPath: path, timeout: 120)
         guard result.success, FileManager.default.fileExists(atPath: cached.path) else {
@@ -93,6 +98,11 @@ final class AudioService {
             logger.info("16-bit conversion ffmpeg: track=\(trackID), binary=\(ffmpegPath)")
         } else {
             logger.warning("16-bit conversion ffmpeg missing: track=\(trackID)")
+        }
+        // The cache dir can be purged at runtime; recreate it or ffmpeg's output
+        // open fails with "No such file or directory" → 503 (bug_reports #89).
+        if !AppConfig.shared.ensureCacheDir() {
+            logger.warning("16-bit conversion: cache dir unavailable (mkdir failed): track=\(trackID), dir=\(AppConfig.shared.cacheDir.path)")
         }
         let result = runFFmpegWithStdin(["-i", "pipe:0", "-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2", "-f", "wav", cached.path, "-y"],
                                        inputPath: path, timeout: 120)
@@ -169,6 +179,9 @@ final class AudioService {
         }
 
         let out: [String: Any] = ["duration": duration, "peaks": peaks]
+        // Recreate the cache dir if purged at runtime, else the write silently
+        // fails and every request recomputes the waveform (bug_reports #89).
+        AppConfig.shared.ensureCacheDir()
         if let data = try? JSONSerialization.data(withJSONObject: out) {
             try? data.write(to: cacheURL)
             CacheManager.shared.scheduleEnforce()
@@ -205,6 +218,11 @@ final class AudioService {
             return nil
         }
 
+        // Recreate the cache dir if purged at runtime, else ffmpeg's output open
+        // fails with "No such file or directory" and artwork never caches (#89).
+        if !AppConfig.shared.ensureCacheDir() {
+            logger.warning("Artwork extraction: cache dir unavailable (mkdir failed): track=\(trackID), dir=\(AppConfig.shared.cacheDir.path)")
+        }
         let result = runFFmpegWithStdin([
             "-v", "error",
             "-i", "pipe:0",

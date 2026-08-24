@@ -53,7 +53,7 @@ public sealed class AppConfig
         AnalysisFile = Path.Combine(BaseDir, "analysis_data.json");
 
         Directory.CreateDirectory(BaseDir);
-        Directory.CreateDirectory(CacheDir);
+        EnsureCacheDir();
         Directory.CreateDirectory(CloudflaredDir);
 
         // Persistent agent ID
@@ -89,6 +89,22 @@ public sealed class AppConfig
                 else if (key == "RIMEO_XML_ENABLED" && !string.IsNullOrEmpty(val)) _xmlSourceEnabled = ParseBool(val);
             }
         }
+    }
+
+    /// <summary>
+    /// Idempotently (re)create the cache directory. Must be called before every
+    /// cache write, not only at startup: the dir lives under %AppData% and can be
+    /// purged at runtime (disk cleaner / manual clear) while the agent keeps
+    /// running. When it's gone, ffmpeg's output open fails with a missing-path
+    /// error and /stream 503s every track that needs conversion (AIFF→WAV,
+    /// hi-res→16-bit), while plain 16-bit tracks still stream — a ragged, silent
+    /// breakage. See bug_reports #89 (2026-08-24). Startup-only creation is not
+    /// enough. Silent by design (returns false on failure); callers log.
+    /// </summary>
+    public bool EnsureCacheDir()
+    {
+        try { Directory.CreateDirectory(CacheDir); return true; }
+        catch { return false; }
     }
 
     public void SetXmlPath(string path)
