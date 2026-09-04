@@ -6,10 +6,10 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI.Xaml.Shapes;
+using RimeoAgent.Config;   // Log
 using RimeoAgent.Services;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage;
-using Windows.Storage.Pickers;
 
 namespace RimeoAgent.Views;
 
@@ -50,10 +50,18 @@ public sealed partial class CheckSpekPage : Page
         stack.Children.Add(_content);
         Content = scroll;
 
-        AllowDrop  = true;
-        DragOver  += OnDragOver;
-        DragLeave += OnDragLeave;
-        Drop      += OnDrop;
+        // Приём файла вешаем И на Page, И на корневой ScrollViewer. На «голой» Page
+        // (весь Content — ScrollViewer) WinUI не регистрировал окно как OLE-drop-target,
+        // и перетаскивание не давало никакой реакции. ScrollViewer hit-testable
+        // (Background = Bg) и надёжно принимает drop; Page оставляем как fallback.
+        // Хэндлеры ставят e.Handled, поэтому дважды один drop не обрабатывается.
+        foreach (var target in new UIElement[] { this, scroll })
+        {
+            target.AllowDrop  = true;
+            target.DragOver  += OnDragOver;
+            target.DragLeave += OnDragLeave;
+            target.Drop      += OnDrop;
+        }
 
         ShowIdle();
     }
@@ -424,29 +432,44 @@ public sealed partial class CheckSpekPage : Page
 
     // ── File open + drag/drop ────────────────────────────────────────────────────
 
+    // Нативный Win32-диалог вместо WinRT FileOpenPicker: последний в этой конфигурации
+    // (unpackaged + self-contained WinUI 3) на Windows 11 24H2/25H2 кидал
+    // COMException 0x80004005 из PickSingleFileAsync() — кнопка «срабатывала», окно
+    // выбора не появлялось, «нет реакции» (баг nikolasleeman, build 265, 2026-09-04).
     private async void OpenPicker()
     {
-        var picker = new FileOpenPicker();
-        WinRT.Interop.InitializeWithWindow.Initialize(picker, MainWindow.Hwnd);
-        picker.SuggestedStartLocation = PickerLocationId.MusicLibrary;
-        foreach (var ext in new[] { ".wav", ".aiff", ".aif", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".wma", ".opus" })
-            picker.FileTypeFilter.Add(ext);
-
-        var file = await picker.PickSingleFileAsync();
-        if (file == null) return;
-        await Analyze(file.Path);
+        string? path;
+        try
+        {
+            path = Win32FileDialog.PickFile(
+                MainWindow.Hwnd,
+                "Audio files\0*.wav;*.aiff;*.aif;*.mp3;*.m4a;*.aac;*.flac;*.ogg;*.wma;*.opus\0All files\0*.*\0",
+                "Choose an audio file");
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"Check spek open-file failed: {ex.Message}");
+            return;
+        }
+        if (string.IsNullOrEmpty(path)) return;
+        await Analyze(path);
     }
 
     private void OnDragOver(object sender, DragEventArgs e)
     {
-        if (!e.DataView.Contains(StandardDataFormats.StorageItems)) return;
-        e.AcceptedOperation = DataPackageOperation.Copy;
-        if (e.DragUIOverride != null)
+        try
         {
-            e.DragUIOverride.Caption = "Analyze in Rimeo";
-            e.DragUIOverride.IsGlyphVisible = false;
+            if (!e.DataView.Contains(StandardDataFormats.StorageItems)) return;
+            e.AcceptedOperation = DataPackageOperation.Copy;
+            if (e.DragUIOverride != null)
+            {
+                e.DragUIOverride.Caption = "Analyze in Rimeo";
+                e.DragUIOverride.IsGlyphVisible = false;
+            }
+            HighlightDropZone(true);
+            e.Handled = true;   // не даём тому же событию всплыть на Page и обработаться дважды
         }
-        HighlightDropZone(true);
+        catch (Exception ex) { Log.Warn($"Check spek drag-over failed: {ex.Message}"); }
     }
 
     private void OnDragLeave(object sender, DragEventArgs e) => HighlightDropZone(false);
@@ -454,10 +477,27 @@ public sealed partial class CheckSpekPage : Page
     private async void OnDrop(object sender, DragEventArgs e)
     {
         HighlightDropZone(false);
-        if (!e.DataView.Contains(StandardDataFormats.StorageItems)) return;
-        var items = await e.DataView.GetStorageItemsAsync();
-        var file = items.OfType<StorageFile>().FirstOrDefault();
-        if (file != null) await Analyze(file.Path);
+        e.Handled = true;
+        if (!e.DataView.Contains(StandardDataFormats.StorageItems)) return;   // не файл — тихо игнорируем
+
+        // Deferral: DataView должен жить, пока идёт await. try/catch — потому что на
+        // сломанном WinRT-брокере (та же машина, что валит FileOpenPicker)
+        // GetStorageItemsAsync() тоже может кинуть. Тогда — реакция (ShowFailed),
+        // а не молчание, и рабочая кнопка «Open audio file…» рядом.
+        var deferral = e.GetDeferral();
+        string? path = null;
+        bool retrievalFailed = false;
+        try
+        {
+            var items = await e.DataView.GetStorageItemsAsync();
+            path = items.OfType<StorageFile>().FirstOrDefault()?.Path;
+        }
+        catch (Exception ex) { retrievalFailed = true; Log.Warn($"Check spek drop failed: {ex.Message}"); }
+        finally { deferral.Complete(); }
+
+        if (!string.IsNullOrEmpty(path)) await Analyze(path);
+        else if (retrievalFailed) ShowFailed();   // брокер упал — реакция вместо тишины
+        // иначе (папка / не-аудио в drop) — молча оставляем текущий экран, не затирая результат
     }
 
     private async Task Analyze(string path)

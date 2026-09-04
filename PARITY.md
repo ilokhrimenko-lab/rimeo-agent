@@ -47,6 +47,7 @@ Windows — просто потому, что это негде было зап�
 | `done` после перезапуска (расписка на диске) | ✅ `update_handoff.json` | ✅ `update_result.json` | — |
 | Кнопка «Update» в UI идёт через тот же стейт стадий | ✅ (общий `applyZip`) | ✅ через `AgentUpdateService` | — |
 | Ежечасная тихая подготовка обновления (staged) | ✅ | ✅ | — |
+| Держать процесс, пока телефон не заберёт стадию `restarting` | ✅ `awaitRestartingDelivered` | ⚠️ нет (аудит 2026-09-03) | Windows сразу `Environment.Exit` после установки — телефон может пропустить стадию `restarting`. Плюс синтетический прогресс verifying=0.90/installing=0.95 (macOS — честный fraction) и TTL статуса 15 мин vs 10 мин |
 
 ## Запуск и фон
 
@@ -127,7 +128,13 @@ PyInstaller-onefile, собирается на arm64-раннере и выхо�
 | Состояние «обновление скачано, встанет при следующем запуске» | ✅ `.scheduled` (ручной выбор «On Next Launch») | ✅ (build 261) авто-стейджинг + строка статуса | Механика РАЗНАЯ: на Windows `CheckAndStageSilently` качает билд сам, раз в час, и ставит на следующем старте — кнопки «On Next Launch» там быть не может. UI теперь честно показывает `UpdateChecker.StagedVersion` вместо «Check for updates» |
 | Ошибка чтения `master.db` видна в UI | ✅ `masterDBError` + карточка | ✅ (build 261) `RekordboxParser.MasterDbError` + карточка | Windows проглатывал исключение в лог, поэтому не мог отличить «база не читается» от «библиотека пустая» и на любой ноль писал «could not be read». Теперь три исхода, как на macOS |
 | Реакция drop-зоны на перетаскивание | ✅ фон/рамка → акцент | ✅ (build 261) | `OnDragOver` только разрешал операцию: файл висел над окном без единого визуального отклика |
+| **«Open audio file…» / выбор Rekordbox XML открывает диалог** | ✅ `NSOpenPanel` | ✅ (build 266) `Win32FileDialog` (comdlg32 `GetOpenFileNameW`) | WinRT `FileOpenPicker.PickSingleFileAsync()` в unpackaged+self-contained WinUI 3 на Win11 26xxx кидал `COMException 0x80004005`: кнопка «срабатывала», окно выбора не появлялось — «нет реакции» (подтверждено логом агента `nikolasleeman`, build 265, 2026-09-04). Затрагивало и Check spek, и пикер XML в Library. Нативный shell-диалог не трогает WinRT-брокер → работает на всех сборках Windows |
+| Перетаскивание файла в Check spek реально принимается | ✅ `.onDrop([.fileURL])` | ✅ (build 266) хэндлеры на ScrollViewer + Page, try/catch + deferral | Раньше `AllowDrop`/хэндлеры висели только на «голой» `Page` (весь `Content` — `ScrollViewer`) → окно не регистрировалось как OLE-drop-target, drop не давал реакции. Теперь `AllowDrop` и на корневом `ScrollViewer` (hit-testable, `Background=Bg`); при провале `GetStorageItemsAsync` — `ShowFailed`, а не тишина |
 | Регистр подписей кнопок | Title Case (HIG) | sentence case (Fluent) | **Осознанное расхождение.** Внутри Windows-UI разнобой убран («Clear cache», «Send report», «Check for updates»), но платформенные нормы разные — не выравнивать «под macOS» |
+| **Open with → Rimeo Agent** (файловая ассоциация + отдельное окно «Check quality») | ✅ `AppDelegate.application(_:open:)` → `QualityWindowManager` → окно `CheckQualityRootView` (auth-гейт) + `CFBundleDocumentTypes` в `Info.plist` | ❌ **нет вообще** (аудит 2026-09-03) | Три причины, каждой хватает: приложение unpackaged (`WindowsPackageType=None` → нет MSIX `<uap:FileTypeAssociation>`); в реестр ProgId/OpenWith не пишется (есть только автозапуск+тема); `OnLaunched` (`App.xaml.cs:56`) читает из командной строки ТОЛЬКО `--background`, путь к файлу игнорит, а второй инстанс (`SignalRunningInstance`) путь не пробрасывает. «Check spek» на Windows есть, но только как вкладка — отдельного окна и точек входа (Finder Open-With / drag-on-icon / меню File) нет. Реализация: регистрация ProgId в реестре при старте + приём пути в `OnLaunched`/проброс в живой инстанс → навигация в Check spek |
+| **Онбординг-экран + выбор master.db** | ✅ `OnboardingView` (welcome / retry-autodetect / пикер master.db ИЛИ xml) | ⚠️ частично (аудит 2026-09-03) | `IsOnboarding` (`AppState.cs:35`) задаётся, но НИ ОДНИМ view не читается — отдельного экрана нет. Частично свёрнуто в `LibraryPage.xaml.cs` (карточка «master.db could not be read» + пикер), но `FinishOnboarding` (`AppState.cs:90`) принимает ТОЛЬКО XML: на Windows нельзя указать сам master.db, нет welcome и retry-auto-detect |
+| **Экран-гейт скачивания компонентов (~62 МБ)** | ✅ `ComponentGateView` (Install / прогресс / Restart) | ⚠️ логика без UI (аудит 2026-09-03) | Логика есть (`ComponentManager.cs`), но на Windows компоненты качаются МОЛЧА в фоне с ретраями (`App.xaml.cs:224-245`) — без блокирующего экрана, кнопки Install, прогресса и Restart. UX-разница: маковый юзер видит гейт, Windows — нет |
+| **Форс английской раскладки на фокусе поля пароля** | ✅ `KeyboardInputSource` | ❌ нет (аудит 2026-09-03) | На Windows нет `ActivateKeyboardLayout`/`LoadKeyboardLayout` при фокусе пароля. Кейс «ввёл пароль в русской раскладке → Sign-in failed» так же применим, но не закрыт |
 
 ## Диагностика
 
@@ -138,8 +145,10 @@ PyInstaller-onefile, собирается на arm64-раннере и выхо�
 | Метка собственного релея (`X-Rimeo-Relay-Key`) | ✅ | ✅ | без неё облачный путь в логе неотличим от локального браузера |
 | Строка `[BOOT]` о ПРЕДЫДУЩЕМ запуске (`exit=clean\|unclean`, uptime) | ✅ UserDefaults | ✅ `run_state.json` | — |
 | Логи агента уезжают в диагностический бандл iOS (хвост ФАЙЛА, не памяти) | ✅ | ✅ | — |
-| Набор полей строки `[REQ]` | ✅ + `ttfb_ms`, `bytes=sent/declared`, `abort=client` | ⚠️ без них | Мелочь, но общий парсер логов на них спотыкается |
+| Набор полей строки `[REQ]` | ✅ + `ttfb_ms`, `bytes=sent/declared`, `abort=client` | ⚠️ есть `bytes=`/`abort=client` (`HttpServer.cs:367,404`), нет `ttfb_ms` | Обновлено 2026-09-03: `bytes`/`abort` уже портированы, разрыв сузился до одного поля `ttfb_ms` |
 | `GET /api/admin/diag` | ✅ | ❌ роута нет | Низкий приоритет: дублирует `/api/status` + `/api/logs` |
+| **`HEAD *` → 200** (пробы cloudflared/relay) | ❌ HEAD не обрабатывается → 404 (`APIRouter.swift:145`) | ✅ короткое замыкание HEAD → headers-only 200 (`ApiRouter.cs:103-110`) | **Обратный разрыв** (аудит 2026-09-03): здесь впереди Windows. macOS отвечает на HEAD-пробы 404 |
+| `OPTIONS *` preflight | ⚠️ 200 empty (`HTTPServer.swift:170`) | ⚠️ 204 empty (`HttpServer.cs:111`) | Косметика: разный статус CORS-preflight |
 
 ## Безопасность
 

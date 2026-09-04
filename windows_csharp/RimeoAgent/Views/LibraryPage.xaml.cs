@@ -5,7 +5,6 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Shapes;
 using RimeoAgent.Config;
 using RimeoAgent.Services;
-using Windows.Storage.Pickers;
 
 namespace RimeoAgent.Views;
 
@@ -290,17 +289,26 @@ public sealed partial class LibraryPage : Page
         });
     }
 
-    private async void PickXml_Click(object sender, RoutedEventArgs e)
+    // Нативный Win32-диалог вместо WinRT FileOpenPicker (тот же баг 0x80004005 в
+    // unpackaged/self-contained WinUI 3, что валил и «Check spek» — см. Win32FileDialog).
+    private void PickXml_Click(object sender, RoutedEventArgs e)
     {
-        var picker = new FileOpenPicker();
-        WinRT.Interop.InitializeWithWindow.Initialize(picker, MainWindow.Hwnd);
-        picker.FileTypeFilter.Add(".xml");
-        picker.SuggestedStartLocation = PickerLocationId.DocumentsLibrary;
+        string? path;
+        try
+        {
+            path = Win32FileDialog.PickFile(
+                MainWindow.Hwnd,
+                "Rekordbox XML\0*.xml\0All files\0*.*\0",
+                "Choose a Rekordbox XML file");
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"Rekordbox XML pick failed: {ex.Message}");
+            return;
+        }
+        if (string.IsNullOrEmpty(path)) return;
 
-        var file = await picker.PickSingleFileAsync();
-        if (file == null) return;
-
-        AppConfig.Shared.SetXmlPath(file.Path);
+        AppConfig.Shared.SetXmlPath(path);
         if (!AppConfig.Shared.XmlSourceEnabled) AppConfig.Shared.SetXmlSourceEnabled(true);
         RekordboxParser.Shared.InvalidateCache();
         Rebuild();
