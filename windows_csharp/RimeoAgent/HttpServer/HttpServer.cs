@@ -128,8 +128,8 @@ public sealed class AgentHttpServer
             var peer = PeerAddress(req);
             agentReq = new AgentRequest(method, path, queryParams, headers, body)
             {
-                // C1: unforgeable same-machine signal for the pairing_info loopback gate.
-                PeerIsLoopback = peer != null && IPAddress.IsLoopback(peer),
+                // Канал решает, действует ли PSK (AccessControl.AcceptsPsk).
+                TransportKind = Transport.Classify(peer, headers),
             };
             await _router.RouteAsync(agentReq, resp);
         }
@@ -435,11 +435,16 @@ public record AgentRequest(
     /// "public" по умолчанию — путь, не требующий авторизации (AccessControl.RequiresAuth).
     public string Auth { get; set; } = "public";
 
-    /// True when the kernel-reported peer address is loopback (127.0.0.1 / ::1) — the
-    /// only UNFORGEABLE "same machine" signal. Set at construction from
-    /// HttpListenerRequest.RemoteEndPoint; used to gate /api/pairing_info (which hands
-    /// out the master PSK) to the agent's own WinUI over 127.0.0.1. Settable (not a
-    /// primary-constructor parameter) for the same reason as Auth: adding a positional
-    /// param would break every existing `new AgentRequest(...)` call.
-    public bool PeerIsLoopback { get; set; }
+    /// Канал запроса — Transport.Lan / Tunnel / Relay / Local / External / Ui, тот же,
+    /// что пишется в [REQ]. Считается из адреса пира, который отдаёт ядро, а внутри
+    /// loopback — по CF-заголовкам и процессной метке релея (Transport.Classify).
+    ///
+    /// ⚠️ Одного «пир — loopback» мало: cloudflared и CloudRelay тоже ходят с
+    /// 127.0.0.1, поэтому проверка по loopback пускала интернет через туннель туда,
+    /// куда хотели пустить только свой WinUI. Так через туннель отдавался
+    /// /api/pairing_info с PSK и mobile_token.
+    ///
+    /// Пустая строка по умолчанию означает «канал неизвестен» и PSK не принимается.
+    /// Свойство с инициализатором — по той же причине, что и Auth.
+    public string TransportKind { get; set; } = "";
 }

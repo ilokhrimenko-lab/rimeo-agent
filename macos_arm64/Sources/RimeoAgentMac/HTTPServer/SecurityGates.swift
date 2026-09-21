@@ -90,8 +90,26 @@ enum AccessControl {
         !publicPaths.contains(path)
     }
 
+    /// PSK — ключ локальной сети, и действует он только там: для пира из LAN и для
+    /// этой же машины. Через туннель, CloudRelay и с публичного адреса принимается
+    /// только JWT. PSK не ротируется, поэтому без этого правила утёкший ключ
+    /// становился вечным удалённым доступом к агенту через публичный туннель.
+    /// Легитимно через туннель или relay PSK не шлёт никто: iOS кладёт `lan_token`
+    /// только на LAN-адрес, облако ходит с JWT. Свой UI агента — in-process
+    /// (`req.trusted`) и сюда не попадает. Паритет: `AccessControl.AcceptsPsk` на Windows.
+    static func acceptsPSK(transport: Transport) -> Bool {
+        transport == .lan || transport == .local
+    }
+
+    /// Совпал ли предъявленный токен с PSK агента. Пустой PSK не совпадает ни с чем.
+    static func isValidPSK(lanSecret: String, providedToken: String?) -> Bool {
+        guard !lanSecret.isEmpty, let provided = providedToken, !provided.isEmpty else { return false }
+        return constantTimeEquals(provided, lanSecret)
+    }
+
     /// Pure authorization core shared by the live `authGate`. Order:
-    ///  1. A valid per-device PSK authorises a local (LAN) client.
+    ///  1. A valid per-device PSK authorises a LAN / same-machine client
+    ///     (`acceptsPSK`); via the tunnel or the relay the PSK is ignored.
     ///  2. No named tunnel (audience empty) ⇒ **DENY** (task 6001 fix). Without a
     ///     named tunnel the server signs no JWT, so the PSK is the only trusted
     ///     remote credential; a request lacking it must be refused, never waved
@@ -100,12 +118,13 @@ enum AccessControl {
     static func decide(
         lanSecret: String,
         providedToken: String?,
+        transport: Transport,
         namedHostname: String,
         jwtToken: String?,
         validate: (_ token: String?, _ audience: String) -> JWTValidator.Failure?
     ) -> AccessDecision {
-        if !lanSecret.isEmpty, let provided = providedToken, !provided.isEmpty,
-           constantTimeEquals(provided, lanSecret) {
+        if isValidPSK(lanSecret: lanSecret, providedToken: providedToken),
+           acceptsPSK(transport: transport) {
             return .allow
         }
         // 6001: fail closed. Was `return .allow` (open) when the audience was empty.

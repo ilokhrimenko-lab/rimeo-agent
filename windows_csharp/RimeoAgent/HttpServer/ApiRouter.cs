@@ -19,7 +19,9 @@ public sealed class ApiRouter
     // (SecurityGates.cs): AccessControl.DataProtectedPaths + ControlProtectedPaths.
 
     // PSK-or-JWT (mirrors macOS authGate). Policy lives in AccessControl.Decide.
-    //  • A valid per-device LAN PSK authorises a local client (no JWT needed).
+    //  • A valid per-device LAN PSK authorises a client on the LAN or on this same
+    //    machine (no JWT needed). Via the tunnel / CloudRelay / a public address the
+    //    PSK is ignored — only the JWT counts (AccessControl.AcceptsPsk).
     //  • 6001 fix: when there is neither a PSK nor a named tunnel, DENY (was allow
     //    = fail-open). Without a named tunnel the server signs no JWT, so the PSK is
     //    the only trusted remote credential.
@@ -31,19 +33,21 @@ public sealed class ApiRouter
         if (string.IsNullOrEmpty(provided)) provided = BearerToken(req) ?? "";
         var aud      = TunnelManager.Shared.NamedHostname;
         var jwtToken = JwtValidator.ExtractToken(req);
+        var validPsk = AccessControl.IsValidPsk(secret, provided);
+        var pskOk    = validPsk && AccessControl.AcceptsPsk(req.TransportKind);
 
-        var decision = AccessControl.Decide(secret, provided, aud, jwtToken, SafeValidate);
+        var decision = AccessControl.Decide(secret, provided, req.TransportKind, aud, jwtToken, SafeValidate);
         if (decision == AccessDecision.Allow)
         {
             // Основание допуска пишем в запрос — его подхватит одна строка [REQ] в
             // access-логе (auth=psk / auth=jwt). Отдельной INFO-строки здесь больше нет:
             // она дублировала бы [REQ] на КАЖДЫЙ запрос (а /stream их шлёт десятками).
-            var byPsk = !string.IsNullOrEmpty(secret) && !string.IsNullOrEmpty(provided)
-                        && AccessControl.ConstantTimeEquals(provided, secret);
-            req.Auth = byPsk ? "psk" : "jwt";
+            req.Auth = pskOk ? "psk" : "jwt";
             return false;
         }
 
+        // Клиенту — причина «как будто PSK нет или он неверный». Иначе ответ 401 через
+        // туннель подтверждал бы атакующему, что утёкший ключ настоящий.
         string reason;
         if (string.IsNullOrEmpty(aud))
             reason = string.IsNullOrEmpty(provided) ? "no_credentials" : "psk_invalid_no_tunnel";
@@ -52,10 +56,15 @@ public sealed class ApiRouter
             var f = SafeValidate(jwtToken, aud);
             reason = f.HasValue ? JwtValidator.FailureReason(f.Value) : "unauthorized";
         }
+        // В свой лог — настоящая причина: ключ верный, но пришёл не тем каналом
+        // (туннель/релей/публичный адрес). Так видно, что это не опечатка в PSK.
+        var logReason = validPsk
+            ? $"psk_not_accepted_via_{(req.TransportKind.Length > 0 ? req.TransportKind.ToLowerInvariant() : "unknown")}"
+            : reason;
         // Причина отказа тоже уезжает в access-лог (auth=deny:<reason>): без неё в
         // баг-репорте видно «401», но не видно, чего именно не хватило.
-        req.Auth = $"deny:{reason}";
-        Log.Warn($"Auth rejected: path={req.Path}, reason={reason}, aud={aud}, token_present={jwtToken != null}, psk_present={!string.IsNullOrEmpty(provided)}");
+        req.Auth = $"deny:{logReason}";
+        Log.Warn($"Auth rejected: path={req.Path}, reason={logReason}, aud={aud}, token_present={jwtToken != null}, psk_present={!string.IsNullOrEmpty(provided)}");
 
         var bytes = Encoding.UTF8.GetBytes(
             JsonSerializer.Serialize(new { error = "unauthorized", reason }));
@@ -780,87 +789,15 @@ public sealed class ApiRouter
 
     private static async Task PairingInfo(AgentRequest req, HttpListenerResponse resp)
     {
-        // C1: this payload carries the persistent master LAN PSK (`secret`) + a cloud
-        // `mobile_token`. Serve it ONLY to a loopback caller — the agent's own WinUI
-        // over 127.0.0.1. A LAN peer or a Cloudflare-tunnel client never sees the
-        // credential that authorises every protected endpoint. pairing_info stays in
-        // AccessControl.PublicPaths (the PSK gate can't guard the endpoint that hands
-        // out the PSK); this loopback check is the real gate. Mirror of macOS
-        // getPairingInfo's req.trusted guard.
-        if (!req.PeerIsLoopback)
-        {
-            Log.Warn("Blocked non-loopback /api/pairing_info");
-            await WriteJson(resp, 403, new { error = "Forbidden" });
-            return;
-        }
-        const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-        // L6: cryptographically-secure pairing code (was System.Random — predictable).
-        var code = new string(Enumerable.Range(0, 5)
-            .Select(_ => chars[System.Security.Cryptography.RandomNumberGenerator.GetInt32(chars.Length)])
-            .ToArray());
-
-        var psk = EnsureLanSecret();
-        DataStore.Shared.Update(d => d.PairingCode = code);
-
-        var localIp  = AppConfig.Shared.GetLocalIp();
-        var port     = AppConfig.Port;
-        var localUrl = $"http://{localIp}:{port}";
-        var d2       = DataStore.Shared.Data;
-        var tunnel   = TunnelManager.Shared.ActiveUrl;
-        var url      = string.IsNullOrEmpty(tunnel)
-                        ? (string.IsNullOrEmpty(d2.TunnelUrl) ? localUrl : d2.TunnelUrl)
-                        : tunnel;
-        var hostname = Environment.MachineName;
-
-        // v2 payload + optional dual-mode cloud fields → one scan = LAN (PSK) + remote (cloud).
-        var qr = new Dictionary<string, object>
-        {
-            ["v"]        = 2,
-            ["url"]      = url,
-            ["code"]     = code,
-            ["agent_id"] = AppConfig.Shared.AgentId,
-            ["secret"]   = psk,
-            ["hostname"] = hostname,
-            ["lan_ip"]   = localIp,
-            ["lan_port"] = port,
-        };
-        var cloud = await FetchCloudPairing();
-        if (cloud != null)
-        {
-            qr["type"]         = "rimeo_cloud";
-            qr["cloud_url"]    = cloud.Value.cloudUrl;
-            qr["mobile_token"] = cloud.Value.mobileToken;
-        }
-
-        var qrData  = JsonSerializer.Serialize(qr);
-        var encoded = Uri.EscapeDataString(qrData);
-        var qrUrl   = $"https://api.qrserver.com/v1/create-qr-code/?size=300x300&data={encoded}";
-
-        var respObj = new Dictionary<string, object>(qr) { ["qr_url"] = qrUrl, ["local_url"] = url };
-        await WriteJson(resp, 200, respObj);
-    }
-
-    // Best-effort: ask rimeo.app for a one-time mobile pairing token so the QR can
-    // also carry a cloud session (remote). null if not cloud-linked or it fails.
-    private static async Task<(string cloudUrl, string mobileToken)?> FetchCloudPairing()
-    {
-        var d = DataStore.Shared.Data;
-        if (string.IsNullOrEmpty(d.CloudUrl) || string.IsNullOrEmpty(d.CloudToken)) return null;
-        try
-        {
-            var url = $"{d.CloudUrl}/api/agents/mobile_token" +
-                      $"?agent_id={Uri.EscapeDataString(AppConfig.Shared.AgentId)}" +
-                      $"&token={Uri.EscapeDataString(d.CloudToken)}";
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(6) };
-            var body = await http.GetStringAsync(url);
-            var obj  = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body);
-            if (obj != null
-                && obj.TryGetValue("mobile_token", out var mt) && mt.GetString() is string mts && mts.Length > 0
-                && obj.TryGetValue("cloud_url",    out var cu) && cu.GetString() is string cus && cus.Length > 0)
-                return (cus, mts);
-        }
-        catch (Exception ex) { Log.Warn($"FetchCloudPairing failed: {ex.Message}"); }
-        return null;
+        // Не обслуживается по сети НИКОМУ (2026-09-21). Ответ содержал постоянный PSK
+        // агента и свежий облачный mobile_token, то есть ключ к агенту и к аккаунту.
+        // Раньше его отдавали loopback-вызывающему «для WinUI», но с 127.0.0.1 ходят и
+        // cloudflared, и CloudRelay: через публичный туннель ручка отдавала оба секрета
+        // интернету (повтор C1). WinUI её не вызывает, QR-паринг у агента убран
+        // сознательно (вход только по email/паролю). Код сборки QR удалён вместе с
+        // отправкой PSK в api.qrserver.com (H1), чтобы проверку не «починили» обратно.
+        Log.Warn($"Blocked /api/pairing_info (transport={req.TransportKind})");
+        await WriteJson(resp, 403, new { error = "Forbidden" });
     }
 
     // ── /api/check_pairing ───────────────────────────────────────────────────
@@ -892,7 +829,7 @@ public sealed class ApiRouter
         if (string.IsNullOrEmpty(provided)) provided = BearerToken(req) ?? "";
         var aud      = TunnelManager.Shared.NamedHostname;
         var jwtToken = JwtValidator.ExtractToken(req);
-        return AccessControl.Decide(secret, provided, aud, jwtToken, SafeValidate) == AccessDecision.Allow;
+        return AccessControl.Decide(secret, provided, req.TransportKind, aud, jwtToken, SafeValidate) == AccessDecision.Allow;
     }
 
     /// M11: strip the on-disk `location` from serialized similar/recommendation results
@@ -1606,7 +1543,8 @@ public sealed class ApiRouter
         var tunnel = CurrentTunnelInfo();
         // M1: absolute on-disk paths leak the OS username + library layout. Only a
         // trusted/authenticated caller gets them; anonymous callers keep the existence
-        // booleans (which the UI needs) but not the paths.
+        // booleans (which the UI needs) but not the paths. Адрес туннеля — туда же:
+        // анонимно он давал любому в Wi-Fi постоянный публичный адрес агента.
         var authed = IsAuthorized(req);
         await WriteJson(resp, 200, new
         {
@@ -1620,7 +1558,7 @@ public sealed class ApiRouter
             cloud_url        = data.CloudUrl,
             is_linked        = !string.IsNullOrEmpty(data.CloudUrl),
             agent_url        = cfg.LocalAgentUrl(),
-            tunnel_url       = tunnel.url,
+            tunnel_url       = authed ? tunnel.url : "",
             tunnel_active    = tunnel.active,
             cloudflared_found = tunnel.cloudflaredFound,
             stream_transport = string.IsNullOrEmpty(tunnel.url) ? "relay_only" : "tunnel",
@@ -1636,6 +1574,7 @@ public sealed class ApiRouter
         var tunnel = CurrentTunnelInfo();
         // M1: cloud_user_id is the account EMAIL. Disclose it only to a
         // trusted/authenticated caller — never to an anonymous LAN/tunnel probe.
+        // Адрес туннеля — по той же причине, что и в /api/status.
         var authed = IsAuthorized(req);
         await WriteJson(resp, 200, new
         {
@@ -1644,7 +1583,7 @@ public sealed class ApiRouter
             is_linked         = !string.IsNullOrEmpty(data.CloudUrl),
             agent_id          = cfg.AgentId,
             agent_url         = cfg.LocalAgentUrl(),
-            tunnel_url        = tunnel.url,
+            tunnel_url        = authed ? tunnel.url : "",
             tunnel_active     = tunnel.active,
             cloudflared_found  = tunnel.cloudflaredFound,
             stream_transport  = string.IsNullOrEmpty(tunnel.url) ? "relay_only" : "tunnel",
@@ -1838,7 +1777,16 @@ public sealed class ApiRouter
     private static async Task TunnelStatus(AgentRequest req, HttpListenerResponse resp)
     {
         var t = CurrentTunnelInfo();
-        await WriteJson(resp, 200, new { active = t.active, url = t.url, stored_url = t.storedUrl, cloudflared_found = t.cloudflaredFound });
+        // Адрес туннеля — только авторизованному (см. /api/status): зная его, из
+        // интернета можно стучаться в агента напрямую, мимо облака.
+        var authed = IsAuthorized(req);
+        await WriteJson(resp, 200, new
+        {
+            active = t.active,
+            url = authed ? t.url : "",
+            stored_url = authed ? t.storedUrl : "",
+            cloudflared_found = t.cloudflaredFound,
+        });
     }
 
     private static async Task TunnelStart(AgentRequest req, HttpListenerResponse resp)

@@ -1475,7 +1475,8 @@ final class APIRouter {
         let tunnel = currentTunnelInfo()
         // M1: absolute on-disk paths leak the OS username + library layout. Only a
         // trusted/authenticated caller gets them; anonymous callers see the existence
-        // booleans (which the UI needs) but not the paths themselves.
+        // booleans (which the UI needs) but not the paths themselves. Адрес туннеля —
+        // туда же: анонимно он давал любому в Wi-Fi постоянный публичный адрес агента.
         let authed = isAuthorized(req)
         return .json([
             "agent_id":   cfg.agentID,
@@ -1488,7 +1489,7 @@ final class APIRouter {
             "cloud_url":  data.cloud_url,
             "is_linked":  !data.cloud_url.isEmpty,
             "agent_url":  cfg.localAgentURL(),
-            "tunnel_url": tunnel.url,
+            "tunnel_url": authed ? tunnel.url : "",
             "tunnel_active": tunnel.active,
             "cloudflared_found": tunnel.cloudflaredFound,
             "stream_transport": tunnel.url.isEmpty ? "relay_only" : "tunnel",
@@ -1503,6 +1504,7 @@ final class APIRouter {
         let tunnel = currentTunnelInfo()
         // M1: cloud_user_id is the account EMAIL. Disclose it only to a
         // trusted/authenticated caller — never to an anonymous LAN/tunnel probe.
+        // Адрес туннеля — по той же причине, что и в /api/status.
         let authed = isAuthorized(req)
         return .json([
             "cloud_url":     data.cloud_url,
@@ -1510,7 +1512,7 @@ final class APIRouter {
             "is_linked":     !data.cloud_url.isEmpty,
             "agent_id":      cfg.agentID,
             "agent_url":     cfg.localAgentURL(),
-            "tunnel_url":    tunnel.url,
+            "tunnel_url":    authed ? tunnel.url : "",
             "tunnel_active": tunnel.active,
             "cloudflared_found": tunnel.cloudflaredFound,
             "stream_transport": tunnel.url.isEmpty ? "relay_only" : "tunnel",
@@ -1728,10 +1730,13 @@ final class APIRouter {
 
     private func tunnelStatus(_ req: HTTPRequest) -> HTTPResponse {
         let tunnel = currentTunnelInfo()
+        // Адрес туннеля — только авторизованному (см. /api/status): зная его, из
+        // интернета можно стучаться в агента напрямую, мимо облака.
+        let authed = isAuthorized(req)
         return .json([
             "active":            tunnel.active,
-            "url":               tunnel.url,
-            "stored_url":        tunnel.storedURL,
+            "url":               authed ? tunnel.url : "",
+            "stored_url":        authed ? tunnel.storedURL : "",
             "cloudflared_found": tunnel.cloudflaredFound,
         ])
     }
@@ -1814,10 +1819,13 @@ final class APIRouter {
         let provided = req.queryParams["lan_token"] ?? bearerToken(req)
         let aud      = TunnelManager.shared.namedHostname
         let jwtToken = JWTValidator.extractToken(from: req)
+        let transport = req.transport
+        let validPSK = AccessControl.isValidPSK(lanSecret: secret, providedToken: provided)
 
         let decision = AccessControl.decide(
             lanSecret: secret,
             providedToken: provided,
+            transport: transport,
             namedHostname: aud,
             jwtToken: jwtToken,
             validate: { JWTValidator.validate(token: $0, expectedAudience: $1) }
@@ -1826,20 +1834,24 @@ final class APIRouter {
             // Основание допуска пишем в контекст запроса — его подхватит одна строка
             // [REQ] в access-логе (auth=psk / auth=jwt). Отдельную INFO-строку здесь
             // больше не плодим: она дублировала бы [REQ] на каждый запрос.
-            let byPSK = !secret.isEmpty && provided != nil
-                && AccessControl.constantTimeEquals(provided!, secret)
+            let byPSK = validPSK && AccessControl.acceptsPSK(transport: transport)
             req.ctx.auth = byPSK ? "psk" : "jwt"
             return nil
         }
 
+        // Клиенту — причина «как будто PSK нет или он неверный». Иначе ответ 401 через
+        // туннель подтверждал бы атакующему, что утёкший ключ настоящий.
         let reason: String
         if aud.isEmpty {
             reason = (provided == nil) ? "no_credentials" : "psk_invalid_no_tunnel"
         } else {
             reason = JWTValidator.validate(token: jwtToken, expectedAudience: aud)?.rawValue ?? "unauthorized"
         }
-        req.ctx.auth = "deny:\(reason)"
-        logger.warning("Auth rejected: path=\(req.path), reason=\(reason), aud=\(aud), token_present=\(jwtToken != nil), psk_present=\(provided != nil)")
+        // В свой лог — настоящая причина: ключ верный, но пришёл не тем каналом
+        // (туннель/релей/публичный адрес). Так видно, что это не опечатка в PSK.
+        let logReason = validPSK ? "psk_not_accepted_via_\(transport.rawValue.lowercased())" : reason
+        req.ctx.auth = "deny:\(logReason)"
+        logger.warning("Auth rejected: path=\(req.path), reason=\(logReason), aud=\(aud), token_present=\(jwtToken != nil), psk_present=\(provided != nil)")
         return HTTPResponse(
             status: 401,
             headers: [
@@ -1871,8 +1883,8 @@ final class APIRouter {
         let aud      = TunnelManager.shared.namedHostname
         let jwtToken = JWTValidator.extractToken(from: req)
         return AccessControl.decide(
-            lanSecret: secret, providedToken: provided, namedHostname: aud,
-            jwtToken: jwtToken,
+            lanSecret: secret, providedToken: provided, transport: req.transport,
+            namedHostname: aud, jwtToken: jwtToken,
             validate: { JWTValidator.validate(token: $0, expectedAudience: $1) }
         ) == .allow
     }

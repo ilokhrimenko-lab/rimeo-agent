@@ -216,12 +216,20 @@ final class AgentSettings {
         }
     }
 
+    /// Аргументы caffeinate. `-w <pid>`: запрет сна живёт ровно столько, сколько агент.
+    /// Без него caffeinate оставался сиротой после каждого выхода мимо
+    /// applicationWillTerminate (exit(0) при обновлении, краш, kill) и не давал маку
+    /// спать до перезагрузки.
+    static func keepAliveArguments(pid: Int32) -> [String] {
+        ["-i", "-w", String(pid)]
+    }
+
     private func startKeepAliveAssertion() {
         if keepAliveProcess?.isRunning == true { return }
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-        p.arguments = ["-i"]
+        p.arguments = Self.keepAliveArguments(pid: ProcessInfo.processInfo.processIdentifier)
         p.standardOutput = Pipe()
         p.standardError = Pipe()
 

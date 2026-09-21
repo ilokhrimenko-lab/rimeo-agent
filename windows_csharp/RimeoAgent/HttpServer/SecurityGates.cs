@@ -61,16 +61,16 @@ public static class AccessControl
     // class of C1/M1/M4/M11). Kept small: handshake + read-only endpoints a fresh
     // client / the web player hits before it holds a credential.
     //
-    // ⚠️ /api/pairing_info stays here on purpose — its handler serves it to a loopback
-    // caller ONLY (the WinUI over 127.0.0.1; see PairingInfo/PeerIsLoopback), because
-    // the PSK gate cannot protect the endpoint that HANDS OUT the PSK. The analysis
-    // WRITE endpoints (start/stop/recheck) are deliberately ABSENT → now gated (M4
-    // unauth DoS). (Windows has no /api/admin/diag route.) DataProtectedPaths /
+    // ⚠️ /api/pairing_info здесь больше НЕТ, и его обработчик отказывает всем
+    // (2026-09-21). Раньше его пускали к loopback-вызывающему «для WinUI», но с
+    // 127.0.0.1 ходят и cloudflared, и CloudRelay. Через публичный туннель он отдавал
+    // PSK и свежий mobile_token. WinUI его не вызывает, QR-паринг у агента убран.
+    // The analysis WRITE endpoints (start/stop/recheck) are deliberately ABSENT → now
+    // gated (M4 unauth DoS). (Windows has no /api/admin/diag route.) DataProtectedPaths /
     // ControlProtectedPaths above remain as the sensitivity taxonomy but no longer
     // drive the gate.
     public static readonly HashSet<string> PublicPaths = new()
     {
-        "/api/pairing_info",   // handler-gated to loopback (WinUI over 127.0.0.1) only
         "/api/check_pairing",
         "/api/status", "/api/account", "/api/tunnel/status",
         "/api/similar", "/api/playlist/recommendations",
@@ -79,22 +79,36 @@ public static class AccessControl
     };
 
     // DEFAULT-DENY: public only for PublicPaths; every other path — known today or
-    // added later — needs a PSK, JWT, or loopback/trusted origin.
+    // added later — needs a PSK (only via LAN / same machine, see AcceptsPsk) or a JWT.
     public static bool RequiresAuth(string path) => !PublicPaths.Contains(path);
 
-    /// Pure authorization core. Order: valid PSK → allow; else no named tunnel ⇒
-    /// DENY (6001 fail-closed — was allow); else allow iff the server JWT validates.
+    /// PSK — ключ локальной сети, и действует он только там: для пира из LAN и для
+    /// этой же машины (WinUI ходит к своему серверу через 127.0.0.1 с ?lan_token=).
+    /// Через туннель, CloudRelay и с публичного адреса принимается только JWT. PSK не
+    /// ротируется, поэтому без этого правила утёкший ключ становился вечным удалённым
+    /// доступом к агенту через публичный туннель. Легитимно через туннель или relay
+    /// PSK не шлёт никто: iOS кладёт lan_token только на LAN-адрес, облако ходит с JWT.
+    public static bool AcceptsPsk(string transport) =>
+        transport == Transport.Lan || transport == Transport.Local;
+
+    /// Pure authorization core. Order: valid PSK on a PSK-capable transport → allow;
+    /// else no named tunnel ⇒ DENY (6001 fail-closed — was allow); else allow iff the
+    /// server JWT validates.
     public static AccessDecision Decide(
-        string lanSecret, string? providedToken, string namedHostname,
+        string lanSecret, string? providedToken, string transport, string namedHostname,
         string? jwtToken, Func<string?, string, JwtValidator.Failure?> validate)
     {
-        if (!string.IsNullOrEmpty(lanSecret) && !string.IsNullOrEmpty(providedToken)
-            && ConstantTimeEquals(providedToken!, lanSecret))
+        if (IsValidPsk(lanSecret, providedToken) && AcceptsPsk(transport))
             return AccessDecision.Allow;
         if (string.IsNullOrEmpty(namedHostname)) return AccessDecision.Deny; // 6001
         return validate(jwtToken, namedHostname) == null
             ? AccessDecision.Allow : AccessDecision.Deny;
     }
+
+    /// Совпал ли предъявленный токен с PSK агента. Пустой PSK не совпадает ни с чем.
+    public static bool IsValidPsk(string lanSecret, string? providedToken) =>
+        !string.IsNullOrEmpty(lanSecret) && !string.IsNullOrEmpty(providedToken)
+        && ConstantTimeEquals(providedToken!, lanSecret);
 
     /// Constant-time PSK comparison (no length/prefix timing leak).
     public static bool ConstantTimeEquals(string a, string b) =>

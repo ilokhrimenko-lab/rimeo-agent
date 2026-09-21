@@ -21,14 +21,14 @@ final class SecurityGatesTests: XCTestCase {
         // Attacker hits /stream with NO PSK while the agent is on a quick tunnel
         // (namedHostname == ""). Before the fix this returned .allow (fail-open).
         let d = AccessControl.decide(
-            lanSecret: "device-psk-abc", providedToken: nil,
+            lanSecret: "device-psk-abc", providedToken: nil, transport: .lan,
             namedHostname: "", jwtToken: nil, validate: alwaysReject)
         XCTAssertEqual(d, .deny)
     }
 
     func test_6001_exploit_wrongPSK_noNamedTunnel_isDenied() {
         let d = AccessControl.decide(
-            lanSecret: "device-psk-abc", providedToken: "guessed-wrong",
+            lanSecret: "device-psk-abc", providedToken: "guessed-wrong", transport: .lan,
             namedHostname: "", jwtToken: nil, validate: alwaysReject)
         XCTAssertEqual(d, .deny)
     }
@@ -36,7 +36,7 @@ final class SecurityGatesTests: XCTestCase {
     func test_6001_exploit_emptySecret_anyToken_noTunnel_isDenied() {
         // No PSK provisioned at all + quick tunnel: still denied (was open).
         let d = AccessControl.decide(
-            lanSecret: "", providedToken: "anything",
+            lanSecret: "", providedToken: "anything", transport: .lan,
             namedHostname: "", jwtToken: "anything", validate: alwaysReject)
         XCTAssertEqual(d, .deny)
     }
@@ -44,7 +44,7 @@ final class SecurityGatesTests: XCTestCase {
     func test_6001_legit_validPSK_onLAN_isAllowed() {
         // Paired iOS device presenting its PSK on the LAN (no tunnel needed).
         let d = AccessControl.decide(
-            lanSecret: "device-psk-abc", providedToken: "device-psk-abc",
+            lanSecret: "device-psk-abc", providedToken: "device-psk-abc", transport: .lan,
             namedHostname: "", jwtToken: nil, validate: alwaysReject)
         XCTAssertEqual(d, .allow)
     }
@@ -52,7 +52,7 @@ final class SecurityGatesTests: XCTestCase {
     func test_6001_legit_namedTunnel_validJWT_isAllowed() {
         // Remote client on the named tunnel with a server-signed JWT.
         let d = AccessControl.decide(
-            lanSecret: "", providedToken: nil,
+            lanSecret: "", providedToken: nil, transport: .lan,
             namedHostname: "abc.agent.rimeo.app", jwtToken: "good-token",
             validate: validatorStub(accept: "good-token", audience: "abc.agent.rimeo.app"))
         XCTAssertEqual(d, .allow)
@@ -60,10 +60,102 @@ final class SecurityGatesTests: XCTestCase {
 
     func test_6001_namedTunnel_invalidJWT_isDenied() {
         let d = AccessControl.decide(
-            lanSecret: "", providedToken: nil,
+            lanSecret: "", providedToken: nil, transport: .lan,
             namedHostname: "abc.agent.rimeo.app", jwtToken: "forged",
             validate: validatorStub(accept: "good-token", audience: "abc.agent.rimeo.app"))
         XCTAssertEqual(d, .deny)
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LAN-auth v2, шаг 1 (2026-09-21): PSK действует только из LAN и с этой машины.
+    // Утёкший PSK не должен давать удалённый доступ через публичный туннель/relay.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    func test_lanAuth_pskAcceptedOnlyOnLANAndLocal() {
+        XCTAssertTrue(AccessControl.acceptsPSK(transport: .lan))
+        XCTAssertTrue(AccessControl.acceptsPSK(transport: .local))
+        XCTAssertFalse(AccessControl.acceptsPSK(transport: .tunnel))
+        XCTAssertFalse(AccessControl.acceptsPSK(transport: .relay))
+        XCTAssertFalse(AccessControl.acceptsPSK(transport: .external))
+        XCTAssertFalse(AccessControl.acceptsPSK(transport: .ui))
+    }
+
+    func test_lanAuth_exploit_validPSK_viaTunnel_isDenied() {
+        // Утёкший PSK через публичный туннель: раньше .allow — вечный удалённый ключ.
+        let d = AccessControl.decide(
+            lanSecret: "device-psk-abc", providedToken: "device-psk-abc", transport: .tunnel,
+            namedHostname: "abc.agent.rimeo.app", jwtToken: nil, validate: alwaysReject)
+        XCTAssertEqual(d, .deny)
+    }
+
+    func test_lanAuth_exploit_validPSK_viaRelay_isDenied() {
+        let d = AccessControl.decide(
+            lanSecret: "device-psk-abc", providedToken: "device-psk-abc", transport: .relay,
+            namedHostname: "abc.agent.rimeo.app", jwtToken: nil, validate: alwaysReject)
+        XCTAssertEqual(d, .deny)
+    }
+
+    func test_lanAuth_exploit_validPSK_fromPublicIP_noTunnel_isDenied() {
+        let d = AccessControl.decide(
+            lanSecret: "device-psk-abc", providedToken: "device-psk-abc", transport: .external,
+            namedHostname: "", jwtToken: nil, validate: alwaysReject)
+        XCTAssertEqual(d, .deny)
+    }
+
+    func test_lanAuth_legit_validPSK_sameMachine_isAllowed() {
+        let d = AccessControl.decide(
+            lanSecret: "device-psk-abc", providedToken: "device-psk-abc", transport: .local,
+            namedHostname: "", jwtToken: nil, validate: alwaysReject)
+        XCTAssertEqual(d, .allow)
+    }
+
+    func test_lanAuth_legit_JWT_viaTunnelAndRelay_stillAllowed() {
+        // Облако и веб-плеер ходят через туннель/relay с JWT — это не должно сломаться.
+        for t in [Transport.tunnel, .relay] {
+            let d = AccessControl.decide(
+                lanSecret: "device-psk-abc", providedToken: nil, transport: t,
+                namedHostname: "abc.agent.rimeo.app", jwtToken: "good-token",
+                validate: validatorStub(accept: "good-token", audience: "abc.agent.rimeo.app"))
+            XCTAssertEqual(d, .allow, "JWT via \(t.rawValue) must keep working")
+        }
+    }
+
+    func test_lanAuth_tunnelDetection_needsLoopbackPeer() {
+        // Туннель распознаётся только у loopback-пира. Сосед по Wi-Fi, приславший
+        // себе cf-ray, остаётся LAN: подделать канал «туннель» он не может.
+        XCTAssertEqual(Transport.classify(peerIP: "127.0.0.1", headers: ["cf-ray": "x"]), .tunnel)
+        XCTAssertEqual(Transport.classify(peerIP: "127.0.0.1", headers: [:]), .local)
+        XCTAssertEqual(Transport.classify(peerIP: "192.168.1.50", headers: ["cf-ray": "x"]), .lan)
+        XCTAssertEqual(Transport.classify(peerIP: "8.8.8.8", headers: [:]), .external)
+    }
+
+    /// Связка req.transport → authGate на настоящем роутере: верный PSK с loopback-пира
+    /// с CF-заголовками (так выглядит запрос через туннель) → 401, и ответ не выдаёт, что
+    /// ключ верный. Нужен PSK этой машины; на машине без него тест пропускается.
+    func test_lanAuth_http_validPSK_viaTunnel_is401_withoutOracle() throws {
+        let psk = DataStore.shared.data.lan_secret
+        try XCTSkipIf(psk.isEmpty, "на этой машине нет lan_secret")
+        let tunnel = APIRouter.shared.route(HTTPRequest(
+            method: "GET", path: "/api/logs",
+            queryParams: ["lan_token": psk],
+            headers: ["cf-ray": "x", "cf-connecting-ip": "203.0.113.7"],
+            body: Data(), trusted: false, peerIP: "127.0.0.1"))
+        XCTAssertEqual(tunnel.status, 401, "PSK через туннель не должен пускать")
+        let wrong = APIRouter.shared.route(HTTPRequest(
+            method: "GET", path: "/api/logs",
+            queryParams: ["lan_token": "definitely-wrong"],
+            headers: ["cf-ray": "x", "cf-connecting-ip": "203.0.113.7"],
+            body: Data(), trusted: false, peerIP: "127.0.0.1"))
+        XCTAssertEqual(wrong.status, 401)
+        XCTAssertEqual(tunnel.headers["WWW-Authenticate"], wrong.headers["WWW-Authenticate"],
+                       "ответ на верный и неверный ключ через туннель должен быть одинаковым")
+    }
+
+    func test_lanAuth_isValidPSK_emptySecretNeverMatches() {
+        XCTAssertFalse(AccessControl.isValidPSK(lanSecret: "", providedToken: ""))
+        XCTAssertFalse(AccessControl.isValidPSK(lanSecret: "", providedToken: nil))
+        XCTAssertFalse(AccessControl.isValidPSK(lanSecret: "abc", providedToken: nil))
+        XCTAssertTrue(AccessControl.isValidPSK(lanSecret: "abc", providedToken: "abc"))
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -128,6 +220,19 @@ final class SecurityGatesTests: XCTestCase {
             method: "GET", path: "/api/pairing_info",
             queryParams: [:], headers: [:], body: Data(), trusted: false))
         XCTAssertEqual(resp.status, 403, "pairing_info must be 403 over a socket")
+    }
+
+    func test_C1_pairingInfo_viaTunnelFromLoopback_isForbidden() {
+        // Регресс-пин по Windows-дыре 2026-09-21: cloudflared и CloudRelay ходят с
+        // 127.0.0.1, поэтому гейт «пир — loopback» пускал интернет через туннель.
+        // На macOS гейт — req.trusted (только in-process UI), loopback-пир не помогает.
+        for headers in [["cf-ray": "x", "cf-connecting-ip": "203.0.113.7"], [:]] {
+            let resp = APIRouter.shared.route(HTTPRequest(
+                method: "GET", path: "/api/pairing_info",
+                queryParams: [:], headers: headers, body: Data(), trusted: false,
+                peerIP: "127.0.0.1"))
+            XCTAssertEqual(resp.status, 403, "pairing_info must be 403 for a loopback peer \(headers)")
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -200,7 +305,7 @@ final class SecurityGatesTests: XCTestCase {
     func test_6004_playlistSync_isGated_evenWithoutCredentials() {
         XCTAssertTrue(AccessControl.requiresAuth(path: "/api/playlist/sync"))
         let d = AccessControl.decide(
-            lanSecret: "device-psk-abc", providedToken: nil,
+            lanSecret: "device-psk-abc", providedToken: nil, transport: .lan,
             namedHostname: "", jwtToken: nil, validate: alwaysReject)
         XCTAssertEqual(d, .deny)
     }
@@ -209,7 +314,7 @@ final class SecurityGatesTests: XCTestCase {
         // POST /api/link_account with an attacker token, no PSK, quick tunnel.
         XCTAssertTrue(AccessControl.requiresAuth(path: "/api/link_account"))
         let d = AccessControl.decide(
-            lanSecret: "device-psk-abc", providedToken: nil,
+            lanSecret: "device-psk-abc", providedToken: nil, transport: .lan,
             namedHostname: "", jwtToken: nil, validate: alwaysReject)
         XCTAssertEqual(d, .deny)
     }

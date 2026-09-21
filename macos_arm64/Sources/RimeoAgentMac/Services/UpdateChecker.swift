@@ -310,11 +310,95 @@ final class UpdateChecker {
         UpdateProgress.shared.enterRestarting(tag: tag, build: parseBuild(tag))
         UpdateProgress.shared.awaitRestartingDelivered(timeout: 5)
 
-        let reopen = Process()
-        reopen.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        reopen.arguments = [currentPath]
-        try reopen.run()
+        // exit(0) не выполняет defer, поэтому распакованную копию убираем сами.
+        try? FileManager.default.removeItem(at: ext)
+        try Self.spawnRelauncher(appPath: currentPath)
         exit(0)
+    }
+
+    // MARK: - Перезапуск после обновления
+
+    /// Команда помощника, который перезапускает агента после обновления. Чистая
+    /// функция — под тестами (UpdateRelaunchTests).
+    ///
+    /// ⚠️ Раньше здесь было `open <app>` и сразу `exit(0)`, и агент после обновления
+    /// то поднимался, то нет (эпизод 10.09: «relaunching», потом 19 часов тишины).
+    /// Причин две:
+    ///  • `open` без `-n`, пока старый процесс ещё жив, видит приложение «уже
+    ///    запущенным» и новый экземпляр не создаёт;
+    ///  • `open` передаёт приложению окружение вызывающего (man open), то есть
+    ///    RIMEO_BACKGROUND=1 от launchd. Новый процесс считал себя launchd-стартом,
+    ///    находил в NSRunningApplication ещё не умерший старый и молча выходил
+    ///    (гард в main.swift).
+    ///  • процесс вне launchd-задачи с унаследованным XPC_SERVICE_NAME задачи агента
+    ///    падает на старте с SIGTRAP (проверено 21.09: даже /bin/echo и /usr/bin/open).
+    /// Поэтому отдельный /bin/sh сначала дожидается смерти нашего PID, потом делает
+    /// `open -n`. Признак фона передаётся аргументом --background, переменные
+    /// launchd из окружения убраны. В фоне `-g`: не уводить фокус (например, из
+    /// Rekordbox посреди сета). `--relaunched-from <pid>` нужен гарду в main.swift:
+    /// `-n` поднимет второй экземпляр, если кто-то успел запустить агента, пока
+    /// старый умирал. Путь к бандлу идёт аргументом, а не интерполяцией в скрипт,
+    /// так что никакое имя папки не станет командой.
+    static func relaunchCommand(pid: Int32, appPath: String, background: Bool,
+                                environment: [String: String])
+        -> (arguments: [String], environment: [String: String]) {
+        var openArgs = ["-n"]
+        if background { openArgs.append("-g") }
+        openArgs += [appPath, "--args"]
+        if background { openArgs.append(AgentSettings.backgroundLaunchArgument) }
+        openArgs += [relaunchedFromArgument, String(pid)]
+        let script = """
+            i=0
+            while /bin/kill -0 "$0" 2>/dev/null && [ "$i" -lt 100 ]; do /bin/sleep 0.1; i=$((i+1)); done
+            if /bin/kill -0 "$0" 2>/dev/null; then
+              echo "old pid $0 still alive after 10s, sending SIGKILL"
+              /bin/kill -KILL "$0"; /bin/sleep 0.5
+            fi
+            /bin/sleep 0.3
+            echo "$(/bin/date '+%Y-%m-%d %H:%M:%S') old pid $0 gone, running /usr/bin/open $*"
+            /usr/bin/open "$@"
+            echo "open exit=$?"
+            """
+        var env = environment
+        env.removeValue(forKey: AgentSettings.backgroundEnvKey)
+        env.removeValue(forKey: "XPC_SERVICE_NAME")
+        return (["-c", script, String(pid)] + openArgs, env)
+    }
+
+    /// Аргумент нового экземпляра после обновления: PID процесса, который его перезапустил.
+    static let relaunchedFromArgument = "--relaunched-from"
+
+    /// PID из `--relaunched-from <pid>` или nil, если это не перезапуск после обновления.
+    static func relaunchedFromPID(arguments: [String]) -> Int32? {
+        guard let i = arguments.firstIndex(of: relaunchedFromArgument),
+              i + 1 < arguments.count,
+              let pid = Int32(arguments[i + 1]), pid > 0 else { return nil }
+        return pid
+    }
+
+    /// Запускает помощника из `relaunchCommand` и сразу возвращается: ждать его
+    /// нельзя, он сам ждёт нашей смерти. У дочерних процессов Process своя группа
+    /// процессов, поэтому помощник переживает и exit(0), и завершение launchd-job.
+    private static func spawnRelauncher(appPath: String) throws {
+        let background = AgentSettings.shared.isBackgroundSession
+        let cmd = relaunchCommand(pid: ProcessInfo.processInfo.processIdentifier,
+                                  appPath: appPath, background: background,
+                                  environment: ProcessInfo.processInfo.environment)
+        let helper = Process()
+        helper.executableURL = URL(fileURLWithPath: "/bin/sh")
+        helper.arguments = cmd.arguments
+        helper.environment = cmd.environment
+        helper.standardInput = FileHandle.nullDevice
+        // Вывод помощника — в файл: если `open` не поднимет агента, причина останется
+        // на диске (сам агент к этому моменту уже не сможет ничего записать).
+        let logURL = AppConfig.shared.baseDir.appendingPathComponent("relaunch.log")
+        FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        if let out = try? FileHandle(forWritingTo: logURL) {
+            helper.standardOutput = out
+            helper.standardError = out
+        }
+        try helper.run()
+        logger.info("Relaunch helper started: pid=\(helper.processIdentifier) background=\(background)")
     }
 
     // MARK: - Pending update (update on next launch)
