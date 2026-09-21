@@ -196,21 +196,34 @@ private let rekordboxDateFormats = [
     "yyyy-MM-dd",
 ]
 
+// Форматтеры создаются ОДИН раз на процесс. Раньше их заново собирали на каждый
+// вызов (×2 поля на трек): инициализация ICU съедала ~75% CPU всего парса
+// (замер 22.09.2026, задача #94). Порядок попыток и настройки — прежние.
+private let isoFracDateFormatter: ISO8601DateFormatter = {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return f
+}()
+
+private let isoDateFormatter = ISO8601DateFormatter()
+
+// По форматтеру на шаблон: переставлять dateFormat у одного — тоже перекомпиляция шаблона.
+private let rekordboxDateFormatters: [DateFormatter] = rekordboxDateFormats.map { pattern in
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.timeZone = TimeZone(identifier: "UTC")
+    f.dateFormat = pattern
+    return f
+}
+
 private func parseRekordboxDate(_ raw: String) -> Double? {
     let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !s.isEmpty else { return nil }
 
-    let isoFrac = ISO8601DateFormatter()
-    isoFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    if let d = isoFrac.date(from: s) { return d.timeIntervalSince1970 }
-    let iso = ISO8601DateFormatter()
-    if let d = iso.date(from: s) { return d.timeIntervalSince1970 }
+    if let d = isoFracDateFormatter.date(from: s) { return d.timeIntervalSince1970 }
+    if let d = isoDateFormatter.date(from: s) { return d.timeIntervalSince1970 }
 
-    let fmt = DateFormatter()
-    fmt.locale = Locale(identifier: "en_US_POSIX")
-    fmt.timeZone = TimeZone(identifier: "UTC")
-    for pattern in rekordboxDateFormats {
-        fmt.dateFormat = pattern
+    for fmt in rekordboxDateFormatters {
         if let d = fmt.date(from: s) { return d.timeIntervalSince1970 }
     }
     return nil
@@ -254,11 +267,29 @@ private let smartDateOnlyFormatter: DateFormatter = {
     return f
 }()
 
+// Разбор даты через ICU дорог, а зовётся на КАЖДЫЙ трек × date-условие (и для даты
+// трека, и для границ условия). Функция чистая, разных дат в библиотеке — сотни,
+// поэтому мемоизируем по строке. Хелпер однопоточный, кеш живёт один прогон.
+private var smartDateOnlyCache: [String: Date?] = [:]
+
 private func smartParseDateOnly(_ s: String) -> Date? {
     let trimmed = String(s.prefix(10))
     guard trimmed.count == 10 else { return nil }
-    return smartDateOnlyFormatter.date(from: trimmed)
+    if let cached = smartDateOnlyCache[trimmed] { return cached }
+    let d = smartDateOnlyFormatter.date(from: trimmed)
+    smartDateOnlyCache[trimmed] = .some(d)   // .some — чтобы закешировать и «не разобралось»
+    return d
 }
+
+private let smartUTCCalendar: Calendar = {
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = TimeZone(identifier: "UTC") ?? .current
+    return cal
+}()
+
+// Порог «в последние N дней/недель/…» одинаков для всех треков прогона — считаем раз
+// на (единица, N), а не заново (вместе с созданием Calendar) на каждый трек.
+private var smartThresholdCache: [String: Date?] = [:]
 
 func parseSmartConditions(_ xml: String) -> (logical: Int, conditions: [SmartCondition])? {
     guard let data = xml.data(using: .utf8),
@@ -343,9 +374,15 @@ private func smartEvalDate(_ op: Int, _ d: Date?, _ vl: String, _ vr: String, _ 
         case "year":  comp = .year
         default:      comp = .day
         }
-        var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = TimeZone(identifier: "UTC") ?? .current
-        guard let threshold = cal.date(byAdding: comp, value: -n, to: Date()) else { return false }
+        let cacheKey = "\(unit)|\(n)"
+        let threshold: Date?
+        if let cached = smartThresholdCache[cacheKey] {
+            threshold = cached
+        } else {
+            threshold = smartUTCCalendar.date(byAdding: comp, value: -n, to: Date())
+            smartThresholdCache[cacheKey] = .some(threshold)
+        }
+        guard let threshold else { return false }
         let within = d >= threshold
         return op == 6 ? within : !within
     default:

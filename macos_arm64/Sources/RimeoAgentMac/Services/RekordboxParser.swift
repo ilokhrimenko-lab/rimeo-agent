@@ -240,11 +240,22 @@ final class RekordboxParser: NSObject {
     // NB: -shm (shared-memory index) НЕ учитываем — SQLite дёргает его при любом
     // открытии БД (даже на чтение), реальных данных там нет; раньше из-за него
     // кеш сбрасывался почти на каждый запрос и БД переразбиралась во время стрима.
+    //
+    // ПУСТОЙ -wal тоже не учитываем, по той же причине. Наш же rbdb-helper при открытии
+    // базы СОЗДАЁТ пустой -wal, если его нет (а его нет после любого writer'а, который
+    // закрылся чисто: Rekordbox, rbdb-sync-helper). mtime до разбора и после расходились,
+    // и следующий /api/data перепарсивал только что разобранную базу — после Sync это
+    // были лишние ~10 с ожидания (задача #94). Данные в -wal = кадры = размер > 0, так
+    // что реальная запись всё равно сдвигает ключ; checkpoint с TRUNCATE переносит кадры
+    // в master.db, и тогда сдвигается уже его mtime.
     private func dbMtime(at dbPath: String) -> Double {
-        var latest = 0.0
-        for suffix in ["", "-wal"] {
-            let m = fileMtime(at: dbPath + suffix)
-            if m > latest { latest = m }
+        var latest = fileMtime(at: dbPath)
+        let walPath = dbPath + "-wal"
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: walPath),
+           ((attrs[.size] as? NSNumber)?.int64Value ?? 0) > 0,
+           let m = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970,
+           m > latest {
+            latest = m
         }
         return latest
     }

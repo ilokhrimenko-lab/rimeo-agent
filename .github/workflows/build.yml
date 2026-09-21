@@ -38,22 +38,45 @@ jobs:
           # у пользователя на машине нет ни pyrekordbox, ни sqlcipher3, и поставить их
           # мы не можем. Без этого шага в релиз уезжает агент, у которого кнопка Sync
           # молча не работает («rbdb-sync-helper not bundled»).
+          #
+          # --onedir, НЕ --onefile (задача #94). onefile на КАЖДЫЙ Sync распаковывал ~143 МБ во
+          # временную папку, и система заново проверяла свежие .so: юзер ждал 30+ секунд при
+          # ~1 с реальной записи. onedir распакован один раз — здесь, на CI.
+          # frida исключена: pyrekordbox тянет её только ради KeyExtractor (нам не нужен,
+          # ключ кладём в кеш сами), а это 96 МБ. В rbdb_sync_helper.py стоит заглушка.
           cd rbdb_sync_helper
           python3 -m venv .venv
           .venv/bin/pip install --quiet --upgrade pip
           .venv/bin/pip install --quiet pyrekordbox==0.4.3 sqlcipher3-wheels pyinstaller
           .venv/bin/pyinstaller \
-            --onefile --name rbdb-sync-helper --clean --noconfirm --strip --console \
+            --onedir --name rbdb-sync-helper --clean --noconfirm --strip --console \
             --collect-all pyrekordbox --collect-all sqlcipher3 \
             --hidden-import sqlalchemy --hidden-import construct \
+            --exclude-module frida --exclude-module frida_tools \
             --exclude-module matplotlib --exclude-module pandas --exclude-module PIL \
             --exclude-module tkinter --exclude-module pytest \
             rbdb_sync_helper.py
-          if [ ! -x dist/rbdb-sync-helper ]; then
+          HELPER_BIN=dist/rbdb-sync-helper/rbdb-sync-helper
+          if [ ! -x "$HELPER_BIN" ] || [ ! -d dist/rbdb-sync-helper/_internal ]; then
             echo "::error::rbdb-sync-helper не собрался — Sync в Rekordbox не будет работать"
             exit 1
           fi
-          echo "sync helper: $(du -h dist/rbdb-sync-helper | cut -f1 | tr -d ' '), archs: $(lipo -archs dist/rbdb-sync-helper)"
+          echo "sync helper: $(du -sh dist/rbdb-sync-helper | cut -f1 | tr -d ' '), archs: $(lipo -archs "$HELPER_BIN")"
+          if [ -e dist/rbdb-sync-helper/_internal/frida ]; then
+            echo "::error::frida попала в сборку — исключение не сработало, хелпер снова распух"
+            exit 1
+          fi
+          # Дымовой прогон (как на Windows): несуществующая база. preflight() ИМПОРТИРУЕТ
+          # pyrekordbox/sqlalchemy/sqlcipher3 до открытия базы, поэтому:
+          #   db_not_found       → импорты живы (и заглушка frida тоже);
+          #   helper_unavailable → импорт сорвался, бинарь мёртвый.
+          echo '{"ops":[]}' > "$RUNNER_TEMP/smoke_plan.json"
+          SMOKE_ERR=$("$HELPER_BIN" "$RUNNER_TEMP/nonexistent.db" "$RUNNER_TEMP/smoke_plan.json" "$RUNNER_TEMP/smoke_out.json" 2>&1 >/dev/null || true)
+          echo "smoke stderr: $SMOKE_ERR"
+          if ! grep -q '"db_not_found"' <<< "$SMOKE_ERR"; then
+            echo "::error::rbdb-sync-helper не дошёл до открытия базы (ожидали db_not_found) — Sync упал бы у пользователя"
+            exit 1
+          fi
 
       - name: Build macOS app (Universal — arm64 + x86_64)
         run: |
@@ -85,13 +108,14 @@ jobs:
           cp "$HELPER" "$APP/Contents/MacOS/rbdb-helper"
           chmod +x "$APP/Contents/MacOS/rbdb-helper"
           # Frozen-хелпер ЗАПИСИ (не путать с rbdb-helper выше — тот только читает базу).
+          # onedir → Contents/Resources/rbdb-sync-helper/ (exe + _internal/). Почему Resources,
+          # а не MacOS/Frameworks — см. rbdb_sync_helper/sign_helper_dir.sh.
           SYNC_HELPER="$GITHUB_WORKSPACE/rbdb_sync_helper/dist/rbdb-sync-helper"
-          if [ ! -x "$SYNC_HELPER" ]; then
+          if [ ! -x "$SYNC_HELPER/rbdb-sync-helper" ]; then
             echo "::error::rbdb-sync-helper не найден — Sync в Rekordbox не будет работать"
             exit 1
           fi
-          cp "$SYNC_HELPER" "$APP/Contents/MacOS/rbdb-sync-helper"
-          chmod +x "$APP/Contents/MacOS/rbdb-sync-helper"
+          ditto "$SYNC_HELPER" "$APP/Contents/Resources/rbdb-sync-helper"
           cp -R "$SQLCIPHER_FRAMEWORK" "$APP/Contents/Frameworks/SQLCipher.framework"
           install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/rbdb-helper"
           cp build/Info.plist "$APP/Contents/Info.plist"
@@ -155,16 +179,30 @@ jobs:
           # NB: "$ID" обязательно в кавычках — identity содержит пробелы.
           [ -d "$FW" ] && codesign --force --timestamp --options runtime --sign "$ID" "$FW/Versions/A"
           codesign --force --timestamp --options runtime --sign "$ID" "$APP/Contents/MacOS/rbdb-helper"
-          # rbdb-sync-helper — единственный бинарь с послаблением: PyInstaller onefile
-          # грузит из себя неподписанные .so, и library validation его бы убила.
-          # Подробности — в macos_arm64/build/sync-helper.entitlements.
-          codesign --force --timestamp --options runtime \
-                   --entitlements "$GITHUB_WORKSPACE/macos_arm64/build/sync-helper.entitlements" \
-                   --sign "$ID" "$APP/Contents/MacOS/rbdb-sync-helper"
+          # rbdb-sync-helper (onedir в Contents/Resources): каждый .so/.dylib подписываем сами —
+          # codesign --deep в Resources код не ищет, а нотаризация требует подписи у ВСЕХ Mach-O.
+          # Подробности — в rbdb_sync_helper/sign_helper_dir.sh и sync-helper.entitlements.
+          bash "$GITHUB_WORKSPACE/rbdb_sync_helper/sign_helper_dir.sh" \
+               "$APP/Contents/Resources/rbdb-sync-helper" "$ID" \
+               "$GITHUB_WORKSPACE/macos_arm64/build/sync-helper.entitlements" \
+               --timestamp --options runtime
           codesign --force --timestamp --options runtime --sign "$ID" "$APP/Contents/MacOS/RimeoAgent"
           codesign --force --timestamp --options runtime --sign "$ID" --identifier app.rimeo.agent "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
           codesign -dvv "$APP" 2>&1 | grep -E "Identifier|Authority|TeamIdentifier|Sealed"
+          # Дымовой прогон ПОДПИСАННОГО хелпера: hardened runtime + library validation
+          # проверяются только при запуске. Неподписанный .so здесь убил бы процесс — лучше
+          # узнать на CI, чем по кнопке Sync у пользователя.
+          echo '{"ops":[]}' > "$RUNNER_TEMP/smoke_plan.json"
+          SMOKE_ERR=$("$APP/Contents/Resources/rbdb-sync-helper/rbdb-sync-helper" "$RUNNER_TEMP/nonexistent.db" "$RUNNER_TEMP/smoke_plan.json" "$RUNNER_TEMP/smoke_out.json" 2>&1 >/dev/null || true)
+          echo "signed smoke stderr: $SMOKE_ERR"
+          if ! grep -q '"db_not_found"' <<< "$SMOKE_ERR"; then
+            echo "::error::подписанный rbdb-sync-helper не запускается (hardened runtime / library validation)"
+            exit 1
+          fi
+          # Хелпер не должен ничего дописывать в бандл при запуске (__pycache__ и т.п.) —
+          # иначе печать подписи сломается у пользователя после первого же Sync.
+          codesign --verify --deep --strict "$APP"
 
       - name: Notarize & staple macOS app
         env:
@@ -358,21 +396,30 @@ jobs:
           .venv\Scripts\python.exe -m pip install --quiet pyrekordbox==0.4.3 sqlcipher3-wheels pyinstaller
           # Флаги те же, что на маке, кроме --strip: на Windows PyInstaller его игнорирует
           # (нужен objcopy из binutils), только шумит предупреждением.
+          # --onedir, НЕ --onefile, и без frida — задача #94, подробности в мак-леге выше:
+          # onefile на КАЖДЫЙ Sync распаковывал весь питон во %TEMP%, а Defender заново
+          # сканировал каждый свежий .pyd/.dll — десятки секунд при ~1 с реальной записи.
           .venv\Scripts\pyinstaller.exe `
-            --onefile --name rbdb-sync-helper --clean --noconfirm --console `
+            --onedir --name rbdb-sync-helper --clean --noconfirm --console `
             --collect-all pyrekordbox --collect-all sqlcipher3 `
             --hidden-import sqlalchemy --hidden-import construct `
+            --exclude-module frida --exclude-module frida_tools `
             --exclude-module matplotlib --exclude-module pandas --exclude-module PIL `
             --exclude-module tkinter --exclude-module pytest `
             rbdb_sync_helper.py
           # Fail-fast: молча выкатить агента с нерабочей кнопкой Sync нельзя —
           # пользователь нажмёт, плейлисты «уйдут», а в Rekordbox их не будет.
-          if (-not (Test-Path "dist\rbdb-sync-helper.exe")) {
-            Write-Host "::error::rbdb-sync-helper.exe не собрался — Sync в Rekordbox не будет работать"
+          $helperExe = "dist\rbdb-sync-helper\rbdb-sync-helper.exe"
+          if (-not (Test-Path $helperExe) -or -not (Test-Path "dist\rbdb-sync-helper\_internal")) {
+            Write-Host "::error::rbdb-sync-helper не собрался — Sync в Rekordbox не будет работать"
             exit 1
           }
-          $size = [math]::Round((Get-Item "dist\rbdb-sync-helper.exe").Length / 1MB, 1)
-          Write-Host "sync helper: dist\rbdb-sync-helper.exe ($size MB)"
+          if (Test-Path "dist\rbdb-sync-helper\_internal\frida") {
+            Write-Host "::error::frida попала в сборку — исключение не сработало, хелпер снова распух"
+            exit 1
+          }
+          $size = [math]::Round(((Get-ChildItem "dist\rbdb-sync-helper" -Recurse -File | Measure-Object Length -Sum).Sum) / 1MB, 1)
+          Write-Host "sync helper: dist\rbdb-sync-helper\ ($size MB)"
 
           # ⚠️ ПРОВЕРКИ «ФАЙЛ СУЩЕСТВУЕТ» НЕДОСТАТОЧНО. PyInstaller регулярно теряет
           # скрытые импорты: exe собирается, весит свои 50 МБ — и падает на первом же
@@ -386,7 +433,7 @@ jobs:
           #   stderr содержит "helper_unavailable" → импорт сорвался, бинарь мёртвый.
           '{"ops":[]}' | Set-Content -Path "$env:RUNNER_TEMP\smoke_plan.json" -Encoding utf8
           $stderrFile = "$env:RUNNER_TEMP\smoke_err.txt"
-          $p = Start-Process -FilePath "dist\rbdb-sync-helper.exe" `
+          $p = Start-Process -FilePath $helperExe `
                  -ArgumentList "$env:RUNNER_TEMP\nonexistent.db","$env:RUNNER_TEMP\smoke_plan.json","$env:RUNNER_TEMP\smoke_out.json" `
                  -NoNewWindow -Wait -PassThru -RedirectStandardError $stderrFile
           $err = (Get-Content $stderrFile -Raw) ?? ""
@@ -490,13 +537,20 @@ jobs:
       - name: Bundle Rekordbox sync helper (both RIDs)
         shell: pwsh
         run: |
-          $src = "rbdb_sync_helper\dist\rbdb-sync-helper.exe"
-          if (-not (Test-Path $src)) {
-            Write-Host "::error::rbdb-sync-helper.exe не найден — Sync в Rekordbox не будет работать"
+          # onedir: папка rbdb-sync-helper\ (exe + _internal\) рядом с RimeoAgent.exe.
+          # RekordboxWriter ищет сначала её, потом старый onefile-exe. Автообновление
+          # (xcopy /E) и NSIS (File /r) переносят подпапки как есть.
+          $src = "rbdb_sync_helper\dist\rbdb-sync-helper"
+          if (-not (Test-Path "$src\rbdb-sync-helper.exe")) {
+            Write-Host "::error::rbdb-sync-helper не найден — Sync в Rekordbox не будет работать"
             exit 1
           }
-          Copy-Item $src "dist\RimeoAgent\rbdb-sync-helper.exe" -Force
-          Write-Host "bundled: dist\RimeoAgent\rbdb-sync-helper.exe"
+          Copy-Item $src "dist\RimeoAgent\rbdb-sync-helper" -Recurse -Force
+          if (-not (Test-Path "dist\RimeoAgent\rbdb-sync-helper\rbdb-sync-helper.exe")) {
+            Write-Host "::error::rbdb-sync-helper не лёг в dist\RimeoAgent\rbdb-sync-helper\"
+            exit 1
+          }
+          Write-Host "bundled: dist\RimeoAgent\rbdb-sync-helper\"
 
       - name: Package
         shell: pwsh

@@ -983,12 +983,25 @@ final class RekordboxWriter {
             logger.warning("sync: RIMEO_SYNC_HELPER=\(override) ignored — missing or wrong architecture")
         }
 
+        // С build 270 хелпер — PyInstaller onedir в Contents/Resources/rbdb-sync-helper/
+        // (исполняемый файл + _internal/). Раньше был onefile в Contents/MacOS: он на
+        // КАЖДЫЙ Sync распаковывал ~143 МБ во временную папку, и юзер ждал 30+ секунд
+        // (задача #94). Почему именно Resources — см. rbdb_sync_helper/sign_helper_dir.sh.
+        // Старые пути оставлены запасными: локальные/dev-сборки со старым dist/.
         let execDir = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+        let onedir = "rbdb-sync-helper/rbdb-sync-helper"
         let candidates = [
+            Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/\(onedir)").path,
+            execDir.appendingPathComponent("../Resources/\(onedir)").standardized.path,
+            execDir.appendingPathComponent(onedir).path,
             execDir.appendingPathComponent("rbdb-sync-helper").path,
             Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/rbdb-sync-helper").path,
         ]
         for path in candidates where fm.isExecutableFile(atPath: path) {
+            // Папка тоже «исполняемая» (бит x = право входа), а в onedir-раскладке
+            // папка rbdb-sync-helper/ лежит ровно под старым именем файла.
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue else { continue }
             // ⚠️ isExecutableFile проверяет только бит «исполняемый» — арку он не смотрит.
             // Агент universal (arm64 + x86_64), а rbdb-sync-helper собирается PyInstaller'ом
             // на arm64-раннере и выходит arm64-only. На Intel-маке файл лежит, бит стоит,
@@ -1002,8 +1015,8 @@ final class RekordboxWriter {
 
     /// Есть ли в бинаре слайс под архитектуру, на которой мы СЕЙЧАС исполняемся.
     ///
-    /// Читаем Mach-O заголовок сами, а не пытаемся запустить: PyInstaller-onefile при старте
-    /// распаковывает во временную папку ~54 МБ, и «проверка запуском» стоила бы секунд.
+    /// Читаем Mach-O заголовок сами, а не пытаемся запустить: запуск хелпера — это старт
+    /// питона с импортами pyrekordbox, секунда и больше, а capability считается на каждом /api/data.
     /// Проверка не хардкодит «хелпер arm64-only» — когда он станет universal, она просто
     /// начнёт пропускать его и на Intel.
     private static func canRunOnThisMachine(_ path: String) -> Bool {

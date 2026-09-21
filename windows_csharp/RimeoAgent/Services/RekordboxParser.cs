@@ -1035,14 +1035,28 @@ public sealed class RekordboxParser
     // по новейшему из db / -wal, чтобы WAL-записи инвалидировали кеш.
     // NB: -shm НЕ учитываем (его SQLite дёргает при любом открытии БД даже на
     // чтение — иначе кеш сбрасывался бы почти на каждый запрос). Паритет с macOS.
+    //
+    // ПУСТОЙ -wal тоже не учитываем, по той же причине: наш же разбор при открытии базы
+    // СОЗДАЁТ пустой -wal, если его нет (а его нет после любого чисто закрывшегося
+    // writer'а — Rekordbox, rbdb-sync-helper). mtime до разбора и после расходились, и
+    // следующий /api/data перепарсивал только что разобранную базу — после Sync это
+    // лишние секунды ожидания (задача #94). Данные в -wal = кадры = размер > 0, так что
+    // реальная запись ключ всё равно сдвигает; checkpoint с TRUNCATE переносит кадры в
+    // master.db и сдвигает уже её mtime. Паритет с macOS (RekordboxParser.dbMtime).
     private static double DbMtime(string dbPath)
     {
-        var latest = 0.0;
-        foreach (var suffix in new[] { "", "-wal" })
+        var latest = GetMtime(dbPath);
+        var walPath = dbPath + "-wal";
+        try
         {
-            var m = GetMtime(dbPath + suffix);
-            if (m > latest) latest = m;
+            var wal = new FileInfo(walPath);
+            if (wal.Exists && wal.Length > 0)
+            {
+                var m = GetMtime(walPath);
+                if (m > latest) latest = m;
+            }
         }
+        catch { }
         return latest;
     }
 }

@@ -46,7 +46,39 @@ overlay. overlay.track_ids — это ЖЕЛАЕМОЕ КОНЕЧНОЕ СОСТ
 
 import json
 import sys
+import types
 import uuid
+
+
+def block_frida():
+    """Подменяет `frida` пустым модулем ДО первого импорта pyrekordbox.
+
+    pyrekordbox тянет frida на уровне модуля (`config.py: import frida`) только ради
+    KeyExtractor — инъекции в живой Rekordbox за ключом базы. Нам это не нужно никогда:
+    ключ известен и кладётся в кеш заранее (см. ensure_key_cached ниже).
+
+    А стоила frida дорого: `_frida.abi3.so` — 96 МБ из 143 МБ бинаря. PyInstaller-onefile
+    распаковывал её во временную папку на КАЖДЫЙ Sync, и система заново проверяла свежий
+    файл — большая часть тех 30+ секунд, что юзер ждал синка (замер 22.09.2026, задача #94).
+    Поэтому в сборке она исключена (`--exclude-module frida`), а здесь — заглушка, чтобы
+    `import frida` внутри pyrekordbox не падал.
+
+    Побочный плюс: если кеш ключа вдруг не запишется, KeyExtractor упадёт на заглушке
+    (pyrekordbox ловит это сам и идёт дальше), а базу мы всё равно открываем явным key=.
+    Окно Rekordbox, которое frida поднимала у юзера, больше не может появиться в принципе.
+    """
+    stub = types.ModuleType("frida")
+
+    # Именно AttributeError: hasattr()/getattr(…, default) и сама машинерия импорта
+    # (`__path__`, `__spec__`, `__file__`) ждут его, а не произвольное исключение.
+    def _unavailable(name):
+        raise AttributeError(f"frida.{name}: frida не входит в rbdb-sync-helper")
+
+    stub.__getattr__ = _unavailable
+    sys.modules["frida"] = stub
+
+
+block_frida()
 
 # Статичный SQLCipher-ключ формата Rekordbox 6/7 master.db — тот же самый, что
 # захардкожен в macOS-хелпере (RekordboxDBHelper/HelperMain.swift:4). Держать

@@ -304,6 +304,7 @@ public sealed class RekordboxWriter
     private const int MaxBackups = 5;
 
     private const string HelperName = "rbdb-sync-helper.exe";
+    private const string OnedirName = "rbdb-sync-helper";
 
     /// Коды, при которых хелпер гарантированно НЕ ТРОНУЛ базу (упал до первой
     /// записи). Restore после них не просто не нужен — он ОПАСЕН: при
@@ -1276,10 +1277,21 @@ public sealed class RekordboxWriter
             Path.GetDirectoryName(Environment.ProcessPath ?? "") ?? "",
         };
 
-        foreach (var dir in dirs)
+        // С build 270 хелпер — PyInstaller onedir: папка rbdb-sync-helper\ (exe + _internal\)
+        // рядом с RimeoAgent.exe. Раньше был onefile: на КАЖДЫЙ Sync он распаковывал весь
+        // питон во %TEMP%, Defender заново проверял каждый свежий .pyd/.dll, и юзер ждал
+        // десятки секунд (задача #94). Старый rbdb-sync-helper.exe — запасной путь: xcopy
+        // при обновлении его не удаляет, а локальные сборки могут быть ещё onefile.
+        var candidates = dirs
+            .Where(d => !string.IsNullOrEmpty(d))
+            .SelectMany(d => new[]
+            {
+                Path.Combine(d, OnedirName, HelperName),
+                Path.Combine(d, HelperName),
+            });
+
+        foreach (var path in candidates)
         {
-            if (string.IsNullOrEmpty(dir)) continue;
-            var path = Path.Combine(dir, HelperName);
             if (!File.Exists(path)) continue;
             // ⚠️ Наличия файла МАЛО — арка. Агент публикуется и под win-x64, и под
             // win-arm64, а rbdb-sync-helper.exe PyInstaller собирает ТОЛЬКО под x64
@@ -1299,9 +1311,9 @@ public sealed class RekordboxWriter
 
     /// Запустится ли этот бинарь на машине, на которой мы СЕЙЧАС исполняемся.
     ///
-    /// Читаем PE-заголовок сами, а не пытаемся запустить: PyInstaller-onefile при старте
-    /// распаковывает во временную папку десятки мегабайт, и «проверка запуском» стоила бы
-    /// секунд на КАЖДОМ /api/data (capability считается там).
+    /// Читаем PE-заголовок сами, а не пытаемся запустить: запуск хелпера — это старт
+    /// питона с импортами pyrekordbox, секунда и больше, на КАЖДОМ /api/data (capability
+    /// считается там).
     ///
     /// Матрица намеренно не хардкодит «хелперx64-only» — когда появится arm64-сборка,
     /// проверка просто начнёт её принимать.

@@ -107,8 +107,8 @@ swift build -c release --arch arm64 --arch x86_64 $SWIFT_DEFINES
 
 UNIVERSAL="$MAC_DIR/.build/apple/Products/Release/RimeoAgent"
 HELPER="$MAC_DIR/.build/apple/Products/Release/RekordboxDBHelper"
-# ФАЗА 6 — frozen-бинарь ЗАПИСИ в master.db (pyrekordbox внутри, ~52 МБ, PyInstaller).
-# Собирается отдельно: RimeoAgent/rbdb_sync_helper/build_helper.sh
+# ФАЗА 6 — frozen-хелпер ЗАПИСИ в master.db (pyrekordbox внутри, PyInstaller onedir:
+# папка = exe + _internal/, ~42 МБ). Собирается отдельно: RimeoAgent/rbdb_sync_helper/build_helper.sh
 # Не путать с $HELPER выше — тот только ЧИТАЕТ базу.
 SYNC_HELPER="$ROOT_DIR/rbdb_sync_helper/dist/rbdb-sync-helper"
 SQLCIPHER_FRAMEWORK="$MAC_DIR/.build/artifacts/sqlcipher.swift/SQLCipher/SQLCipher.xcframework/macos-arm64_x86_64/SQLCipher.framework"
@@ -138,10 +138,14 @@ chmod +x "$APP_DIR/Contents/MacOS/rbdb-helper"
 # playlist_sync=false, и кнопка Sync в iOS просто не показывается (см.
 # APIRouter.agentCapabilities + RekordboxWriter.bundledSyncHelperPath).
 # Сборка агента при этом НЕ падает: Sync — опциональная фича, а не ядро.
-if [ -f "$SYNC_HELPER" ]; then
-    cp "$SYNC_HELPER" "$APP_DIR/Contents/MacOS/rbdb-sync-helper"
-    chmod +x "$APP_DIR/Contents/MacOS/rbdb-sync-helper"
-    echo "    sync helper: $(du -h "$SYNC_HELPER" | cut -f1 | tr -d ' ') → Contents/MacOS/rbdb-sync-helper"
+# onedir кладётся в Contents/Resources (почему — см. rbdb_sync_helper/sign_helper_dir.sh).
+if [ -x "$SYNC_HELPER/rbdb-sync-helper" ]; then
+    ditto "$SYNC_HELPER" "$APP_DIR/Contents/Resources/rbdb-sync-helper"
+    echo "    sync helper: $(du -sh "$SYNC_HELPER" | cut -f1 | tr -d ' ') → Contents/Resources/rbdb-sync-helper/"
+elif [ -f "$SYNC_HELPER" ]; then
+    echo "    WARNING: $SYNC_HELPER — старый onefile-бинарь. Пересобери хелпер (onedir):"
+    echo "             RimeoAgent/rbdb_sync_helper/build_helper.sh"
+    echo "             Sync в Rekordbox будет НЕДОСТУПЕН (кнопка скрыта)."
 else
     echo "    WARNING: rbdb-sync-helper не найден ($SYNC_HELPER)"
     echo "             Sync в Rekordbox будет НЕДОСТУПЕН (кнопка скрыта)."
@@ -181,6 +185,12 @@ echo "    tunnel-runtime, ffmpeg, and ffprobe are installed by Component Gate fr
 echo "==> Signing .app bundle..."
 echo "    identity: $CODESIGN_IDENTITY"
 xattr -cr "$APP_DIR"
+# --deep не ищет код в Contents/Resources — хелпер подписываем отдельно и раньше .app.
+if [ -d "$APP_DIR/Contents/Resources/rbdb-sync-helper" ]; then
+    bash "$ROOT_DIR/rbdb_sync_helper/sign_helper_dir.sh" \
+         "$APP_DIR/Contents/Resources/rbdb-sync-helper" "$CODESIGN_IDENTITY" \
+         "$MAC_DIR/build/sync-helper.entitlements"
+fi
 codesign --force --deep --sign "$CODESIGN_IDENTITY" --identifier "$BUNDLE_ID" "$APP_DIR"
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 codesign -dv --verbose=4 "$APP_DIR" 2>&1 | sed -n '/^Identifier=/p;/^Signature=/p;/^TeamIdentifier=/p;/^Info.plist=/p;/^Sealed Resources=/p;/^Internal requirements=/p'
