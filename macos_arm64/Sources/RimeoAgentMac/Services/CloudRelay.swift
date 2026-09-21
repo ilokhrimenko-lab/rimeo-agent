@@ -51,6 +51,7 @@ final class CloudRelay {
     private let pollQueue = DispatchQueue(label: "rimeo.relay.poll", qos: .utility)
     private let commandQueue = DispatchQueue(label: "rimeo.relay.command", qos: .utility, attributes: .concurrent)
     private var lastAdvertisedTunnel: String?
+    private var lastAdvertisedLAN: String?
 
     func startIfLinked() {
         let data = DataStore.shared.data
@@ -118,7 +119,13 @@ final class CloudRelay {
             let encodedPSK = APIRouter.ensureLANSecret()
                 .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
             pollURL += "&lan_secret=\(encodedPSK)"
+            // LAN-адрес по heartbeat: облако (relay_poll, v1.34.3+) обновляет по нему
+            // подсказку lan_ip для телефона. Раньше адрес писался только при логине и
+            // протухал после смены IP (DHCP, другая сеть) до перелогина агента.
+            let lan = CloudRelay.lanHint(ip: AppConfig.shared.getLocalIP(), port: AppConfig.shared.port)
+            if let lan { pollURL += "&lan=\(lan)" }
             logTunnelAdvertisementIfChanged(tunnel)
+            logLANAdvertisementIfChanged(lan)
 
             guard let url = URL(string: pollURL) else {
                 Thread.sleep(forTimeInterval: 10)
@@ -260,6 +267,26 @@ final class CloudRelay {
         URLSession.shared.dataTask(with: req) { _, _, _ in
             logger.info("Tunnel URL pushed to cloud: \(tunnelURL)")
         }.resume()
+    }
+
+    /// `ip:port` для параметра `lan` или nil. Схему не добавляем: `http://` в query —
+    /// классический триггер WAF-правил (RFI), а 403 от WAF агент считает отказом токена.
+    /// Здесь отсекаем только очевидно бесполезное (нет сети → getLocalIP вернул loopback);
+    /// какие адреса принимать (только RFC1918) — решает облако, чтобы политику можно
+    /// было менять без релиза агента.
+    static func lanHint(ip: String, port: UInt16) -> String? {
+        let ip = ip.trimmingCharacters(in: .whitespaces)
+        guard !ip.isEmpty, !ip.hasPrefix("127."), ip != "0.0.0.0", port > 0 else { return nil }
+        return "\(ip):\(port)"
+    }
+
+    private func logLANAdvertisementIfChanged(_ lan: String?) {
+        stateLock.lock()
+        let previous = lastAdvertisedLAN
+        if previous != lan { lastAdvertisedLAN = lan }
+        stateLock.unlock()
+        guard previous != lan else { return }
+        logger.info("Cloud relay advertising LAN address: \(lan ?? "(none — no LAN route)")")
     }
 
     private func logTunnelAdvertisementIfChanged(_ tunnelURL: String) {

@@ -30,6 +30,8 @@ public sealed class CloudRelay
     private readonly object _lock = new();
     private bool _running;
     private string? _lastAdvertisedTunnel;
+    private string? _lastAdvertisedLan;
+    private bool    _lanLogged;
 
     public void StartIfLinked()
     {
@@ -100,7 +102,15 @@ public sealed class CloudRelay
                 // туннель). Паритет с macOS (CloudRelay.swift:120).
                 pollUrl += $"&lan_secret={Uri.EscapeDataString(HttpServer.ApiRouter.EnsureLanSecret())}";
 
+                // LAN-адрес по heartbeat: облако (relay_poll, v1.34.3+) обновляет по нему
+                // подсказку lan_ip для телефона. У Windows нет mDNS, эта подсказка —
+                // единственный путь телефона к агенту по локалке, а писалась она только
+                // при логине и протухала после смены IP (DHCP, Parallels NAT→Bridged).
+                var lan = LanHint(AppConfig.Shared.GetLocalIp(), AppConfig.Port, HttpServer.AgentHttpServer.LanEnabled);
+                if (lan != null) pollUrl += $"&lan={Uri.EscapeDataString(lan)}";
+
                 LogTunnelIfChanged(tunnel);
+                LogLanIfChanged(lan);
 
                 try
                 {
@@ -258,6 +268,30 @@ public sealed class CloudRelay
             Log.Info($"Tunnel URL pushed to cloud: {tunnelUrl}");
         }
         catch { }
+    }
+
+    /// `ip:port` для параметра `lan` или null. Схему не добавляем: `http://` в query —
+    /// классический триггер WAF-правил (RFI), а 403 от WAF агент считает отказом токена.
+    /// Отсекаем только очевидно бесполезное (нет сети → loopback; сервер слушает только
+    /// localhost); какие адреса принимать (RFC1918) — решает облако. Паритет:
+    /// CloudRelay.lanHint на macOS.
+    public static string? LanHint(string ip, int port, bool lanEnabled)
+    {
+        ip = (ip ?? "").Trim();
+        if (!lanEnabled || ip.Length == 0 || ip.StartsWith("127.") || ip == "0.0.0.0" || port <= 0)
+            return null;
+        return $"{ip}:{port}";
+    }
+
+    private void LogLanIfChanged(string? lan)
+    {
+        lock (_lock)
+        {
+            if (_lanLogged && _lastAdvertisedLan == lan) return;
+            _lastAdvertisedLan = lan;
+            _lanLogged = true;
+        }
+        Log.Info($"Cloud relay advertising LAN address: {lan ?? "(none — no LAN route)"}");
     }
 
     private void LogTunnelIfChanged(string tunnel)

@@ -12,6 +12,10 @@ public sealed class AgentHttpServer
     private bool          _running;
     private readonly ApiRouter _router = new();
 
+    /// Слушаем ли все интерфейсы (есть urlacl). Без него сервер доступен только с
+    /// localhost, и анонсировать облаку LAN-адрес (CloudRelay, `&lan=`) бессмысленно.
+    public static bool LanEnabled { get; private set; }
+
     public void Start()
     {
         // M4: prefer binding ALL interfaces so the app is reachable directly on the
@@ -24,6 +28,7 @@ public sealed class AgentHttpServer
         {
             _listener.Start();
             _running = true;
+            LanEnabled = true;
             Log.Info($"HTTP server listening on all interfaces :{AppConfig.Port} (LAN enabled)");
             Task.Run(AcceptLoop);
             return;

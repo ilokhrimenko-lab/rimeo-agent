@@ -213,7 +213,12 @@ public sealed class ApiRouter
         // 6002: only serve files that live inside the library's own directories.
         // Blocks ?path=C:\Users\<u>\.ssh\id_rsa, ..\ traversal and junction escapes.
         if (!LibraryPathGuard.IsAllowed(path))
-        { await WriteJson(resp, 403, new { error = "Forbidden" }); return; }
+        {
+            // Причина отказа — в лог (паритет с macOS): без неё «пачки 403» на /artwork
+            // было не разобрать — устаревший путь от клиента или корни библиотеки.
+            Log.Warn($"Blocked non-library stream path: {path} (id={req.QueryParams.GetValueOrDefault("id", "")})");
+            await WriteJson(resp, 403, new { error = "Forbidden" }); return;
+        }
         var trackId = req.QueryParams.GetValueOrDefault("id", "");
         var preload = req.QueryParams.GetValueOrDefault("preload", "") is "1" or "true";
         // raw=1 → byte-for-byte ORIGINAL (download / offline must stay lossless):
@@ -359,7 +364,12 @@ public sealed class ApiRouter
         if (!req.QueryParams.TryGetValue("path", out var path) || !req.QueryParams.TryGetValue("id", out var id))
         { await WriteJson(resp, 400, new { error = "path and id required" }); return; }
         if (!LibraryPathGuard.IsAllowed(path))   // 6002
-        { await WriteJson(resp, 403, new { error = "Forbidden" }); return; }
+        {
+            // Причина отказа — в лог (паритет с macOS): без неё «пачки 403» на /artwork
+            // было не разобрать — устаревший путь от клиента или корни библиотеки.
+            Log.Warn($"Blocked non-library waveform path: {path} (id={req.QueryParams.GetValueOrDefault("id", "")})");
+            await WriteJson(resp, 403, new { error = "Forbidden" }); return;
+        }
 
         var preload = req.QueryParams.GetValueOrDefault("preload", "") is "1" or "true";
         if (preload)
@@ -378,7 +388,12 @@ public sealed class ApiRouter
         if (!req.QueryParams.TryGetValue("path", out var path) || !req.QueryParams.TryGetValue("id", out var id))
         { await WriteJson(resp, 400, new { error = "path and id required" }); return; }
         if (!LibraryPathGuard.IsAllowed(path))   // 6002
-        { await WriteJson(resp, 403, new { error = "Forbidden" }); return; }
+        {
+            // Причина отказа — в лог (паритет с macOS): без неё «пачки 403» на /artwork
+            // было не разобрать — устаревший путь от клиента или корни библиотеки.
+            Log.Warn($"Blocked non-library artwork path: {path} (id={req.QueryParams.GetValueOrDefault("id", "")})");
+            await WriteJson(resp, 403, new { error = "Forbidden" }); return;
+        }
 
         var preload = req.QueryParams.GetValueOrDefault("preload", "") is "1" or "true";
         if (preload)
@@ -405,7 +420,12 @@ public sealed class ApiRouter
         if (!req.QueryParams.TryGetValue("path", out var path) || !File.Exists(path))
         { await WriteJson(resp, 404, new { error = "File not found" }); return; }
         if (!LibraryPathGuard.IsAllowed(path))   // 6002 + 6004
-        { await WriteJson(resp, 403, new { error = "Forbidden" }); return; }
+        {
+            // Причина отказа — в лог (паритет с macOS): без неё «пачки 403» на /artwork
+            // было не разобрать — устаревший путь от клиента или корни библиотеки.
+            Log.Warn($"Blocked non-library reveal path: {path} (id={req.QueryParams.GetValueOrDefault("id", "")})");
+            await WriteJson(resp, 403, new { error = "Forbidden" }); return;
+        }
 
         System.Diagnostics.Process.Start("explorer.exe", $"/select,\"{path}\"");
         await WriteJson(resp, 200, new { status = "ok" });
