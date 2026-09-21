@@ -318,12 +318,36 @@ final class TunnelManager {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         guard let out = String(data: data, encoding: .utf8) else { return }
 
+        var strays: [Int32] = []
         for line in out.split(whereSeparator: \.isNewline) {
             guard let pid = Int32(line.trimmingCharacters(in: .whitespaces)) else { continue }
             if pid == ownPid { continue }
             logger.warning("Reaping stray tunnel-runtime pid=\(pid) before launching ours (orphaned duplicate on the same named tunnel — cause of stream stutter)")
-            kill(pid, SIGTERM)
+            strays.append(pid)
         }
+        for pid in Self.terminateAndWait(strays, grace: 3) {
+            logger.warning("Stray tunnel-runtime pid=\(pid) ignored SIGTERM for 3s — sent SIGKILL")
+        }
+    }
+
+    /// SIGTERM каждому pid, ждём до `grace` секунд, выживших — SIGKILL. Возвращает тех,
+    /// кого пришлось убить. Ждать обязательно: cloudflared на SIGTERM сначала закрывает
+    /// соединения (graceful drain, несколько секунд) и всё это время ещё зарегистрирован
+    /// на туннеле. Запусти мы свой коннектор сразу — на одном туннеле два коннектора,
+    /// Cloudflare раскидывает запросы между ними, стрим заикается. Windows убивает
+    /// сироту сразу (`Kill(true)`), поэтому окна там нет. Блокирует поток — вызывать
+    /// только из фоновой очереди (runTunnel).
+    @discardableResult
+    static func terminateAndWait(_ pids: [Int32], grace: TimeInterval) -> [Int32] {
+        guard !pids.isEmpty else { return [] }
+        for pid in pids { kill(pid, SIGTERM) }
+        let deadline = Date().addingTimeInterval(grace)
+        while Date() < deadline, pids.contains(where: { kill($0, 0) == 0 }) {
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        let survivors = pids.filter { kill($0, 0) == 0 }
+        for pid in survivors { kill(pid, SIGKILL) }
+        return survivors
     }
 
     private func runTunnel() {
