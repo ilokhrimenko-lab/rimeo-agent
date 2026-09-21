@@ -99,7 +99,8 @@ final class RekordboxParser: NSObject {
     }
 
     // SAX-style parse using XMLParser for large file performance
-    private func parseXML(_ xmlString: String, mtime: Double) -> LibraryData {
+    // internal (не private) — для RimeoAgentTests (#81).
+    func parseXML(_ xmlString: String, mtime: Double) -> LibraryData {
         guard let data = xmlString.data(using: .utf8) else {
             return LibraryData(tracks: [], playlists: [], xml_date: mtime, source: "xml")
         }
@@ -161,18 +162,52 @@ final class RekordboxParser: NSObject {
         for (i, t) in tracksDB.enumerated() { trackIndex[t.id] = i }
 
         // --- Parse PLAYLISTS ---
-        var allPlaylists: [String: Double] = [:]
+        // Emit EVERY node — folders (Type="0", empty ones included) as well as playlists —
+        // with the same tree fields the master.db branch sends (is_folder / is_smart /
+        // parent / seq). Before, only Type="1" was emitted: an empty folder vanished,
+        // iOS `playlistFolders` was empty and the mobile web (lists children BY ENTRY)
+        // could not reach anything inside a folder. (#81)
+        // The XML export has no node IDs → rekordbox_id stays nil (XML is read-only:
+        // mutations and Sync address by rekordbox_id). `parent` = the parent's display
+        // path ("root" at top level) — every client resolves a parent by path too.
+        // `seq` = position among siblings in document order: the export writes the
+        // tree in Rekordbox display order, folders and playlists in one space.
+        struct XMLNodeInfo { let path: String; var isFolder: Bool; let parent: String; let seq: Int }
+        var nodeInfos: [XMLNodeInfo] = []
+        var nodeIndexByPath: [String: Int] = [:]
+        var playlistDate: [String: Double] = [:]
+
+        func emit(_ path: String, isFolder: Bool, parent: String, seq: Int) {
+            if let i = nodeIndexByPath[path] {
+                // Same display path twice (finding-5): keep the first; a folder wins,
+                // so every client draws that path as a folder.
+                if isFolder { nodeInfos[i].isFolder = true }
+                return
+            }
+            nodeIndexByPath[path] = nodeInfos.count
+            nodeInfos.append(XMLNodeInfo(path: path, isFolder: isFolder, parent: parent, seq: seq))
+        }
 
         func walkPlaylists(_ node: XMLElement, path: [String]) {
+            let filtered   = path.filter { $0.uppercased() != "ROOT" }
+            let parentPath = filtered.isEmpty ? "root" : filtered.joined(separator: " / ")
+            var seq = 0
             for n in node.elements(forName: "NODE") {
                 let nodeType = n.attribute(forName: "Type")?.stringValue ?? ""
                 let name     = n.attribute(forName: "Name")?.stringValue ?? ""
                 if nodeType == "0" {
+                    // The synthetic top-level ROOT node is not a folder of its own.
+                    if name.uppercased() != "ROOT" {
+                        seq += 1
+                        emit((filtered + [name]).joined(separator: " / "),
+                             isFolder: true, parent: parentPath, seq: seq)
+                    }
                     walkPlaylists(n, path: path + [name])
                 } else if nodeType == "1" {
-                    let filtered = path.filter { $0.uppercased() != "ROOT" }
-                    let pPath    = (filtered + [name]).joined(separator: " / ")
-                    if allPlaylists[pPath] == nil { allPlaylists[pPath] = 0 }
+                    seq += 1
+                    let pPath = (filtered + [name]).joined(separator: " / ")
+                    emit(pPath, isFolder: false, parent: parentPath, seq: seq)
+                    if playlistDate[pPath] == nil { playlistDate[pPath] = 0 }
 
                     var order = 1
                     for trackNode in n.elements(forName: "TRACK") {
@@ -184,8 +219,8 @@ final class RekordboxParser: NSObject {
                             if !tracksDB[idx].playlists.contains(pPath) {
                                 tracksDB[idx].playlists.append(pPath)
                             }
-                            if tracksDB[idx].timestamp > (allPlaylists[pPath] ?? 0) {
-                                allPlaylists[pPath] = tracksDB[idx].timestamp
+                            if tracksDB[idx].timestamp > (playlistDate[pPath] ?? 0) {
+                                playlistDate[pPath] = tracksDB[idx].timestamp
                             }
                         }
                         order += 1
@@ -200,7 +235,11 @@ final class RekordboxParser: NSObject {
 
         tracksDB.sort { $0.timestamp > $1.timestamp }
 
-        let playlists = allPlaylists.map { Playlist(path: $0.key, date: $0.value, smart: false) }
+        // Document order — deterministic, parents before children.
+        let playlists = nodeInfos.map {
+            Playlist(path: $0.path, date: playlistDate[$0.path] ?? 0, smart: false,
+                     parent: $0.parent, is_folder: $0.isFolder, is_smart: false, seq: $0.seq)
+        }
         return LibraryData(tracks: tracksDB, playlists: playlists, xml_date: mtime, source: "xml")
     }
 

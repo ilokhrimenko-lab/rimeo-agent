@@ -905,24 +905,56 @@ public sealed class RekordboxParser
                 }
             }
 
-            // Parse PLAYLISTS
-            var allPlaylists = new Dictionary<string, double>();
+            // Parse PLAYLISTS — КАЖДЫЙ узел: папки (Type="0", включая пустые) и плейлисты,
+            // с теми же полями дерева, что у master.db-ветки (IsFolder/IsSmart/Parent/Seq).
+            // Раньше эмитился только Type="1": пустая папка пропадала целиком, у iOS
+            // playlistFolders был пуст, а мобильный веб (дети — по ЗАПИСЯМ) не видел ничего
+            // внутри папок. (#81) Зеркало macOS RekordboxParser.parseXML.
+            // ID узлов в XML нет → RekordboxId = null (XML только на чтение: мутации и Sync
+            // адресуют по нему). Parent = display-path родителя ("root" на верхнем уровне).
+            // Seq = позиция среди сиблингов в порядке документа: экспорт пишет дерево в
+            // порядке показа Rekordbox, папки и плейлисты в едином пространстве.
+            var nodes           = new List<Playlist>();
+            var nodeIndexByPath = new Dictionary<string, int>(StringComparer.Ordinal);
+            var playlistDate    = new Dictionary<string, double>(StringComparer.Ordinal);
+
+            void Emit(string path, bool isFolder, string parent, int seq)
+            {
+                if (nodeIndexByPath.TryGetValue(path, out var i))
+                {
+                    // Один display-path дважды (finding-5): оставляем первый; папка побеждает.
+                    if (isFolder) nodes[i].IsFolder = true;
+                    return;
+                }
+                nodeIndexByPath[path] = nodes.Count;
+                nodes.Add(new Playlist
+                {
+                    Path = path, Smart = false, Parent = parent,
+                    IsFolder = isFolder, IsSmart = false, Seq = seq,
+                });
+            }
 
             void WalkPlaylists(XElement node, List<string> path)
             {
+                var filtered   = path.Where(p => p.ToUpperInvariant() != "ROOT").ToList();
+                var parentPath = filtered.Count == 0 ? "root" : string.Join(" / ", filtered);
+                int seq = 0;
                 foreach (var n in node.Elements("NODE"))
                 {
                     var nodeType = n.Attribute("Type")?.Value ?? "";
                     var name     = n.Attribute("Name")?.Value ?? "";
                     if (nodeType == "0")
                     {
+                        // Синтетический верхний ROOT — не папка.
+                        if (name.ToUpperInvariant() != "ROOT")
+                            Emit(string.Join(" / ", filtered.Append(name)), true, parentPath, ++seq);
                         WalkPlaylists(n, path.Append(name).ToList());
                     }
                     else if (nodeType == "1")
                     {
-                        var filtered = path.Where(p => p.ToUpperInvariant() != "ROOT").ToList();
-                        var pPath    = string.Join(" / ", filtered.Append(name));
-                        if (!allPlaylists.ContainsKey(pPath)) allPlaylists[pPath] = 0;
+                        var pPath = string.Join(" / ", filtered.Append(name));
+                        Emit(pPath, false, parentPath, ++seq);
+                        if (!playlistDate.ContainsKey(pPath)) playlistDate[pPath] = 0;
 
                         int order = 1;
                         foreach (var tn in n.Elements("TRACK"))
@@ -933,8 +965,8 @@ public sealed class RekordboxParser
                                 tracksDb[idx].PlaylistIndices[pPath] = order;
                                 if (!tracksDb[idx].Playlists.Contains(pPath))
                                     tracksDb[idx].Playlists.Add(pPath);
-                                if (tracksDb[idx].Timestamp > allPlaylists[pPath])
-                                    allPlaylists[pPath] = tracksDb[idx].Timestamp;
+                                if (tracksDb[idx].Timestamp > playlistDate[pPath])
+                                    playlistDate[pPath] = tracksDb[idx].Timestamp;
                             }
                             order++;
                         }
@@ -947,14 +979,10 @@ public sealed class RekordboxParser
 
             tracksDb.Sort((a, b) => b.Timestamp.CompareTo(a.Timestamp));
 
-            // XML-экспорт Rekordbox не несёт ни Seq, ни ID узлов — Seq/RekordboxId
-            // остаются null, и клиент падает на алфавит. Это ЧЕСТНО: порядка Rekordbox
-            // в XML попросту нет, притворяться нечем. Порядок выдачи детерминируем сами.
-            var playlists = allPlaylists
-                .OrderBy(kv => kv.Key, StringComparer.Ordinal)
-                .Select(kv => new Playlist { Path = kv.Key, Date = kv.Value, Smart = false })
-                .ToList();
-            return new LibraryData { Tracks = tracksDb, Playlists = playlists, XmlDate = mtime, Source = "xml" };
+            // Порядок документа — детерминирован сам по себе, родитель раньше ребёнка.
+            foreach (var p in nodes)
+                p.Date = playlistDate.TryGetValue(p.Path, out var d) ? d : 0;
+            return new LibraryData { Tracks = tracksDb, Playlists = nodes, XmlDate = mtime, Source = "xml" };
         }
         catch (Exception ex)
         {
