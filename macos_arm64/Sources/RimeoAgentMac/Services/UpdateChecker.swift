@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 struct UpdateInfo {
     let version:     String
@@ -342,8 +343,9 @@ final class UpdateChecker {
     static func relaunchCommand(pid: Int32, appPath: String, background: Bool,
                                 environment: [String: String])
         -> (arguments: [String], environment: [String: String]) {
-        var openArgs = ["-n"]
-        if background { openArgs.append("-g") }
+        // `-g` всегда: перезапуск никогда не отнимает фокус (например, у Rekordbox посреди
+        // сета). Окно, если оно было на экране, вернётся, просто без активации.
+        var openArgs = ["-n", "-g"]
         openArgs += [appPath, "--args"]
         if background { openArgs.append(AgentSettings.backgroundLaunchArgument) }
         openArgs += [relaunchedFromArgument, String(pid)]
@@ -373,6 +375,20 @@ final class UpdateChecker {
         isBackgroundSession || !windowShown
     }
 
+    /// Есть ли у процесса окно, реально видимое на экране прямо сейчас (обычный слой,
+    /// текущий рабочий стол). Флага `mainWindowShown` мало: свёрнутое, спрятанное (Cmd+H)
+    /// или оставленное на другом рабочем столе окно он считает «показанным» — 270→271
+    /// из-за этого вернулся с окном, которого пользователь не видел. CGWindowList можно
+    /// звать из любого потока, главный поток в пути выхода не трогаем.
+    static func hasOnScreenWindow(pid: Int32) -> Bool {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                              kCGNullWindowID) as? [[String: Any]] ?? []
+        return list.contains {
+            ($0[kCGWindowOwnerPID as String] as? Int32) == pid
+                && ($0[kCGWindowLayer as String] as? Int) == 0
+        }
+    }
+
     /// Аргумент нового экземпляра после обновления: PID процесса, который его перезапустил.
     static let relaunchedFromArgument = "--relaunched-from"
 
@@ -390,7 +406,8 @@ final class UpdateChecker {
     private static func spawnRelauncher(appPath: String) throws {
         let background = Self.relaunchInBackground(
             isBackgroundSession: AgentSettings.shared.isBackgroundSession,
-            windowShown: AgentSettings.shared.mainWindowShown)
+            windowShown: AgentSettings.shared.mainWindowShown
+                && Self.hasOnScreenWindow(pid: ProcessInfo.processInfo.processIdentifier))
         let cmd = relaunchCommand(pid: ProcessInfo.processInfo.processIdentifier,
                                   appPath: appPath, background: background,
                                   environment: ProcessInfo.processInfo.environment)

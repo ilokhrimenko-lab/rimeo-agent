@@ -19,11 +19,12 @@ final class UpdateRelaunchTests: XCTestCase {
                         UpdateChecker.relaunchedFromArgument, "4242"])
     }
 
-    func test_foreground_noBackgroundFlag_noFocusSuppression() {
+    func test_foreground_noBackgroundFlag_stillNoFocusSteal() {
         let cmd = UpdateChecker.relaunchCommand(pid: 1, appPath: app, background: false,
                                                 environment: [:])
         XCTAssertEqual(Array(cmd.arguments.dropFirst(3)),
-                       ["-n", app, "--args", UpdateChecker.relaunchedFromArgument, "1"])
+                       ["-n", "-g", app, "--args", UpdateChecker.relaunchedFromArgument, "1"],
+                       "-g всегда: перезапуск не отнимает фокус и в обычном режиме")
     }
 
     func test_relaunchedFromPID_parsing() {
@@ -94,6 +95,12 @@ final class RelaunchModeTests: XCTestCase {
         XCTAssertFalse(UpdateChecker.relaunchInBackground(isBackgroundSession: false, windowShown: true),
                        "окно на экране — вернуть его")
     }
+    func test_onScreenWindow_falseForWindowlessProcess() {
+        // xctest окон не рисует — у текущего процесса окна на экране нет.
+        XCTAssertFalse(UpdateChecker.hasOnScreenWindow(pid: ProcessInfo.processInfo.processIdentifier))
+        XCTAssertFalse(UpdateChecker.hasOnScreenWindow(pid: 999_999))
+    }
+
     func test_windowFlag_roundTrip() {
         let s = AgentSettings.shared
         let before = s.mainWindowShown
