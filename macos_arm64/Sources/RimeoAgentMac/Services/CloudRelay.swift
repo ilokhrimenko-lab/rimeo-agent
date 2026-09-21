@@ -168,11 +168,15 @@ final class CloudRelay {
             }
 
             if httpCode == 403 {
-                var reason: String?
-                if let respData,
-                   let json = try? JSONSerialization.jsonObject(with: respData),
-                   let obj = json as? [String: Any] {
-                    reason = obj["reason"] as? String
+                let reason = CloudRelay.appReason403(respData)
+                // 403 без JSON-ответа приложения (HTML-страница WAF, прокси, пустое тело) —
+                // это не отказ нашего облака, и считать его к разлогину нельзя: одно новое
+                // WAF-правило разлогинило бы весь парк агентов. Просто ждём и повторяем.
+                guard let reason else {
+                    logger.warning("Cloud relay: 403 without app reason (WAF/proxy?) — not counted toward sign-out, retry in \(Int(backoff))s")
+                    Thread.sleep(forTimeInterval: backoff)
+                    backoff = min(backoff * 2, 30)
+                    continue
                 }
                 // `evicted` = the binding is gone → the account signed in on another
                 // computer (single active agent per account). Definitive: sign out.
@@ -195,7 +199,7 @@ final class CloudRelay {
                 // persists, so a single racy 403 no longer kicks the user out.
                 consecutive403 += 1
                 if consecutive403 >= 3 {
-                    logger.warning("Cloud relay: 403 (\(reason ?? "no reason")) persisted ×\(consecutive403) — clearing session.")
+                    logger.warning("Cloud relay: 403 (\(reason)) persisted ×\(consecutive403) — clearing session.")
                     // Keep cloud_user_id (email): the account is de-authed but we
                     // prefill the sign-in gate with the email so reconnecting is a
                     // one-tap password re-entry, not a blank cold gate. An explicit
@@ -208,7 +212,7 @@ final class CloudRelay {
                     self.stop()
                     return
                 }
-                logger.warning("Cloud relay: 403 (\(reason ?? "no reason")) — retry \(consecutive403)/3 in \(Int(backoff))s")
+                logger.warning("Cloud relay: 403 (\(reason)) — retry \(consecutive403)/3 in \(Int(backoff))s")
                 Thread.sleep(forTimeInterval: backoff)
                 backoff = min(backoff * 2, 30)
                 continue
@@ -267,6 +271,16 @@ final class CloudRelay {
         URLSession.shared.dataTask(with: req) { _, _, _ in
             logger.info("Tunnel URL pushed to cloud: \(tunnelURL)")
         }.resume()
+    }
+
+    /// `reason` из JSON-ответа облака на отказ опроса или nil, если тело — не ответ нашего
+    /// приложения (HTML от WAF/прокси, пустое, JSON без строкового `reason`). Облако на
+    /// отказ опроса всегда отвечает `{"error":"unauthorized","reason":"evicted"|"token_mismatch"}`.
+    static func appReason403(_ body: Data?) -> String? {
+        guard let body,
+              let obj = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+              let reason = obj["reason"] as? String, !reason.isEmpty else { return nil }
+        return reason
     }
 
     /// `ip:port` для параметра `lan` или nil. Схему не добавляем: `http://` в query —

@@ -19,3 +19,19 @@ final class RelayLanHintTests: XCTestCase {
                        "`http://` в query — триггер WAF, а его 403 агент считает отказом токена")
     }
 }
+
+/// Отказ relay-опроса: разлогин только по ответу нашего облака, не по 403 от WAF/прокси.
+final class Relay403Tests: XCTestCase {
+    private func d(_ s: String) -> Data { Data(s.utf8) }
+    func test_appReasons_areRecognised() {
+        XCTAssertEqual(CloudRelay.appReason403(d(#"{"error":"unauthorized","reason":"evicted"}"#)), "evicted")
+        XCTAssertEqual(CloudRelay.appReason403(d(#"{"error":"unauthorized","reason":"token_mismatch"}"#)), "token_mismatch")
+    }
+    func test_nonAppBodies_areNotReasons() {
+        XCTAssertNil(CloudRelay.appReason403(d("<html><body>Access denied | rimeo.app used Cloudflare to restrict access</body></html>")))
+        XCTAssertNil(CloudRelay.appReason403(d(#"{"error":"forbidden"}"#)))
+        XCTAssertNil(CloudRelay.appReason403(d(#"{"reason":""}"#)))
+        XCTAssertNil(CloudRelay.appReason403(d("")))
+        XCTAssertNil(CloudRelay.appReason403(nil))
+    }
+}

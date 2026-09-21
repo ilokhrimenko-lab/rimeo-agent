@@ -53,6 +53,19 @@ final class AgentSettings {
         defaults.bool(forKey: Key.launchAtLogin)
     }
 
+    /// Показано ли сейчас главное окно. Пишет AppDelegate на главном потоке, читает поток
+    /// обновления (UpdateChecker.spawnRelauncher) — поэтому под замком: синхронно звать
+    /// главный поток из пути выхода нельзя, так можно подвесить само обновление.
+    private let windowLock = NSLock()
+    private var _mainWindowShown = false
+    var mainWindowShown: Bool {
+        windowLock.lock(); defer { windowLock.unlock() }
+        return _mainWindowShown
+    }
+    func setMainWindowShown(_ shown: Bool) {
+        windowLock.lock(); _mainWindowShown = shown; windowLock.unlock()
+    }
+
     func endBackgroundSession() {
         guard isBackgroundSession else { return }
         isBackgroundSession = false

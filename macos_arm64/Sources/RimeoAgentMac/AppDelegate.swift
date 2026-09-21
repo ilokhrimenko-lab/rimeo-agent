@@ -187,6 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         enforceWindowSize(window, forceDefaultSize: true)
         window.makeKeyAndOrderFront(nil)
         mainWindow = window
+        AgentSettings.shared.setMainWindowShown(true)
     }
 
     func showWindow() {
@@ -196,6 +197,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let w = mainWindow {
             enforceWindowSize(w, forceDefaultSize: false)
             w.makeKeyAndOrderFront(nil)
+            AgentSettings.shared.setMainWindowShown(true)
         } else {
             createMainWindow()
         }
@@ -216,6 +218,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return false
         }
         sender.orderOut(nil)
+        AgentSettings.shared.setMainWindowShown(false)
         return false
     }
 

@@ -126,15 +126,17 @@ public sealed class CloudRelay
 
                     if (resp.StatusCode == System.Net.HttpStatusCode.Forbidden)
                     {
-                        string? reason = null;
-                        try
+                        var reason = AppReason403(body);
+                        // 403 без JSON-ответа приложения (HTML-страница WAF, прокси, пустое тело) —
+                        // это не отказ нашего облака, и считать его к разлогину нельзя: одно новое
+                        // WAF-правило разлогинило бы весь парк агентов. Просто ждём и повторяем.
+                        if (reason == null)
                         {
-                            var err = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body);
-                            if (err != null && err.TryGetValue("reason", out var rEl) &&
-                                rEl.ValueKind == JsonValueKind.String)
-                                reason = rEl.GetString();
+                            Log.Warn($"Cloud relay: 403 without app reason (WAF/proxy?) — not counted toward sign-out, retry in {backoffSec}s");
+                            await Task.Delay(backoffSec * 1000);
+                            backoffSec = Math.Min(backoffSec * 2, 30);
+                            continue;
                         }
-                        catch { /* body not JSON — treat as unknown reason */ }
 
                         // `evicted` = the binding is gone → the account signed in on
                         // another computer (single active agent per account). Definitive:
@@ -157,7 +159,7 @@ public sealed class CloudRelay
                         consecutive403++;
                         if (consecutive403 >= 3)
                         {
-                            Log.Warn($"Cloud relay: 403 ({reason ?? "no reason"}) persisted x{consecutive403} — clearing session.");
+                            Log.Warn($"Cloud relay: 403 ({reason}) persisted x{consecutive403} — clearing session.");
                             // Keep CloudUserId (email): the account is de-authed but we
                             // prefill the sign-in gate with the email so reconnecting is a
                             // one-tap password re-entry, not a blank cold gate. An explicit
@@ -167,7 +169,7 @@ public sealed class CloudRelay
                             Stop();
                             return;
                         }
-                        Log.Warn($"Cloud relay: 403 ({reason ?? "no reason"}) — retry {consecutive403}/3 in {backoffSec}s");
+                        Log.Warn($"Cloud relay: 403 ({reason}) — retry {consecutive403}/3 in {backoffSec}s");
                         await Task.Delay(backoffSec * 1000);
                         backoffSec = Math.Min(backoffSec * 2, 30);
                         continue;
@@ -268,6 +270,26 @@ public sealed class CloudRelay
             Log.Info($"Tunnel URL pushed to cloud: {tunnelUrl}");
         }
         catch { }
+    }
+
+    /// `reason` из JSON-ответа облака на отказ опроса или null, если тело — не ответ нашего
+    /// приложения (HTML от WAF/прокси, пустое, JSON без строкового `reason`). Облако на
+    /// отказ опроса всегда отвечает {"error":"unauthorized","reason":"evicted"|"token_mismatch"}.
+    /// Паритет: CloudRelay.appReason403 на macOS.
+    public static string? AppReason403(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return null;
+        try
+        {
+            var obj = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body);
+            if (obj != null && obj.TryGetValue("reason", out var r) && r.ValueKind == JsonValueKind.String)
+            {
+                var s = r.GetString();
+                return string.IsNullOrEmpty(s) ? null : s;
+            }
+        }
+        catch { /* не JSON — не ответ приложения */ }
+        return null;
     }
 
     /// `ip:port` для параметра `lan` или null. Схему не добавляем: `http://` в query —

@@ -365,6 +365,14 @@ final class UpdateChecker {
         return (["-c", script, String(pid)] + openArgs, env)
     }
 
+    /// Перезапускаться ли в фоне (без окна, без фокуса). Раньше решал только признак
+    /// фоновой сессии, а он навсегда сбрасывается при первом открытии окна: окно открыли
+    /// и закрыли — после обновления оно всплывало и уводило фокус (22.09, 268→269).
+    /// Теперь окно возвращается, только если оно было на экране в момент обновления.
+    static func relaunchInBackground(isBackgroundSession: Bool, windowShown: Bool) -> Bool {
+        isBackgroundSession || !windowShown
+    }
+
     /// Аргумент нового экземпляра после обновления: PID процесса, который его перезапустил.
     static let relaunchedFromArgument = "--relaunched-from"
 
@@ -380,7 +388,9 @@ final class UpdateChecker {
     /// нельзя, он сам ждёт нашей смерти. У дочерних процессов Process своя группа
     /// процессов, поэтому помощник переживает и exit(0), и завершение launchd-job.
     private static func spawnRelauncher(appPath: String) throws {
-        let background = AgentSettings.shared.isBackgroundSession
+        let background = Self.relaunchInBackground(
+            isBackgroundSession: AgentSettings.shared.isBackgroundSession,
+            windowShown: AgentSettings.shared.mainWindowShown)
         let cmd = relaunchCommand(pid: ProcessInfo.processInfo.processIdentifier,
                                   appPath: appPath, background: background,
                                   environment: ProcessInfo.processInfo.environment)

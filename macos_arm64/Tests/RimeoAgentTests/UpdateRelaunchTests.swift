@@ -84,3 +84,21 @@ final class UpdateRelaunchTests: XCTestCase {
         XCTAssertTrue(out.contains("open exit=0"), out)
     }
 }
+
+final class RelaunchModeTests: XCTestCase {
+    func test_backgroundUnlessWindowOnScreen() {
+        XCTAssertTrue(UpdateChecker.relaunchInBackground(isBackgroundSession: true, windowShown: false))
+        XCTAssertTrue(UpdateChecker.relaunchInBackground(isBackgroundSession: true, windowShown: true))
+        XCTAssertTrue(UpdateChecker.relaunchInBackground(isBackgroundSession: false, windowShown: false),
+                      "окно открывали и закрыли — после обновления не всплывать")
+        XCTAssertFalse(UpdateChecker.relaunchInBackground(isBackgroundSession: false, windowShown: true),
+                       "окно на экране — вернуть его")
+    }
+    func test_windowFlag_roundTrip() {
+        let s = AgentSettings.shared
+        let before = s.mainWindowShown
+        s.setMainWindowShown(true);  XCTAssertTrue(s.mainWindowShown)
+        s.setMainWindowShown(false); XCTAssertFalse(s.mainWindowShown)
+        s.setMainWindowShown(before)
+    }
+}
