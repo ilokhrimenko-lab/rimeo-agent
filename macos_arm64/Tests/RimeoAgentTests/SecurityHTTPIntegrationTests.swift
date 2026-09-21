@@ -89,6 +89,27 @@ final class SecurityHTTPIntegrationTests: XCTestCase {
         XCTAssertNil(acao, "no CORS grant for a non-allow-listed origin")
     }
 
+    /// Bonjour-резолвер iOS открывает TCP к агенту и закрывает, не прислав ни байта.
+    /// Такое соединение не должно ронять/подвешивать сервер: следующий запрос проходит.
+    func test_probeConnectionWithoutRequest_doesNotBreakServer() throws {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let rc = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        XCTAssertEqual(rc, 0, "TCP до сервера должен подниматься")
+        close(fd)   // ни байта — как NWConnection.cancel() в LANDiscovery
+        Thread.sleep(forTimeInterval: 0.1)
+        let (status, _) = try send("GET", "/api/status")
+        XCTAssertEqual(status, 200, "сервер должен обслуживать запросы после пустого соединения")
+    }
+
     func test_6003_http_preflight_rimeoOrigin_isReflected() throws {
         let (_, headers) = try send("OPTIONS", "/api/data",
                                     headers: ["Origin": "https://rimeo.app",

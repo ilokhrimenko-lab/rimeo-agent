@@ -159,9 +159,19 @@ final class HTTPServer {
         defer { Darwin.close(fd) }
 
         let t0 = DispatchTime.now()
-        guard let req = readRequest(fd, peerIP: peerIP) else {
-            logger.warning("[REQ] transport=\(Transport.classify(peerIP: peerIP, headers: [:]).rawValue) "
-                         + "ip=\(peerIP) status=- error=bad_request_or_timeout")
+        var gotBytes = false
+        guard let req = readRequest(fd, peerIP: peerIP, gotBytes: &gotBytes) else {
+            let transport = Transport.classify(peerIP: peerIP, headers: [:]).rawValue
+            if !gotBytes {
+                // Соединение закрыли, не прислав ни байта. Так делает Bonjour-резолвер
+                // iOS (LANDiscovery.resolve): открывает TCP, чтобы узнать IP агента, и
+                // сразу закрывает. Это не ошибка — наоборот, доказательство, что TCP по
+                // локалке доходит. Раньше писалось WARN error=bad_request_or_timeout и
+                // выглядело как «LAN не работает» при разборе логов.
+                logger.info("[REQ] transport=\(transport) ip=\(peerIP) status=- probe=no_request")
+            } else {
+                logger.warning("[REQ] transport=\(transport) ip=\(peerIP) status=- error=bad_request_or_timeout")
+            }
             return
         }
 
@@ -191,7 +201,7 @@ final class HTTPServer {
     }
 
     // Read HTTP request headers + body
-    private func readRequest(_ fd: Int32, peerIP: String) -> HTTPRequest? {
+    private func readRequest(_ fd: Int32, peerIP: String, gotBytes: inout Bool) -> HTTPRequest? {
         var headerBytes = [UInt8]()
         var buf         = [UInt8](repeating: 0, count: 4096)
 
@@ -199,6 +209,7 @@ final class HTTPServer {
         while !hasDoubleNewline(headerBytes) && headerBytes.count < 65536 {
             let n = recv(fd, &buf, buf.count, 0)
             if n <= 0 { return nil }
+            gotBytes = true
             headerBytes.append(contentsOf: buf.prefix(n))
         }
 
