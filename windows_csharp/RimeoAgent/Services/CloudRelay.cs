@@ -59,150 +59,182 @@ public sealed class CloudRelay
         // transient race (a quick re-login, server blip). Only a definitive
         // `evicted` reason, or N consecutive non-definitive 403s, signs us out.
         int consecutive403 = 0;
-        using var http = new HttpClient();
-
-        while (IsRunning())
+        // Ошибок транспорта подряд (таймаут, обрыв). См. NewPollClient: после
+        // RecreateClientAfterErrors клиент пересоздаётся — то, что раньше делал только
+        // ручной рестарт агента.
+        int consecutiveErrors = 0;
+        var http = NewPollClient();
+        try
         {
-            var d = DataStore.Shared.Data;
-            var cloudUrl  = string.IsNullOrEmpty(d.CloudUrl)   ? initialCloudUrl  : d.CloudUrl;
-            var cloudToken = string.IsNullOrEmpty(d.CloudToken) ? initialToken     : d.CloudToken;
-
-            if (string.IsNullOrEmpty(cloudUrl) || string.IsNullOrEmpty(cloudToken))
+            while (IsRunning())
             {
-                await Task.Delay(30_000);
-                continue;
-            }
+                var d = DataStore.Shared.Data;
+                var cloudUrl  = string.IsNullOrEmpty(d.CloudUrl)   ? initialCloudUrl  : d.CloudUrl;
+                var cloudToken = string.IsNullOrEmpty(d.CloudToken) ? initialToken     : d.CloudToken;
 
-            var tunnel    = TunnelManager.Shared.ActiveUrl;
-            var pollUrl   = $"{cloudUrl}/api/relay/poll/{AppConfig.Shared.AgentId}?token={cloudToken}";
-            if (!string.IsNullOrEmpty(tunnel))
-                pollUrl += $"&tunnel={Uri.EscapeDataString(tunnel)}";
-
-            // Билд — телеметрия облака (и исторически гейт на именованный туннель).
-            pollUrl += $"&build={Uri.EscapeDataString(AppConfig.Shared.BuildNumber)}";
-            pollUrl += $"&caps={Uri.EscapeDataString(Capabilities)}";
-
-            // ⚠️ LAN-PSK ПО HEARTBEAT — САМЫЙ ВАЖНЫЙ ИЗ ТРЁХ.
-            //
-            // Уже связанный агент повторно /api/agent/login НЕ дёргает, поэтому линковка
-            // секрет не донесёт: канал только этот. Облако принимает его здесь
-            // (app.py: `request.args.get('lan_secret')`) и отдаёт телефону того же
-            // аккаунта, после чего телефон идёт к агенту НАПРЯМУЮ по локальной сети.
-            //
-            // Windows не слал его вообще. Следствие: у Windows-пользователей LAN-путь не
-            // включался НИКОГДА — телефон стримил через Cloudflare, стоя в одной комнате
-            // с ПК (на маке замеряли: 98 мс и 37 МБ/с по локалке против 1–7 с через
-            // туннель). Паритет с macOS (CloudRelay.swift:120).
-            pollUrl += $"&lan_secret={Uri.EscapeDataString(HttpServer.ApiRouter.EnsureLanSecret())}";
-
-            LogTunnelIfChanged(tunnel);
-
-            try
-            {
-                Log.Info($"Cloud relay connecting: {cloudUrl}");
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-                var req = new HttpRequestMessage(HttpMethod.Get, pollUrl);
-                req.Headers.TryAddWithoutValidation("User-Agent",
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
-                req.Headers.Accept.ParseAdd("application/json");
-
-                var resp = await http.SendAsync(req, cts.Token);
-                var body = await resp.Content.ReadAsStringAsync();
-
-                if (resp.StatusCode == System.Net.HttpStatusCode.Forbidden)
+                if (string.IsNullOrEmpty(cloudUrl) || string.IsNullOrEmpty(cloudToken))
                 {
-                    string? reason = null;
-                    try
-                    {
-                        var err = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body);
-                        if (err != null && err.TryGetValue("reason", out var rEl) &&
-                            rEl.ValueKind == JsonValueKind.String)
-                            reason = rEl.GetString();
-                    }
-                    catch { /* body not JSON — treat as unknown reason */ }
+                    await Task.Delay(30_000);
+                    continue;
+                }
 
-                    // `evicted` = the binding is gone → the account signed in on
-                    // another computer (single active agent per account). Definitive:
-                    // sign out.
-                    if (reason == "evicted")
+                var tunnel    = TunnelManager.Shared.ActiveUrl;
+                var pollUrl   = $"{cloudUrl}/api/relay/poll/{AppConfig.Shared.AgentId}?token={cloudToken}";
+                if (!string.IsNullOrEmpty(tunnel))
+                    pollUrl += $"&tunnel={Uri.EscapeDataString(tunnel)}";
+
+                // Билд — телеметрия облака (и исторически гейт на именованный туннель).
+                pollUrl += $"&build={Uri.EscapeDataString(AppConfig.Shared.BuildNumber)}";
+                pollUrl += $"&caps={Uri.EscapeDataString(Capabilities)}";
+
+                // ⚠️ LAN-PSK ПО HEARTBEAT — САМЫЙ ВАЖНЫЙ ИЗ ТРЁХ.
+                //
+                // Уже связанный агент повторно /api/agent/login НЕ дёргает, поэтому линковка
+                // секрет не донесёт: канал только этот. Облако принимает его здесь
+                // (app.py: `request.args.get('lan_secret')`) и отдаёт телефону того же
+                // аккаунта, после чего телефон идёт к агенту НАПРЯМУЮ по локальной сети.
+                //
+                // Windows не слал его вообще. Следствие: у Windows-пользователей LAN-путь не
+                // включался НИКОГДА — телефон стримил через Cloudflare, стоя в одной комнате
+                // с ПК (на маке замеряли: 98 мс и 37 МБ/с по локалке против 1–7 с через
+                // туннель). Паритет с macOS (CloudRelay.swift:120).
+                pollUrl += $"&lan_secret={Uri.EscapeDataString(HttpServer.ApiRouter.EnsureLanSecret())}";
+
+                LogTunnelIfChanged(tunnel);
+
+                try
+                {
+                    Log.Info($"Cloud relay connecting: {cloudUrl}");
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                    var req = new HttpRequestMessage(HttpMethod.Get, pollUrl);
+                    req.Headers.TryAddWithoutValidation("User-Agent",
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+                    req.Headers.Accept.ParseAdd("application/json");
+
+                    var resp = await http.SendAsync(req, cts.Token);
+                    var body = await resp.Content.ReadAsStringAsync();
+
+                    if (resp.StatusCode == System.Net.HttpStatusCode.Forbidden)
                     {
-                        Log.Warn("Cloud relay: 403 evicted — signed in elsewhere. Clearing session.");
-                        // Keep CloudUserId (email): the account is de-authed but we
-                        // prefill the sign-in gate with the email so reconnecting is a
-                        // one-tap password re-entry, not a blank cold gate. An explicit
-                        // Sign out still clears the email (UnlinkAccount).
-                        DataStore.Shared.Update(dd => { dd.CloudUrl = ""; dd.CloudToken = ""; });
-                        AppState.Shared.RefreshFromData();
-                        Stop();
-                        return;
+                        string? reason = null;
+                        try
+                        {
+                            var err = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body);
+                            if (err != null && err.TryGetValue("reason", out var rEl) &&
+                                rEl.ValueKind == JsonValueKind.String)
+                                reason = rEl.GetString();
+                        }
+                        catch { /* body not JSON — treat as unknown reason */ }
+
+                        // `evicted` = the binding is gone → the account signed in on
+                        // another computer (single active agent per account). Definitive:
+                        // sign out.
+                        if (reason == "evicted")
+                        {
+                            Log.Warn("Cloud relay: 403 evicted — signed in elsewhere. Clearing session.");
+                            // Keep CloudUserId (email): the account is de-authed but we
+                            // prefill the sign-in gate with the email so reconnecting is a
+                            // one-tap password re-entry, not a blank cold gate. An explicit
+                            // Sign out still clears the email (UnlinkAccount).
+                            DataStore.Shared.Update(dd => { dd.CloudUrl = ""; dd.CloudToken = ""; });
+                            AppState.Shared.RefreshFromData();
+                            Stop();
+                            return;
+                        }
+                        // `token_mismatch` / unknown: token superseded — usually a transient
+                        // race (a quick re-login). Retry; only sign out if it persists, so
+                        // a single racy 403 no longer kicks the user out.
+                        consecutive403++;
+                        if (consecutive403 >= 3)
+                        {
+                            Log.Warn($"Cloud relay: 403 ({reason ?? "no reason"}) persisted x{consecutive403} — clearing session.");
+                            // Keep CloudUserId (email): the account is de-authed but we
+                            // prefill the sign-in gate with the email so reconnecting is a
+                            // one-tap password re-entry, not a blank cold gate. An explicit
+                            // Sign out still clears the email (UnlinkAccount).
+                            DataStore.Shared.Update(dd => { dd.CloudUrl = ""; dd.CloudToken = ""; });
+                            AppState.Shared.RefreshFromData();
+                            Stop();
+                            return;
+                        }
+                        Log.Warn($"Cloud relay: 403 ({reason ?? "no reason"}) — retry {consecutive403}/3 in {backoffSec}s");
+                        await Task.Delay(backoffSec * 1000);
+                        backoffSec = Math.Min(backoffSec * 2, 30);
+                        continue;
                     }
-                    // `token_mismatch` / unknown: token superseded — usually a transient
-                    // race (a quick re-login). Retry; only sign out if it persists, so
-                    // a single racy 403 no longer kicks the user out.
-                    consecutive403++;
-                    if (consecutive403 >= 3)
+
+                    if (!resp.IsSuccessStatusCode)
                     {
-                        Log.Warn($"Cloud relay: 403 ({reason ?? "no reason"}) persisted x{consecutive403} — clearing session.");
-                        // Keep CloudUserId (email): the account is de-authed but we
-                        // prefill the sign-in gate with the email so reconnecting is a
-                        // one-tap password re-entry, not a blank cold gate. An explicit
-                        // Sign out still clears the email (UnlinkAccount).
-                        DataStore.Shared.Update(dd => { dd.CloudUrl = ""; dd.CloudToken = ""; });
-                        AppState.Shared.RefreshFromData();
-                        Stop();
-                        return;
+                        Log.Warn($"Cloud relay poll: HTTP {(int)resp.StatusCode}, retry in {backoffSec}s");
+                        await Task.Delay(backoffSec * 1000);
+                        backoffSec = Math.Min(backoffSec * 2, 30);
+                        continue;
                     }
-                    Log.Warn($"Cloud relay: 403 ({reason ?? "no reason"}) — retry {consecutive403}/3 in {backoffSec}s");
+
+                    var msg = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body);
+                    if (msg == null)
+                    {
+                        await Task.Delay(backoffSec * 1000);
+                        backoffSec = Math.Min(backoffSec * 2, 30);
+                        continue;
+                    }
+
+                    backoffSec = 1;
+                    consecutive403 = 0;
+                    consecutiveErrors = 0;
+
+                    if (msg.TryGetValue("type", out var typeEl) && typeEl.GetString() == "ping")
+                    {
+                        // The cloud piggybacks whether a phone is signed in to this
+                        // account on the idle heartbeat, for the Devices tab status.
+                        if (msg.TryGetValue("phone", out var phoneEl) &&
+                            (phoneEl.ValueKind == JsonValueKind.True || phoneEl.ValueKind == JsonValueKind.False))
+                            AppState.Shared.PhoneConnected = phoneEl.GetBoolean();
+                        continue;
+                    }
+
+                    // Handle command on a separate task
+                    _ = Task.Run(() => HandleCommand(msg, cloudUrl));
+                }
+                catch (Exception ex) when (!IsRunning())
+                {
+                    _ = ex;
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    Log.Warn($"Cloud relay error: {ex.Message}, retry in {backoffSec}s");
+                    consecutiveErrors++;
+                    if (consecutiveErrors >= RecreateClientAfterErrors)
+                    {
+                        Log.Warn($"Cloud relay: {consecutiveErrors} errors in a row — recreating HTTP client");
+                        http.Dispose();
+                        http = NewPollClient();
+                        consecutiveErrors = 0;
+                    }
                     await Task.Delay(backoffSec * 1000);
                     backoffSec = Math.Min(backoffSec * 2, 30);
-                    continue;
                 }
-
-                if (!resp.IsSuccessStatusCode)
-                {
-                    Log.Warn($"Cloud relay poll: HTTP {(int)resp.StatusCode}, retry in {backoffSec}s");
-                    await Task.Delay(backoffSec * 1000);
-                    backoffSec = Math.Min(backoffSec * 2, 30);
-                    continue;
-                }
-
-                var msg = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(body);
-                if (msg == null)
-                {
-                    await Task.Delay(backoffSec * 1000);
-                    backoffSec = Math.Min(backoffSec * 2, 30);
-                    continue;
-                }
-
-                backoffSec = 1;
-                consecutive403 = 0;
-
-                if (msg.TryGetValue("type", out var typeEl) && typeEl.GetString() == "ping")
-                {
-                    // The cloud piggybacks whether a phone is signed in to this
-                    // account on the idle heartbeat, for the Devices tab status.
-                    if (msg.TryGetValue("phone", out var phoneEl) &&
-                        (phoneEl.ValueKind == JsonValueKind.True || phoneEl.ValueKind == JsonValueKind.False))
-                        AppState.Shared.PhoneConnected = phoneEl.GetBoolean();
-                    continue;
-                }
-
-                // Handle command on a separate task
-                _ = Task.Run(() => HandleCommand(msg, cloudUrl));
-            }
-            catch (Exception ex) when (!IsRunning())
-            {
-                _ = ex;
-                return;
-            }
-            catch (Exception ex)
-            {
-                Log.Warn($"Cloud relay error: {ex.Message}, retry in {backoffSec}s");
-                await Task.Delay(backoffSec * 1000);
-                backoffSec = Math.Min(backoffSec * 2, 30);
             }
         }
+        finally { http.Dispose(); }
     }
+
+    private const int RecreateClientAfterErrors = 3;
+
+    /// HTTP-клиент long-poll'а. Раньше был один `new HttpClient()` на всю жизнь агента
+    /// с бессрочным пулом соединений: после сна/смены сети/тихого обрыва соединение в
+    /// пуле оставалось мёртвым, каждый опрос упирался в 30-секундный таймаут («A task
+    /// was canceled»), и так 17 часов подряд до ручного рестарта (агент 260, 23–24.07).
+    /// Теперь соединения живут не дольше PooledConnectionLifetime (заодно заново
+    /// резолвится DNS), а после серии ошибок клиент пересоздаётся целиком.
+    /// macOS этим не страдает: URLSession.shared сам переподключается при смене сети.
+    private static HttpClient NewPollClient() => new HttpClient(new SocketsHttpHandler
+    {
+        PooledConnectionLifetime    = TimeSpan.FromMinutes(2),
+        PooledConnectionIdleTimeout = TimeSpan.FromSeconds(30),
+        ConnectTimeout              = TimeSpan.FromSeconds(15),
+    });
 
     public void NoteTunnelChanged(string tunnelUrl) =>
         Log.Info($"Cloud relay tunnel changed: {(string.IsNullOrEmpty(tunnelUrl) ? "(none)" : tunnelUrl)}");
