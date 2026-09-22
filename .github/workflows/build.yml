@@ -2,6 +2,11 @@ name: Build
 
 on:
   workflow_dispatch:
+    inputs:
+      src_ref:
+        description: 'Ветка или тег закрытого rimeo-agent-src (пробная сборка без релиза)'
+        required: false
+        default: 'main'
   push:
     tags:
       - 'v*'
@@ -14,7 +19,15 @@ jobs:
     runs-on: macos-latest
     if: "!startsWith(github.ref_name, 'win-')"
     steps:
+      # Исходники агента живут в закрытом ilokhrimenko-lab/rimeo-agent-src (с 22.09.2026).
+      # Этот публичный репозиторий держит только сборку и релизы: автообновление агентов,
+      # кнопки Download на rimeo.app и письма берут файлы из ЕГО релизов, поэтому он остаётся
+      # публичным. Код читаем read-only deploy-ключом; на тег берём ТОТ ЖЕ тег из закрытого.
       - uses: actions/checkout@v4
+        with:
+          repository: ilokhrimenko-lab/rimeo-agent-src
+          ref: ${{ github.ref_type == 'tag' && github.ref_name || inputs.src_ref || 'main' }}
+          ssh-key: ${{ secrets.SRC_DEPLOY_KEY }}
 
       - name: Prepare build metadata
         run: |
@@ -318,7 +331,15 @@ jobs:
             zip: RimeoAgent_win-arm64.zip
             setup: RimeoAgentSetup_win-arm64.exe
     steps:
+      # Исходники агента живут в закрытом ilokhrimenko-lab/rimeo-agent-src (с 22.09.2026).
+      # Этот публичный репозиторий держит только сборку и релизы: автообновление агентов,
+      # кнопки Download на rimeo.app и письма берут файлы из ЕГО релизов, поэтому он остаётся
+      # публичным. Код читаем read-only deploy-ключом; на тег берём ТОТ ЖЕ тег из закрытого.
       - uses: actions/checkout@v4
+        with:
+          repository: ilokhrimenko-lab/rimeo-agent-src
+          ref: ${{ github.ref_type == 'tag' && github.ref_name || inputs.src_ref || 'main' }}
+          ssh-key: ${{ secrets.SRC_DEPLOY_KEY }}
 
       - uses: actions/setup-dotnet@v4
         with:

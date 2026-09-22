@@ -1,3 +1,0 @@
-VERSION = "1.0"
-BUILD_NUMBER = "272"
-RELEASE_TAG = "v1.0-build272"
