@@ -241,8 +241,15 @@ enum LibraryPathGuard {
     /// derivatives) and the Rekordbox share/db dir (cover art). Rebuilt from the
     /// (cached) parsed library on each call.
     static func allowedRoots() -> [String] {
+        allowedRoots(tracks: RekordboxParser.shared.parse().tracks)
+    }
+
+    /// То же по заданному снимку библиотеки — чтобы корни и ключ кеша считались из
+    /// ОДНОГО разбора (раньше корни строил второй вызов parse(), не тот, по которому
+    /// считан ключ).
+    static func allowedRoots(tracks: [Track]) -> [String] {
         var roots = Set<String>()
-        for track in RekordboxParser.shared.parse().tracks {
+        for track in tracks {
             let loc = track.location
             guard !loc.isEmpty else { continue }
             let dir = (loc as NSString).deletingLastPathComponent
@@ -261,17 +268,29 @@ enum LibraryPathGuard {
         return Array(roots)
     }
 
+    /// Ключ кеша корней. Раньше — только «число треков | первый | последний путь»: если
+    /// трек переехал в другую папку (Relocate в Rekordbox), а эти три значения не
+    /// изменились, кеш не пересобирался, и агент сам отдавал в /api/data новый путь и сам
+    /// же отвечал на него 403 — «пачки 403 на /artwork» (#8). Теперь в ключе источник и
+    /// время изменения файла библиотеки: переразбор идёт ровно при его смене, так что
+    /// новая библиотека всегда даёт новый ключ, а попадания в кеш на горячем /stream —
+    /// нет. Пересчёт корней на реальной библиотеке (2410 треков, 54 папки) — ~4 мс.
+    static func rootsSignature(_ lib: LibraryData) -> String {
+        let t = lib.tracks
+        return "\(lib.source ?? "")|\(lib.xml_date)|\(t.count)|\(t.first?.location ?? "")|\(t.last?.location ?? "")"
+    }
+
     /// Canonicalized roots, memoized on a cheap library signature so the hot
     /// streaming path does not realpath every root on every (range) request — which
     /// on a large library over a slow external volume would add real latency.
     private static func canonicalAllowedRoots() -> [String] {
-        let tracks = RekordboxParser.shared.parse().tracks
-        let signature = "\(tracks.count)|\(tracks.first?.location ?? "")|\(tracks.last?.location ?? "")"
+        let lib = RekordboxParser.shared.parse()
+        let signature = rootsSignature(lib)
         rootsLock.lock(); defer { rootsLock.unlock() }
         if signature == cachedRootsSignature, !cachedCanonicalRoots.isEmpty {
             return cachedCanonicalRoots
         }
-        let canon = allowedRoots().map { normalizeUser(canonical($0)) }
+        let canon = allowedRoots(tracks: lib.tracks).map { normalizeUser(canonical($0)) }
         cachedRootsSignature = signature
         cachedCanonicalRoots = canon
         return canon

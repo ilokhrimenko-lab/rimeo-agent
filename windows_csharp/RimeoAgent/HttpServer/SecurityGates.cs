@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using RimeoAgent.Config;
+using RimeoAgent.Models;
 using RimeoAgent.Services;
 
 namespace RimeoAgent.HttpServer;
@@ -244,10 +245,15 @@ public static class LibraryPathGuard
 
     /// Parent folder of every library track + the agent's cache (converted audio)
     /// and the Rekordbox share/db dir (cover art).
-    public static List<string> AllowedRoots()
+    public static List<string> AllowedRoots() => AllowedRoots(RekordboxParser.Shared.Parse().Tracks);
+
+    /// То же по заданному снимку библиотеки — чтобы корни и ключ кеша считались из
+    /// ОДНОГО разбора (раньше корни строил второй вызов Parse(), не тот, по которому
+    /// считан ключ). Паритет: LibraryPathGuard.allowedRoots(tracks:) на macOS.
+    public static List<string> AllowedRoots(IEnumerable<Track> tracks)
     {
         var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var t in RekordboxParser.Shared.Parse().Tracks)
+        foreach (var t in tracks)
         {
             if (string.IsNullOrEmpty(t.Location)) continue;
             var dir = Path.GetDirectoryName(t.Location);
@@ -268,17 +274,29 @@ public static class LibraryPathGuard
         return roots.ToList();
     }
 
+    /// Ключ кеша корней. Раньше — только «число треков | первый | последний путь»: если
+    /// трек переехал в другую папку (Relocate в Rekordbox), а эти три значения не
+    /// изменились, кеш не пересобирался — агент сам отдавал новый путь и сам же отвечал
+    /// на него 403 («пачки 403 на /artwork», #8). Теперь в ключе источник и время
+    /// изменения файла библиотеки (переразбор идёт ровно при его смене).
+    /// Паритет: LibraryPathGuard.rootsSignature на macOS.
+    public static string RootsSignature(LibraryData lib)
+    {
+        var t = lib.Tracks;
+        return $"{lib.Source}|{lib.XmlDate:R}|{t.Count}|{(t.Count > 0 ? t[0].Location : "")}|{(t.Count > 0 ? t[^1].Location : "")}";
+    }
+
     /// Canonicalized roots, memoized on a cheap library signature so the hot
     /// streaming path does not canonicalize every root on every (range) request.
     private static List<string> CanonicalAllowedRoots()
     {
-        var tracks = RekordboxParser.Shared.Parse().Tracks;
-        var signature = $"{tracks.Count}|{(tracks.Count > 0 ? tracks[0].Location : "")}|{(tracks.Count > 0 ? tracks[^1].Location : "")}";
+        var lib = RekordboxParser.Shared.Parse();
+        var signature = RootsSignature(lib);
         lock (RootsLock)
         {
             if (signature == _cachedRootsSignature && _cachedCanonicalRoots.Count > 0)
                 return _cachedCanonicalRoots;
-            _cachedCanonicalRoots = AllowedRoots().Select(Canonical).ToList();
+            _cachedCanonicalRoots = AllowedRoots(lib.Tracks).Select(Canonical).ToList();
             _cachedRootsSignature = signature;
             return _cachedCanonicalRoots;
         }
