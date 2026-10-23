@@ -587,6 +587,76 @@ jobs:
           }
           Write-Host "bundled: dist\RimeoAgent\rbdb-sync-helper\"
 
+      # #237: дымовой прогон СОБРАННОГО агента. 127.0.0.1:8000 занят чужим сокетом,
+      # который принимает соединения и молчит (как dev-сервер у fabioem). Агент обязан
+      # подняться на другом порту и отвечать /api/status со своим agent_id. Затем вход
+      # с несуществующим email через /api/agent_login, то есть через тот же
+      # AgentAccount.AuthAsync, что вызывает окно. Ждём 401 от боевого rimeo.app,
+      # а не обрыв соединения. Попытка одна: на сервере стоит лимит входов.
+      # Копия во временной папке, BUILD_NUMBER 9999, чтобы автообновление не тянуло релиз.
+      - name: Smoke - built agent on a busy port 8000 and sign-in (#237)
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $smoke = Join-Path $env:RUNNER_TEMP "agent-smoke"
+          if (Test-Path $smoke) { Remove-Item $smoke -Recurse -Force }
+          Copy-Item dist\RimeoAgent $smoke -Recurse
+          (Get-Content "$smoke\build_info.py") -replace '^BUILD_NUMBER\s*=.*', 'BUILD_NUMBER = "9999"' |
+            Set-Content "$smoke\build_info.py"
+          $base = Join-Path $env:APPDATA "RimeoAgent"
+
+          $squat = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 8000)
+          $squat.Start()
+          $proc = Start-Process -FilePath "$smoke\RimeoAgent.exe" -ArgumentList "--background" -PassThru
+          $fail = $null
+          try {
+            $found = $null
+            $deadline = (Get-Date).AddSeconds(90)
+            while (-not $found -and (Get-Date) -lt $deadline -and -not $proc.HasExited) {
+              Start-Sleep -Seconds 2
+              $agentId = if (Test-Path "$base\agent_id") { (Get-Content "$base\agent_id" -Raw).Trim() } else { "" }
+              if (-not $agentId) { continue }
+              $ports = @(18000, 28000, 38000, 8000)
+              if (Test-Path "$base\rimo_data.json") {
+                $saved = (Get-Content "$base\rimo_data.json" -Raw | ConvertFrom-Json).http_port
+                if ($saved -gt 0) { $ports = @($saved) + $ports }
+              }
+              foreach ($p in $ports) {
+                try {
+                  $st = Invoke-RestMethod -Uri "http://127.0.0.1:$p/api/status" -TimeoutSec 2
+                  if ($st.agent_id -eq $agentId) { $found = $p; break }
+                } catch { }
+              }
+            }
+            if ($proc.HasExited) { $fail = "agent exited early (code $($proc.ExitCode))" }
+            elseif (-not $found) { $fail = "agent did not answer /api/status with its agent_id within 90 s" }
+            else {
+              Write-Host "agent answers on 127.0.0.1:$found (8000 held by the test socket)"
+              $psk = (Get-Content "$base\rimo_data.json" -Raw | ConvertFrom-Json).lan_secret
+              if ($psk) { Write-Host "::add-mask::$psk" }
+              $body = @{ email = "ci-237-$($env:GITHUB_RUN_ID)@example.invalid"; password = "ci-237-not-a-password" } | ConvertTo-Json
+              $r = Invoke-WebRequest -Uri "http://127.0.0.1:$found/api/agent_login?lan_token=$psk" -Method Post `
+                     -Body $body -ContentType "application/json" -SkipHttpErrorCheck -TimeoutSec 40
+              Write-Host "agent_login -> HTTP $($r.StatusCode): $($r.Content)"
+              $err = try { ($r.Content | ConvertFrom-Json).error } catch { "" }
+              if ($r.StatusCode -ne 401 -or $err -ne "Wrong email or password.") {
+                $fail = "sign-in did not reach rimeo.app as expected (want 401 'Wrong email or password.')"
+              } else {
+                Write-Host "smoke OK: fallback port $found, sign-in reached rimeo.app (401 for an unknown email)"
+              }
+            }
+          } finally {
+            if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+            $squat.Stop()
+            if (Test-Path "$base\agent.log") {
+              Write-Host "--- agent.log (port, HTTP server, sign-in)"
+              Get-Content "$base\agent.log" | Select-String -Pattern 'PORT|HTTP server|self-check|starting|Sign|login|Unhandled|crash' |
+                Select-Object -First 60 | ForEach-Object { $_.Line }
+            }
+          }
+          if ($fail) { Write-Host "::error::$fail"; exit 1 }
+
       - name: Package
         shell: pwsh
         run: |
