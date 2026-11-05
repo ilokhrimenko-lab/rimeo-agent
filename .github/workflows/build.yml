@@ -700,6 +700,20 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } else { Write-Host "ci_smoke.ps1 not in this source tree, skipping" }
 
+      # Набор для arm64-джобы ниже: скрипт и фикстура (схема Rekordbox и один выдуманный
+      # трек, личных данных нет). На windows-11-arm actions/checkout по ssh-ключу не
+      # работает (OpenSSH отвергает права на файл ключа), поэтому набор едет артефактом.
+      - name: Upload smoke kit for the arm64 smoke (#228)
+        if: matrix.arch == 'x64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-kit
+          path: |
+            windows_csharp/build/ci_smoke.ps1
+            windows_csharp/RimeoAgent.Tests/Fixtures/rb_smoke_master.db
+          if-no-files-found: ignore
+          retention-days: 3
+
       - name: Package
         shell: pwsh
         run: |
@@ -734,31 +748,29 @@ jobs:
     timeout-minutes: 30
     if: "!startsWith(github.ref_name, 'mac-')"
     steps:
-      - uses: actions/checkout@v4
+      # Набор (ci_smoke.ps1 + фикстура) выкладывает x64-лега build-windows. У старых тегов
+      # набора нет — тогда шаг ниже просто пропускается.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
-          repository: ilokhrimenko-lab/rimeo-agent-src
-          ref: ${{ github.ref_type == 'tag' && github.ref_name || inputs.src_ref || 'main' }}
-          ssh-key: ${{ secrets.SRC_DEPLOY_KEY }}
-          sparse-checkout: |
-            windows_csharp/build
-            windows_csharp/RimeoAgent.Tests/Fixtures
-            windows_csharp/RimeoAgent/RimeoAgent.csproj
-          sparse-checkout-cone-mode: false
+          name: smoke-kit
+          path: windows_csharp
 
       - uses: actions/download-artifact@v4
         with:
           name: windows-arm64
           path: artifact
 
-      - name: Smoke - arm64 runtime, library, update over the last release, staged update (#228)
+      # Проверка self-contained рантайма для arm64 уже прошла в build-windows; здесь — запуск.
+      - name: Smoke - arm64 library, update over the last release, staged update (#228)
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if (-not (Test-Path windows_csharp\build\ci_smoke.ps1)) { Write-Host "ci_smoke.ps1 not in this source tree, skipping"; exit 0 }
-          Write-Host "runner: $env:PROCESSOR_ARCHITECTURE, $([System.Runtime.InteropServices.RuntimeInformation]::OSDescription)"
+          if (-not (Test-Path windows_csharp\build\ci_smoke.ps1)) { Write-Host "no smoke kit for this source tree, skipping"; exit 0 }
+          Write-Host "runner: $env:PROCESSOR_ARCHITECTURE, $([System.Runtime.InteropServices.RuntimeInformation]::OSDescription), pwsh $($PSVersionTable.PSVersion) $([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)"
           Expand-Archive artifact\RimeoAgent_win-arm64.zip dist\RimeoAgent
-          & windows_csharp\build\ci_smoke.ps1 -Dist dist\RimeoAgent -Arch arm64 -Scenario runtime,library,overlay,staged -ReleaseRepo ${{ github.repository }}
+          & windows_csharp\build\ci_smoke.ps1 -Dist dist\RimeoAgent -Arch arm64 -Scenario library,overlay,staged -ReleaseRepo ${{ github.repository }}
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   release:
