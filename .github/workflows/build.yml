@@ -341,9 +341,13 @@ jobs:
           ref: ${{ github.ref_type == 'tag' && github.ref_name || inputs.src_ref || 'main' }}
           ssh-key: ${{ secrets.SRC_DEPLOY_KEY }}
 
+      # SDK выбирает global.json исходников (windows_csharp/global.json): с #228 это 10.0.x.
+      # 8.0.x оставлен для пересборки старых тегов (откат на .NET 8 без правки workflow).
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: |
+            8.0.x
+            10.0.x
 
       - name: Prepare build metadata
         shell: pwsh
@@ -384,6 +388,20 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } else {
             Write-Host "RimeoAgent.PortTests not in this source tree, skipping"
+          }
+
+      # #228: юнит-тесты чистой логики агента (RimeoAgent.Tests) на настоящей Windows и на
+      # том же рантайме, что агент. Старые теги без проекта пропускают шаг.
+      - name: Unit tests
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        working-directory: windows_csharp
+        run: |
+          if (Test-Path RimeoAgent.Tests/RimeoAgent.Tests.csproj) {
+            dotnet test RimeoAgent.Tests/RimeoAgent.Tests.csproj -c Release --logger "console;verbosity=normal"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            Write-Host "RimeoAgent.Tests not in this source tree, skipping"
           }
 
       - name: Restore
@@ -553,6 +571,17 @@ jobs:
           }
           Write-Host "Self-contained WinUI runtime present for ${{ matrix.rid }}"
 
+      # #228: .NET-рантайм лежит рядом с exe (self-contained), его мажор = TargetFramework,
+      # PE-архитектура exe и coreclr.dll = arch матрицы. Логика — в исходниках
+      # (windows_csharp/build/ci_smoke.ps1); старые теги без скрипта шаг пропускают.
+      - name: Verify self-contained .NET runtime
+        shell: pwsh
+        run: |
+          if (Test-Path windows_csharp\build\ci_smoke.ps1) {
+            & windows_csharp\build\ci_smoke.ps1 -Dist dist\RimeoAgent -Arch ${{ matrix.arch }} -Scenario runtime
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else { Write-Host "ci_smoke.ps1 not in this source tree, skipping" }
+
       # NOTE: cloudflared / ffmpeg / ffprobe are intentionally NOT bundled here.
       # Bundling them next to the exe made the NSIS installer try to overwrite a
       # write-locked cloudflared.exe when reinstalling over a running agent
@@ -657,6 +686,20 @@ jobs:
           }
           if ($fail) { Write-Host "::error::$fail"; exit 1 }
 
+      # #228: собранный агент читает зашифрованный master.db (фикстура со схемой Rekordbox),
+      # поднимается поверх прошлого релиза так, как его кладёт автообновление (xcopy), и сам
+      # проверяет подпись и ставит staged-обновление уже на новом рантайме.
+      - name: Smoke - library, update over the last release, staged update (#228)
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if (Test-Path windows_csharp\build\ci_smoke.ps1) {
+            & windows_csharp\build\ci_smoke.ps1 -Dist dist\RimeoAgent -Arch x64 -Scenario library,overlay,staged -ReleaseRepo ${{ github.repository }}
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else { Write-Host "ci_smoke.ps1 not in this source tree, skipping" }
+
       - name: Package
         shell: pwsh
         run: |
@@ -680,6 +723,43 @@ jobs:
           path: |
             dist\${{ matrix.setup }}
             dist\${{ matrix.zip }}
+
+  # #228: arm64-сборку на x64-раннере не запустить, а у Винды-1 нет ARM. Здесь она
+  # запускается на настоящем Windows on Arm: те же сценарии, что у x64 (без входа в аккаунт:
+  # на сервере лимит попыток входа, вход уже проверила x64-лега). Релиз эту джобу не ждёт.
+  smoke-windows-arm64:
+    name: Smoke Windows (arm64)
+    needs: build-windows
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    if: "!startsWith(github.ref_name, 'mac-')"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ilokhrimenko-lab/rimeo-agent-src
+          ref: ${{ github.ref_type == 'tag' && github.ref_name || inputs.src_ref || 'main' }}
+          ssh-key: ${{ secrets.SRC_DEPLOY_KEY }}
+          sparse-checkout: |
+            windows_csharp/build
+            windows_csharp/RimeoAgent.Tests/Fixtures
+            windows_csharp/RimeoAgent/RimeoAgent.csproj
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-arm64
+          path: artifact
+
+      - name: Smoke - arm64 runtime, library, update over the last release, staged update (#228)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if (-not (Test-Path windows_csharp\build\ci_smoke.ps1)) { Write-Host "ci_smoke.ps1 not in this source tree, skipping"; exit 0 }
+          Write-Host "runner: $env:PROCESSOR_ARCHITECTURE, $([System.Runtime.InteropServices.RuntimeInformation]::OSDescription)"
+          Expand-Archive artifact\RimeoAgent_win-arm64.zip dist\RimeoAgent
+          & windows_csharp\build\ci_smoke.ps1 -Dist dist\RimeoAgent -Arch arm64 -Scenario runtime,library,overlay,staged -ReleaseRepo ${{ github.repository }}
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   release:
     name: Attach to Release
