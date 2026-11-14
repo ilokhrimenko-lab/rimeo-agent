@@ -44,6 +44,10 @@ jobs:
           cp rimeo1024-bigsur.icns "$ICON_ICNS"
           echo "ICON_ICNS=$ICON_ICNS" >> "$GITHUB_ENV"
 
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.15"
+
       - name: Build Rekordbox sync helper (frozen)
         run: |
           set -euo pipefail
@@ -57,10 +61,13 @@ jobs:
           # ~1 с реальной записи. onedir распакован один раз — здесь, на CI.
           # frida исключена: pyrekordbox тянет её только ради KeyExtractor (нам не нужен,
           # ключ кладём в кеш сами), а это 96 МБ. В rbdb_sync_helper.py стоит заглушка.
+          # Колёса — под macOS 11 (LSMinimumSystemVersion агента), не под систему раннера: на
+          # macOS 14+ pip берёт numpy macosx_14_0 (Accelerate), и на маках с macOS 11–13.2
+          # помощник умирал на импорте pyrekordbox (так собирались релизы до 308).
           cd rbdb_sync_helper
-          python3 -m venv .venv
-          .venv/bin/pip install --quiet --upgrade pip
-          .venv/bin/pip install --quiet pyrekordbox==0.4.3 sqlcipher3-wheels pyinstaller
+          uv venv --python cpython-3.12-macos-aarch64-none .venv
+          MACOSX_DEPLOYMENT_TARGET=11.0 uv pip install --python .venv/bin/python \
+            --python-platform aarch64-apple-darwin pyrekordbox==0.4.3 sqlcipher3-wheels pyinstaller
           .venv/bin/pyinstaller \
             --onedir --name rbdb-sync-helper --clean --noconfirm --strip --console \
             --collect-all pyrekordbox --collect-all sqlcipher3 \
@@ -75,6 +82,14 @@ jobs:
             exit 1
           fi
           echo "sync helper: $(du -sh dist/rbdb-sync-helper | cut -f1 | tr -d ' '), archs: $(lipo -archs "$HELPER_BIN")"
+          # Ни один Mach-O не должен требовать macOS новее 11 (см. выше про numpy).
+          BAD=0
+          while IFS= read -r -d '' f; do
+            file -b "$f" | grep -q Mach-O || continue
+            V=$(otool -l "$f" | awk '/LC_BUILD_VERSION/{b=1} b&&/minos/{print $2; exit}')
+            case "$V" in 1[2-9].*|2*) echo "::error::minos $V: $f"; BAD=1;; esac
+          done < <(find dist/rbdb-sync-helper -type f -print0)
+          [ "$BAD" = 0 ] || exit 1
           if [ -e dist/rbdb-sync-helper/_internal/frida ]; then
             echo "::error::frida попала в сборку — исключение не сработало, хелпер снова распух"
             exit 1
@@ -90,6 +105,56 @@ jobs:
             echo "::error::rbdb-sync-helper не дошёл до открытия базы (ожидали db_not_found) — Sync упал бы у пользователя"
             exit 1
           fi
+          # USB-флешки (#248): тесты формат-слоя гоняем по СОБРАННОМУ бинарю — заодно видно,
+          # что пакет rimeo_usb и sqlcipher3 доехали в сборку (OneLibrary читается им же).
+          RIMEO_USB_HELPER="$PWD/$HELPER_BIN" .venv/bin/python -m unittest tests.test_rimeo_usb
+
+          # Ремонт библиотеки Rekordbox (#249): тесты движка по СОБРАННОМУ бинарю — заодно видно,
+          # что пакет rimeo_mdb и sqlcipher3 доехали в сборку, а AES (CommonCrypto) работает.
+          RIMEO_MDB_HELPER="$PWD/$HELPER_BIN" .venv/bin/python -m unittest tests.test_rimeo_mdb
+      - name: Build Rekordbox sync helper for Intel Macs (x86_64, frozen)
+        run: |
+          set -euo pipefail
+          # Помощник для Intel-маков (решение владельца 13.11, релиз 308). Без него на Intel не
+          # работают Sync, проверка и ремонт флешки, ремонт базы: arm64-папку агент там отсеивает
+          # (RekordboxWriter.canRunOnThisMachine). Отдельный onedir x86_64, не universal2: numpy
+          # под две арки несёт разные библиотеки. x86_64-питон работает под Rosetta на этом же
+          # arm64-раннере. Колёса — под macOS 11 (LSMinimumSystemVersion агента): иначе uv возьмёт
+          # numpy macosx_14_0, который на macOS 11–13 не загрузится, и помощник умрёт на импорте.
+          cd rbdb_sync_helper
+          uv venv --python cpython-3.12-macos-x86_64-none .venv-x86_64
+          MACOSX_DEPLOYMENT_TARGET=11.0 uv pip install --python .venv-x86_64/bin/python \
+            --python-platform x86_64-apple-darwin pyrekordbox==0.4.3 sqlcipher3-wheels pyinstaller
+          ARCH=x86_64 bash build_helper.sh
+          HELPER_X86=dist-x86_64/rbdb-sync-helper/rbdb-sync-helper
+          if [ ! -x "$HELPER_X86" ] || [ "$(lipo -archs "$HELPER_X86")" != "x86_64" ]; then
+            echo "::error::rbdb-sync-helper x86_64 не собрался — на Intel не будет Sync и проверки флешки"
+            exit 1
+          fi
+          if [ -e dist-x86_64/rbdb-sync-helper/_internal/frida ]; then
+            echo "::error::frida попала в сборку x86_64"
+            exit 1
+          fi
+          # Ни один Mach-O не должен требовать macOS новее 11 и быть не той арки.
+          BAD=0
+          while IFS= read -r -d '' f; do
+            file -b "$f" | grep -q Mach-O || continue
+            [ "$(lipo -archs "$f")" = "x86_64" ] || { echo "::error::не x86_64: $f"; BAD=1; }
+            V=$(otool -l "$f" | awk '/LC_BUILD_VERSION/{b=1} b&&/minos/{print $2; exit}')
+            case "$V" in 1[2-9].*|2*) echo "::error::minos $V: $f"; BAD=1;; esac
+          done < <(find dist-x86_64/rbdb-sync-helper -type f -print0)
+          [ "$BAD" = 0 ] || exit 1
+          echo "sync helper x86_64: $(du -sh dist-x86_64/rbdb-sync-helper | cut -f1 | tr -d ' ')"
+          echo '{"ops":[]}' > "$RUNNER_TEMP/smoke_plan.json"
+          SMOKE_ERR=$(arch -x86_64 "$HELPER_X86" "$RUNNER_TEMP/nonexistent.db" "$RUNNER_TEMP/smoke_plan.json" "$RUNNER_TEMP/smoke_out.json" 2>&1 >/dev/null || true)
+          echo "smoke x86_64 stderr: $SMOKE_ERR"
+          if ! grep -q '"db_not_found"' <<< "$SMOKE_ERR"; then
+            echo "::error::rbdb-sync-helper x86_64 не дошёл до открытия базы (ожидали db_not_found)"
+            exit 1
+          fi
+          RIMEO_USB_HELPER="$PWD/$HELPER_X86" .venv/bin/python -m unittest tests.test_rimeo_usb
+          # Ремонт библиотеки (#249) на Intel: AES через CommonCrypto той же арки.
+          RIMEO_MDB_HELPER="$PWD/$HELPER_X86" .venv/bin/python -m unittest tests.test_rimeo_mdb
 
       - name: Build macOS app (Universal — arm64 + x86_64)
         run: |
@@ -129,6 +194,13 @@ jobs:
             exit 1
           fi
           ditto "$SYNC_HELPER" "$APP/Contents/Resources/rbdb-sync-helper"
+          # Помощник для Intel-маков — вторая папка рядом (см. шаг «…for Intel Macs»).
+          SYNC_HELPER_X86="$GITHUB_WORKSPACE/rbdb_sync_helper/dist-x86_64/rbdb-sync-helper"
+          if [ ! -x "$SYNC_HELPER_X86/rbdb-sync-helper" ]; then
+            echo "::error::rbdb-sync-helper x86_64 не найден — на Intel не будет Sync и проверки флешки"
+            exit 1
+          fi
+          ditto "$SYNC_HELPER_X86" "$APP/Contents/Resources/rbdb-sync-helper-x86_64"
           cp -R "$SQLCIPHER_FRAMEWORK" "$APP/Contents/Frameworks/SQLCipher.framework"
           install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/rbdb-helper"
           cp build/Info.plist "$APP/Contents/Info.plist"
@@ -195,10 +267,12 @@ jobs:
           # rbdb-sync-helper (onedir в Contents/Resources): каждый .so/.dylib подписываем сами —
           # codesign --deep в Resources код не ищет, а нотаризация требует подписи у ВСЕХ Mach-O.
           # Подробности — в rbdb_sync_helper/sign_helper_dir.sh и sync-helper.entitlements.
-          bash "$GITHUB_WORKSPACE/rbdb_sync_helper/sign_helper_dir.sh" \
-               "$APP/Contents/Resources/rbdb-sync-helper" "$ID" \
-               "$GITHUB_WORKSPACE/macos_arm64/build/sync-helper.entitlements" \
-               --timestamp --options runtime
+          for d in rbdb-sync-helper rbdb-sync-helper-x86_64; do
+            bash "$GITHUB_WORKSPACE/rbdb_sync_helper/sign_helper_dir.sh" \
+                 "$APP/Contents/Resources/$d" "$ID" \
+                 "$GITHUB_WORKSPACE/macos_arm64/build/sync-helper.entitlements" \
+                 --timestamp --options runtime
+          done
           codesign --force --timestamp --options runtime --sign "$ID" "$APP/Contents/MacOS/RimeoAgent"
           codesign --force --timestamp --options runtime --sign "$ID" --identifier app.rimeo.agent "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
@@ -211,6 +285,12 @@ jobs:
           echo "signed smoke stderr: $SMOKE_ERR"
           if ! grep -q '"db_not_found"' <<< "$SMOKE_ERR"; then
             echo "::error::подписанный rbdb-sync-helper не запускается (hardened runtime / library validation)"
+            exit 1
+          fi
+          SMOKE_ERR=$(arch -x86_64 "$APP/Contents/Resources/rbdb-sync-helper-x86_64/rbdb-sync-helper" "$RUNNER_TEMP/nonexistent.db" "$RUNNER_TEMP/smoke_plan.json" "$RUNNER_TEMP/smoke_out.json" 2>&1 >/dev/null || true)
+          echo "signed smoke x86_64 stderr: $SMOKE_ERR"
+          if ! grep -q '"db_not_found"' <<< "$SMOKE_ERR"; then
+            echo "::error::подписанный rbdb-sync-helper x86_64 не запускается"
             exit 1
           fi
           # Хелпер не должен ничего дописывать в бандл при запуске (__pycache__ и т.п.) —
@@ -482,6 +562,33 @@ jobs:
             exit 1
           }
           Write-Host "smoke OK: pyrekordbox + sqlcipher3 импортируются, хелпер дошёл до открытия базы"
+
+          # USB-флешки (#248): пакет rimeo_usb в сборке. Полные тесты формата идут на маковой леге.
+          '{}' | Set-Content -Path "$env:RUNNER_TEMP\usb_ping.json" -Encoding utf8
+          & $helperExe usb ping "$env:RUNNER_TEMP\usb_ping.json" "$env:RUNNER_TEMP\usb_ping_out.json" | Out-Null
+          $ping = if (Test-Path "$env:RUNNER_TEMP\usb_ping_out.json") { Get-Content "$env:RUNNER_TEMP\usb_ping_out.json" -Raw | ConvertFrom-Json } else { $null }
+          if ($LASTEXITCODE -ne 0 -or -not $ping.ok) {
+            Write-Host "::error::rbdb-sync-helper.exe не отвечает на usb ping — вкладка USB на Windows не заработает"
+            exit 1
+          }
+          Write-Host "usb ping OK: api $($ping.api)"
+
+          # Ремонт библиотеки Rekordbox (#249). На Windows своя расшифровка страниц идёт через CNG
+          # (bcrypt.dll), а не CommonCrypto — проверяем и исходники (тесты движка), и сборку:
+          # selftest шифрует базу самим SQLCipher и расшифровывает нашим AES страница в страницу.
+          .venv\Scripts\python.exe -m unittest tests.test_rimeo_mdb
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::тесты ремонта библиотеки (rimeo_mdb) упали на Windows"
+            exit 1
+          }
+          "{`"work_dir`": `"$($env:RUNNER_TEMP -replace '\\', '/')/mdb_selftest`"}" | Set-Content -Path "$env:RUNNER_TEMP\mdb_selftest.json" -Encoding utf8
+          & $helperExe mdb selftest "$env:RUNNER_TEMP\mdb_selftest.json" "$env:RUNNER_TEMP\mdb_selftest_out.json" | Out-Null
+          $st = if (Test-Path "$env:RUNNER_TEMP\mdb_selftest_out.json") { Get-Content "$env:RUNNER_TEMP\mdb_selftest_out.json" -Raw | ConvertFrom-Json } else { $null }
+          if ($LASTEXITCODE -ne 0 -or -not $st.ok) {
+            Write-Host "::error::rbdb-sync-helper.exe mdb selftest не прошёл — ремонт библиотеки на Windows не заработает"
+            exit 1
+          }
+          Write-Host "mdb selftest OK: AES $($st.aes), $($st.pages) pages, $($st.ms) ms"
 
       - name: Publish
         shell: pwsh
