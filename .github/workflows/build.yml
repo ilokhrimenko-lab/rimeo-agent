@@ -7,6 +7,12 @@ on:
         description: 'Ветка или тег закрытого rimeo-agent-src (пробная сборка без релиза)'
         required: false
         default: 'main'
+      variant:
+        description: 'release — обычная сборка; sandbox — мак-песочница для E2E (-DSANDBOX, app.rimeo.agent.sandbox, без нотаризации, без Windows)'
+        required: false
+        type: choice
+        options: [release, sandbox]
+        default: release
   push:
     tags:
       - 'v*'
@@ -18,6 +24,8 @@ jobs:
     name: macOS Apple Silicon (arm64)
     runs-on: macos-latest
     if: "!startsWith(github.ref_name, 'win-')"
+    env:
+      VARIANT: ${{ inputs.variant || 'release' }}
     steps:
       # Исходники агента живут в закрытом ilokhrimenko-lab/rimeo-agent-src (с 22.09.2026).
       # Этот публичный репозиторий держит только сборку и релизы: автообновление агентов,
@@ -159,7 +167,11 @@ jobs:
       - name: Build macOS app (Universal — arm64 + x86_64)
         run: |
           cd macos_arm64
-          swift build -c release --arch arm64 --arch x86_64
+          # variant=sandbox (E2E, PM 18.11): своя папка RimeoAgentSandbox, порт 8043, видит только
+          # образ флешки RIMEOSBX, без автообновлений и автозапуска. Сервер — настоящий rimeo.app.
+          SWIFT_DEFS=""
+          [ "$VARIANT" = "sandbox" ] && SWIFT_DEFS="-Xswiftc -DSANDBOX"
+          swift build -c release --arch arm64 --arch x86_64 $SWIFT_DEFS
 
           UNIVERSAL="$PWD/.build/apple/Products/Release/RimeoAgent"
           HELPER="$PWD/.build/apple/Products/Release/RekordboxDBHelper"
@@ -177,6 +189,10 @@ jobs:
             exit 1
           fi
           echo "Universal archs: $(lipo -archs "$UNIVERSAL")"
+          # Песочница не должна уйти в релиз, а релиз — оказаться песочницей.
+          if grep -q "RimeoAgentSandbox" "$UNIVERSAL"; then IS_SBX=1; else IS_SBX=0; fi
+          if [ "$VARIANT" = "sandbox" ] && [ "$IS_SBX" != 1 ]; then echo "::error::sandbox variant built without SANDBOX"; exit 1; fi
+          if [ "$VARIANT" != "sandbox" ] && [ "$IS_SBX" = 1 ]; then echo "::error::release build contains the SANDBOX code"; exit 1; fi
           echo "Helper archs: $(lipo -archs "$HELPER")"
 
           APP="$GITHUB_WORKSPACE/dist/RimeoAgent.app"
@@ -217,17 +233,28 @@ jobs:
           # Кладём ДО подписи: Contents/Library входит в опечатанный бандл, дописать плист
           # после codesign нельзя — это сломает `codesign --verify --deep --strict`, который
           # агент прогоняет на КАЖДОМ автообновлении (UpdateSignatureVerifier).
-          mkdir -p "$APP/Contents/Library/LaunchAgents"
-          cp build/app.rimeo.agent.autostart.plist "$APP/Contents/Library/LaunchAgents/app.rimeo.agent.autostart.plist"
+          if [ "$VARIANT" = "sandbox" ]; then
+            # Как macos_arm64/sandbox/sbx.sh: свой bundle id и своя URL-схема, без LaunchAgent.
+            /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier app.rimeo.agent.sandbox" \
+                -c "Set :CFBundleName Rimeo Agent Sandbox" -c "Set :CFBundleDisplayName Rimeo Agent Sandbox" \
+                -c "Set :CFBundleURLTypes:0:CFBundleURLName app.rimeo.agent.sandbox" \
+                -c "Set :CFBundleURLTypes:0:CFBundleURLSchemes:0 rimeo-agent-sandbox" "$APP/Contents/Info.plist"
+            /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" -c "Print :CFBundleURLTypes:0:CFBundleURLSchemes:0" "$APP/Contents/Info.plist"
+          else
+            mkdir -p "$APP/Contents/Library/LaunchAgents"
+            cp build/app.rimeo.agent.autostart.plist "$APP/Contents/Library/LaunchAgents/app.rimeo.agent.autostart.plist"
+          fi
 
       # Тесты агента на маке. OverlaySheetMetricsTests (#269, размер окон поверх агента) — обязательно.
       # Полный набор пока на пробу (PM 18.11): сколько идёт и стабилен ли; если ~10 мин и зелёный —
       # сделать обязательным. Отладочная сборка своя (.build/debug), релизную выше не трогает.
       - name: Agent tests (macOS, OverlaySheetMetricsTests)
+        if: env.VARIANT != 'sandbox'
         working-directory: macos_arm64
         run: swift test --filter OverlaySheetMetricsTests
 
       - name: Agent tests (macOS, full suite, trial)
+        if: env.VARIANT != 'sandbox'
         continue-on-error: true
         timeout-minutes: 25
         working-directory: macos_arm64
@@ -294,7 +321,9 @@ jobs:
                  --timestamp --options runtime
           done
           codesign --force --timestamp --options runtime --sign "$ID" "$APP/Contents/MacOS/RimeoAgent"
-          codesign --force --timestamp --options runtime --sign "$ID" --identifier app.rimeo.agent "$APP"
+          BID=app.rimeo.agent
+          [ "$VARIANT" = "sandbox" ] && BID=app.rimeo.agent.sandbox
+          codesign --force --timestamp --options runtime --sign "$ID" --identifier "$BID" "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
           codesign -dvv "$APP" 2>&1 | grep -E "Identifier|Authority|TeamIdentifier|Sealed"
           # Дымовой прогон ПОДПИСАННОГО хелпера: hardened runtime + library validation
@@ -318,6 +347,7 @@ jobs:
           codesign --verify --deep --strict "$APP"
 
       - name: Notarize & staple macOS app
+        if: env.VARIANT != 'sandbox'
         env:
           ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
           ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
@@ -344,6 +374,7 @@ jobs:
           spctl --assess --type execute --verbose=4 "$APP" || true
 
       - name: Package
+        if: env.VARIANT != 'sandbox'
         run: |
           cd dist
           ditto -c -k --sequesterRsrc --keepParent RimeoAgent.app RimeoAgent_mac.zip
@@ -353,6 +384,7 @@ jobs:
       # RimeoAgent_mac.zip при этом НЕ уходит: на его имя завязан UpdateChecker
       # всех установленных агентов, релиз обязан содержать оба ассета.
       - name: Build DMG
+        if: env.VARIANT != 'sandbox'
         run: |
           set -e
           # dmgbuild ставим в venv: python3 на раннере Homebrew-managed (PEP 668),
@@ -370,6 +402,7 @@ jobs:
           fi
 
       - name: Sign DMG (Developer ID)
+        if: env.VARIANT != 'sandbox'
         env:
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
           SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
@@ -387,6 +420,7 @@ jobs:
           codesign --verify --strict --verbose=2 "$DMG"
 
       - name: Notarize & staple DMG
+        if: env.VARIANT != 'sandbox'
         env:
           ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
           ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
@@ -407,7 +441,23 @@ jobs:
           xcrun stapler validate "$DMG"
           spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG" || true
 
+      - name: Package sandbox
+        if: env.VARIANT == 'sandbox'
+        run: |
+          cd dist
+          ditto RimeoAgent.app "Rimeo Agent Sandbox.app"
+          codesign --verify --deep --strict "Rimeo Agent Sandbox.app"
+          ditto -c -k --sequesterRsrc --keepParent "Rimeo Agent Sandbox.app" RimeoAgentSandbox_mac.zip
+          shasum -a 256 RimeoAgentSandbox_mac.zip
+
       - uses: actions/upload-artifact@v4
+        if: env.VARIANT == 'sandbox'
+        with:
+          name: mac-sandbox
+          path: dist/RimeoAgentSandbox_mac.zip
+
+      - uses: actions/upload-artifact@v4
+        if: env.VARIANT != 'sandbox'
         with:
           name: mac
           path: |
@@ -417,7 +467,7 @@ jobs:
   build-windows:
     name: Windows (${{ matrix.arch }})
     runs-on: windows-2022
-    if: "!startsWith(github.ref_name, 'mac-')"
+    if: "!startsWith(github.ref_name, 'mac-') && inputs.variant != 'sandbox'"
     strategy:
       fail-fast: false
       matrix:
