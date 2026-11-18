@@ -246,17 +246,16 @@ jobs:
           fi
 
       # Тесты агента на маке. OverlaySheetMetricsTests (#269, размер окон поверх агента) и
-      # UsageEventsTests (#260/#272, события агента: запуск, обновление, коды ошибок) — обязательно.
-      # Полный набор пока на пробу (PM 18.11): сколько идёт и стабилен ли; если ~10 мин и зелёный —
-      # сделать обязательным. Отладочная сборка своя (.build/debug), релизную выше не трогает.
+      # UsageEventsTests (#260/#272, события агента: запуск, обновление, коды ошибок) — первыми, быстро.
+      # Полный набор — обязательно с 308 (PM 18.11: на пробе CI 280–283 зелёный, ~6 мин).
+      # Отладочная сборка своя (.build/debug), релизную выше не трогает.
       - name: Agent tests (macOS, OverlaySheetMetricsTests, UsageEventsTests)
         if: env.VARIANT != 'sandbox'
         working-directory: macos_arm64
         run: swift test --filter 'OverlaySheetMetricsTests|UsageEventsTests'
 
-      - name: Agent tests (macOS, full suite, trial)
+      - name: Agent tests (macOS, full suite)
         if: env.VARIANT != 'sandbox'
-        continue-on-error: true
         timeout-minutes: 25
         working-directory: macos_arm64
         run: |
