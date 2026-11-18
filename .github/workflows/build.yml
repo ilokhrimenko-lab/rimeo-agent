@@ -245,13 +245,14 @@ jobs:
             cp build/app.rimeo.agent.autostart.plist "$APP/Contents/Library/LaunchAgents/app.rimeo.agent.autostart.plist"
           fi
 
-      # Тесты агента на маке. OverlaySheetMetricsTests (#269, размер окон поверх агента) — обязательно.
+      # Тесты агента на маке. OverlaySheetMetricsTests (#269, размер окон поверх агента) и
+      # UsageEventsTests (#260/#272, события агента: запуск, обновление, коды ошибок) — обязательно.
       # Полный набор пока на пробу (PM 18.11): сколько идёт и стабилен ли; если ~10 мин и зелёный —
       # сделать обязательным. Отладочная сборка своя (.build/debug), релизную выше не трогает.
-      - name: Agent tests (macOS, OverlaySheetMetricsTests)
+      - name: Agent tests (macOS, OverlaySheetMetricsTests, UsageEventsTests)
         if: env.VARIANT != 'sandbox'
         working-directory: macos_arm64
-        run: swift test --filter OverlaySheetMetricsTests
+        run: swift test --filter 'OverlaySheetMetricsTests|UsageEventsTests'
 
       - name: Agent tests (macOS, full suite, trial)
         if: env.VARIANT != 'sandbox'
@@ -534,6 +535,20 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } else {
             Write-Host "RimeoAgent.PortTests not in this source tree, skipping"
+          }
+
+      # #272: события агента (UsageRulesTests: запуск, обновление, всплески сбоев, коды) — обязательно.
+      # Чистая логика без WinUI, проект RimeoAgent.Tests. Старые теги без этих тестов пропускают шаг.
+      - name: Agent event tests (Windows, UsageRules)
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        working-directory: windows_csharp
+        run: |
+          if (Test-Path RimeoAgent.Tests/UsageRulesTests.cs) {
+            dotnet test RimeoAgent.Tests/RimeoAgent.Tests.csproj -c Release --filter "FullyQualifiedName~UsageRules" --logger "console;verbosity=normal"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            Write-Host "UsageRulesTests not in this source tree, skipping"
           }
 
       - name: Restore
