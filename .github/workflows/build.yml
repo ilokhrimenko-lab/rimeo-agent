@@ -120,6 +120,12 @@ jobs:
           # Ремонт библиотеки Rekordbox (#249): тесты движка по СОБРАННОМУ бинарю — заодно видно,
           # что пакет rimeo_mdb и sqlcipher3 доехали в сборку, а AES (CommonCrypto) работает.
           RIMEO_MDB_HELPER="$PWD/$HELPER_BIN" .venv/bin/python -m unittest tests.test_rimeo_mdb
+
+          # Запись MyTag (#250): op mytag по СОБРАННОМУ бинарю, на базе со схемой Rekordbox.
+          # Тест есть только в исходниках с записью MyTag — в остальных шаг пропускается.
+          if [ -f tests/test_mytag.py ]; then
+            RIMEO_SYNC_HELPER="$PWD/$HELPER_BIN" .venv/bin/python -m unittest tests.test_mytag
+          fi
       - name: Build Rekordbox sync helper for Intel Macs (x86_64, frozen)
         run: |
           set -euo pipefail
@@ -163,6 +169,10 @@ jobs:
           RIMEO_USB_HELPER="$PWD/$HELPER_X86" .venv/bin/python -m unittest tests.test_rimeo_usb
           # Ремонт библиотеки (#249) на Intel: AES через CommonCrypto той же арки.
           RIMEO_MDB_HELPER="$PWD/$HELPER_X86" .venv/bin/python -m unittest tests.test_rimeo_mdb
+          # Запись MyTag (#250) на Intel — тем же тестом по бинарю x86_64.
+          if [ -f tests/test_mytag.py ]; then
+            RIMEO_SYNC_HELPER="$PWD/$HELPER_X86" .venv/bin/python -m unittest tests.test_mytag
+          fi
 
       - name: Build macOS app (Universal — arm64 + x86_64)
         run: |
@@ -664,6 +674,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             Write-Host "::error::тесты ремонта библиотеки (rimeo_mdb) упали на Windows"
             exit 1
+          }
+          # Запись MyTag (#250): op mytag по собранному rbdb-sync-helper.exe. Тест есть только в
+          # исходниках с записью MyTag — в остальных шаг пропускается.
+          if (Test-Path "tests\test_mytag.py") {
+            $env:RIMEO_SYNC_HELPER = (Resolve-Path $helperExe).Path
+            .venv\Scripts\python.exe -m unittest tests.test_mytag
+            $mytagRc = $LASTEXITCODE
+            Remove-Item Env:RIMEO_SYNC_HELPER
+            if ($mytagRc -ne 0) {
+              Write-Host "::error::тесты записи MyTag (op mytag) упали на Windows"
+              exit 1
+            }
           }
           "{`"work_dir`": `"$($env:RUNNER_TEMP -replace '\\', '/')/mdb_selftest`"}" | Set-Content -Path "$env:RUNNER_TEMP\mdb_selftest.json" -Encoding utf8
           & $helperExe mdb selftest "$env:RUNNER_TEMP\mdb_selftest.json" "$env:RUNNER_TEMP\mdb_selftest_out.json" | Out-Null
